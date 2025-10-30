@@ -42,6 +42,20 @@ npm install
 
 3. Configure `config.yaml` with your model paths and settings
 
+4. Start the application (both frontend and backend)
+```bash
+python scripts/start.py
+```
+
+This will:
+- Start the backend server
+- Launch the frontend development server
+- Open your browser to the application automatically
+- Press Ctrl+C in the terminal to stop all services
+```
+
+3. Configure `config.yaml` with your model paths and settings
+
 4. Start the bridge
 ```bash
 python scripts/run_bridge.py
