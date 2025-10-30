@@ -9,15 +9,16 @@ import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Separator } from "./components/ui/separator";
-import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2 } from "lucide-react";
+import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
+import type { MemoryEdge, MemoryNode } from "./types/memory";
+import { buildMemoryNodeDetail, computeMemoryInsights } from "./utils/memory";
+import type { MemoryNodeDetail, MemoryInsightEntry } from "./utils/memory";
 
 /** Nomous â€" Autonomy Dashboard (fixed) */
 export type NomousStatus = "idle" | "thinking" | "speaking" | "noticing" | "learning" | "error";
 interface BehaviorStats { onTopic: number; brevity: number; responsiveness: number; nonsenseRate: number; rewardTotal: number; }
 interface TokenPoint { t: number; inTok: number; outTok: number }
-interface MemoryEdge { id: string; from: string; to: string; weight: number }
-interface MemoryNode { id: string; label: string; strength: number; kind: "stimulus" | "concept" | "event" | "self" }
 interface WSMessage {
   type: string;
   value?: string;
@@ -448,38 +449,302 @@ function Meter({ value, label }: { value: number; label: string }) {
   );
 }
 
-function MemoryGraph({ nodes, edges }: { nodes: MemoryNode[]; edges: MemoryEdge[] }) {
+interface MemoryGraphProps {
+  nodes: MemoryNode[];
+  edges: MemoryEdge[];
+  selectedNodeId?: string | null;
+  onSelect?: (id: string) => void;
+}
+
+function MemoryGraph({ nodes, edges, selectedNodeId, onSelect }: MemoryGraphProps) {
   const layout = React.useMemo(() => {
-    const width = 560, height = 300;
+    const width = 560;
+    const height = 320;
     const buckets: Record<MemoryNode["kind"], MemoryNode[]> = { stimulus: [], concept: [], event: [], self: [] };
-    nodes.forEach(n => buckets[n.kind].push(n));
-    const xSlots: Record<MemoryNode["kind"], number> = { stimulus: 80, event: width/2, concept: width-80, self: width/2 };
-    const yStep = (arr: MemoryNode[]) => arr.length>1 ? height/(arr.length+1) : height/2;
-    const pos = new Map<string, {x:number,y:number}>();
-    (Object.keys(buckets) as MemoryNode["kind"][]).forEach(k => {
-      const arr = buckets[k];
-      arr.forEach((n, i) => pos.set(n.id, { x: xSlots[k], y: (i+1)*yStep(arr) }));
+    nodes.forEach(node => buckets[node.kind].push(node));
+    const xSlots: Record<MemoryNode["kind"], number> = { stimulus: 80, event: width / 2, concept: width - 80, self: width / 2 };
+    const yStep = (arr: MemoryNode[]) => (arr.length > 1 ? height / (arr.length + 1) : height / 2);
+    const pos = new Map<string, { x: number; y: number }>();
+    (Object.keys(buckets) as MemoryNode["kind"][]).forEach(kind => {
+      const arr = buckets[kind];
+      arr.forEach((node, index) => pos.set(node.id, { x: xSlots[kind], y: (index + 1) * yStep(arr) }));
     });
     return { width, height, pos };
   }, [nodes]);
 
+  const connectedNodes = React.useMemo(() => {
+    if (!selectedNodeId) {
+      return new Set<string>();
+    }
+    const set = new Set<string>([selectedNodeId]);
+    edges.forEach(edge => {
+      if (edge.from === selectedNodeId || edge.to === selectedNodeId) {
+        set.add(edge.from);
+        set.add(edge.to);
+      }
+    });
+    return set;
+  }, [selectedNodeId, edges]);
+
+  const activeEdges = React.useMemo(() => {
+    if (!selectedNodeId) {
+      return new Set(edges.map(edge => edge.id));
+    }
+    return new Set(
+      edges
+        .filter(edge => edge.from === selectedNodeId || edge.to === selectedNodeId)
+        .map(edge => edge.id),
+    );
+  }, [selectedNodeId, edges]);
+
+  const handleSelect = useCallback(
+    (id: string) => {
+      onSelect?.(id);
+    },
+    [onSelect],
+  );
+
+  const handleKey = useCallback(
+    (event: React.KeyboardEvent<SVGGElement>, id: string) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onSelect?.(id);
+      }
+    },
+    [onSelect],
+  );
+
   return (
-    <svg width="100%" height="300" viewBox={`0 0 ${layout.width} ${layout.height}`} className="rounded-xl bg-zinc-900/60">
-      {edges.map(e => {
-        const a = layout.pos.get(e.from)!; const b = layout.pos.get(e.to)!;
-        return <line key={e.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="currentColor" strokeOpacity={0.35+e.weight*0.5} strokeWidth={1+e.weight*2} className="text-zinc-200"/>;
-      })}
-      {nodes.map(n => {
-        const p = layout.pos.get(n.id)!;
-        const fill = n.kind === "self" ? "fill-emerald-500" : n.kind === "stimulus" ? "fill-amber-500" : n.kind === "event" ? "fill-cyan-500" : "fill-purple-500";
+    <svg
+      width="100%"
+      height="320"
+      viewBox={`0 0 ${layout.width} ${layout.height}`}
+      className="rounded-xl bg-zinc-900/60"
+      role="list"
+      aria-label="Nomous memory graph"
+    >
+      {edges.map(edge => {
+        const from = layout.pos.get(edge.from);
+        const to = layout.pos.get(edge.to);
+        if (!from || !to) {
+          return null;
+        }
+        const isActive = activeEdges.has(edge.id);
+        const strokeOpacity = isActive ? 0.45 + edge.weight * 0.45 : 0.15;
+        const strokeWidth = isActive ? 1.4 + edge.weight * 2.2 : 0.8 + edge.weight;
         return (
-          <g key={n.id}>
-            <circle cx={p.x} cy={p.y} r={10 + n.strength*10} className={`${fill}`} opacity={0.95} />
-            <text x={p.x} y={p.y-16- n.strength*6} textAnchor="middle" className="fill-zinc-50 text-xs">{n.label}</text>
+          <line
+            key={edge.id}
+            x1={from.x}
+            y1={from.y}
+            x2={to.x}
+            y2={to.y}
+            stroke="currentColor"
+            strokeOpacity={strokeOpacity}
+            strokeWidth={strokeWidth}
+            className={isActive ? "text-emerald-300" : "text-zinc-600"}
+          />
+        );
+      })}
+      {nodes.map(node => {
+        const position = layout.pos.get(node.id);
+        if (!position) {
+          return null;
+        }
+        const fill =
+          node.kind === "self"
+            ? "fill-emerald-500"
+            : node.kind === "stimulus"
+            ? "fill-amber-500"
+            : node.kind === "event"
+            ? "fill-cyan-500"
+            : "fill-purple-500";
+        const isSelected = selectedNodeId === node.id;
+        const isConnected = connectedNodes.has(node.id);
+        const radius = 10 + node.strength * 12 + (isSelected ? 4 : 0);
+        const stroke = isSelected ? "#34d399" : isConnected ? "#818cf8" : "#1f1f23";
+        const strokeWidth = isSelected ? 3 : isConnected ? 2 : 1;
+        return (
+          <g
+            key={node.id}
+            tabIndex={0}
+            role="button"
+            aria-pressed={isSelected}
+            onClick={() => handleSelect(node.id)}
+            onKeyDown={event => handleKey(event, node.id)}
+            className="cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70"
+          >
+            <circle cx={position.x} cy={position.y} r={radius} className={fill} opacity={0.95} stroke={stroke} strokeWidth={strokeWidth} />
+            <text x={position.x} y={position.y - (18 + node.strength * 6)} textAnchor="middle" className="fill-zinc-50 text-xs drop-shadow">
+              {node.label}
+            </text>
+            <title>{node.label}</title>
           </g>
         );
       })}
     </svg>
+  );
+}
+
+function MemorySummaryStat({ label, value, helper }: { label: string; value: string; helper?: string }) {
+  return (
+    <div className="rounded-xl border border-zinc-800/60 bg-black/40 px-4 py-3">
+      <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">{label}</div>
+      <div className="text-lg font-semibold text-zinc-100">{value}</div>
+      {helper ? <div className="text-xs text-zinc-400">{helper}</div> : null}
+    </div>
+  );
+}
+
+interface MemoryListProps {
+  title: string;
+  icon: React.ReactNode;
+  entries: MemoryInsightEntry[];
+  emptyLabel: string;
+  selectedId?: string | null;
+  onSelect: (id: string) => void;
+}
+
+function MemoryList({ title, icon, entries, emptyLabel, selectedId, onSelect }: MemoryListProps) {
+  return (
+    <div className="rounded-xl border border-zinc-800/60 bg-black/40 p-3">
+      <div className="flex items-center gap-2 mb-3 text-zinc-200">
+        {icon}
+        <span className="font-semibold text-sm">{title}</span>
+      </div>
+      <div className="space-y-2">
+        {entries.length === 0 ? (
+          <div className="text-xs text-zinc-500">{emptyLabel}</div>
+        ) : (
+          entries.map(entry => {
+            const formattedTimestamp = formatTimestamp(entry.timestamp);
+            return (
+              <button
+                key={entry.id}
+                type="button"
+                onClick={() => onSelect(entry.id)}
+                className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                  entry.id === selectedId
+                    ? "border-emerald-500/60 bg-emerald-500/10"
+                    : "border-zinc-800/60 bg-zinc-950/40 hover:border-zinc-700/60"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2 text-sm text-zinc-100">
+                  <span className="truncate font-medium">{entry.label}</span>
+                  <Badge className="bg-zinc-800/70 text-zinc-200 border border-zinc-700/60">{entry.connections} links</Badge>
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-400">
+                  <span className="capitalize">{entry.kind}</span>
+                  <span>Strength {entry.strength.toFixed(2)}</span>
+                </div>
+                {entry.source ? (
+                  <div className="mt-1 text-[11px] text-emerald-300">Source: {entry.source}</div>
+                ) : null}
+                {formattedTimestamp ? (
+                  <div className="text-[11px] text-zinc-500">Updated {formattedTimestamp}</div>
+                ) : null}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatTimestamp(value?: string) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toLocaleString();
+}
+
+function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
+  if (!detail) {
+    return (
+      <Card className="h-full bg-zinc-900/70 border-dashed border-zinc-800/60">
+        <CardContent className="flex h-full items-center justify-center p-4 text-center text-sm text-zinc-400">
+          Select a memory node from the graph or insight lists to inspect its learned behaviour, context, and related connections.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const formattedTimestamp = formatTimestamp(detail.timestamp);
+
+  return (
+    <Card className="h-full bg-zinc-900/70 border-zinc-800/60">
+      <CardContent className="h-full space-y-4 p-4 text-sm text-zinc-200">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Selected Memory</div>
+            <h3 className="mt-1 text-xl font-semibold text-zinc-100">{detail.label}</h3>
+          </div>
+          <Badge className="bg-zinc-800/80 text-zinc-100 border border-zinc-700/60 capitalize">{detail.kind}</Badge>
+        </div>
+
+        {detail.description ? (
+          <p className="leading-relaxed text-zinc-300">{detail.description}</p>
+        ) : (
+          <p className="italic text-zinc-500">No narrative description provided by the runtime.</p>
+        )}
+
+        <div className="grid grid-cols-2 gap-3 text-xs">
+          <MemorySummaryStat label="Strength" value={detail.strength.toFixed(2)} helper="Association weight" />
+          <MemorySummaryStat label="Connections" value={String(detail.connections)} helper="Linked nodes" />
+          {detail.confidence !== undefined ? (
+            <MemorySummaryStat label="Confidence" value={`${Math.round(detail.confidence * 100)}%`} helper="Runtime certainty" />
+          ) : null}
+          {formattedTimestamp ? (
+            <MemorySummaryStat label="Updated" value={formattedTimestamp} helper="Last reinforcement" />
+          ) : null}
+          {detail.source ? (
+            <MemorySummaryStat label="Source" value={detail.source} helper="Input channel" />
+          ) : null}
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-xs font-semibold uppercase tracking-[0.3em] text-zinc-500">Tags</div>
+          {detail.tags.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {detail.tags.map(tag => (
+                <Badge key={tag} className="bg-purple-500/10 text-purple-200 border border-purple-500/30">{tag}</Badge>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-zinc-500">No tags provided.</div>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.3em] text-zinc-500">
+            <Clock className="h-3.5 w-3.5" />
+            <span>Related Associations</span>
+          </div>
+          {detail.related.length > 0 ? (
+            <ul className="space-y-2">
+              {detail.related.map(relation => (
+                <li
+                  key={`${detail.id}-${relation.id}-${relation.direction}`}
+                  className="rounded-lg border border-zinc-800/60 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300"
+                >
+                  <div className="flex items-center justify-between gap-2 text-sm text-zinc-100">
+                    <span className="font-medium">{relation.label}</span>
+                    <span className="text-[11px] text-zinc-400">{relation.direction === "outbound" ? "influences" : "influenced by"}</span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-400">
+                    <span>Weight {relation.weight.toFixed(2)}</span>
+                    <span>Strength {relation.strength.toFixed(2)}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-xs text-zinc-500">No related associations recorded yet.</div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -776,6 +1041,32 @@ export default function App(){
   const st = statusMap[state.status];
   const tokenTotal = state.tokenWindow.reduce((a, p) => a + p.inTok + p.outTok, 0);
   const [controlCenterOpen, setControlCenterOpen] = useState(false);
+  const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
+  const memoryInsights = useMemo(() => computeMemoryInsights(state.memory.nodes, state.memory.edges), [state.memory.nodes, state.memory.edges]);
+
+  useEffect(() => {
+    if (selectedMemoryId && !memoryInsights.nodeById.has(selectedMemoryId)) {
+      setSelectedMemoryId(null);
+    }
+  }, [selectedMemoryId, memoryInsights]);
+
+  useEffect(() => {
+    if (selectedMemoryId || state.memory.nodes.length === 0) {
+      return;
+    }
+    const defaultSelection = memoryInsights.milestones[0]?.id ?? state.memory.nodes[0]?.id ?? null;
+    if (defaultSelection) {
+      setSelectedMemoryId(defaultSelection);
+    }
+  }, [selectedMemoryId, memoryInsights, state.memory.nodes.length]);
+
+  const selectedMemoryNode = selectedMemoryId ? memoryInsights.nodeById.get(selectedMemoryId) : undefined;
+  const selectedMemoryDetail = useMemo<MemoryNodeDetail | null>(() => {
+    if (!selectedMemoryNode) {
+      return null;
+    }
+    return buildMemoryNodeDetail(selectedMemoryNode, state.memory.edges, memoryInsights.connectionIndex, memoryInsights.nodeById);
+  }, [selectedMemoryNode, state.memory.edges, memoryInsights]);
 
   return (
     <TooltipProvider>
@@ -974,12 +1265,56 @@ export default function App(){
               </TabsContent>
 
               <TabsContent value="memory" className="pt-4">
-                <Card className="bg-zinc-900/70 border-zinc-800/60">
-                  <CardContent className="p-4 text-zinc-200">
-                    <div className="flex items-center gap-2 mb-2"><Brain className="w-4 h-4"/><span className="font-semibold">Memory Graph</span></div>
-                    <MemoryGraph nodes={state.memory.nodes} edges={state.memory.edges} />
-                  </CardContent>
-                </Card>
+                <div className="grid gap-4 xl:grid-cols-[1.7fr_1fr]">
+                  <Card className="bg-zinc-900/70 border-zinc-800/60">
+                    <CardContent className="space-y-4 p-4 text-zinc-200">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Brain className="h-4 w-4" />
+                          <span className="font-semibold">Memory Intelligence</span>
+                        </div>
+                        <Badge className="bg-zinc-800/80 text-zinc-100 border border-zinc-700/60">
+                          Nodes {memoryInsights.summary.totalNodes}
+                        </Badge>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                        <MemorySummaryStat label="Memories" value={`${memoryInsights.summary.totalNodes}`} helper="Graph nodes" />
+                        <MemorySummaryStat label="Associations" value={`${memoryInsights.summary.totalEdges}`} helper="Synapses" />
+                        <MemorySummaryStat label="Avg Strength" value={memoryInsights.summary.averageStrength.toFixed(2)} helper="Mean weight" />
+                        <MemorySummaryStat label="Density" value={`${(memoryInsights.summary.density * 100).toFixed(1)}%`} helper="Connection coverage" />
+                      </div>
+
+                      <MemoryGraph
+                        nodes={state.memory.nodes}
+                        edges={state.memory.edges}
+                        selectedNodeId={selectedMemoryId}
+                        onSelect={id => setSelectedMemoryId(id)}
+                      />
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <MemoryList
+                          title="Major Milestones"
+                          icon={<Flag className="h-4 w-4 text-emerald-300" />}
+                          entries={memoryInsights.milestones}
+                          emptyLabel="No milestone memories reported yet."
+                          selectedId={selectedMemoryId}
+                          onSelect={id => setSelectedMemoryId(id)}
+                        />
+                        <MemoryList
+                          title="Data Entry Points"
+                          icon={<Database className="h-4 w-4 text-cyan-300" />}
+                          entries={memoryInsights.dataEntries}
+                          emptyLabel="No sensory inputs stored yet."
+                          selectedId={selectedMemoryId}
+                          onSelect={id => setSelectedMemoryId(id)}
+                        />
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <MemoryDetailCard detail={selectedMemoryDetail} />
+                </div>
               </TabsContent>
 
               <TabsContent value="thoughts" className="pt-4">
