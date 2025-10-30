@@ -28,13 +28,156 @@ interface WSMessage {
   edges?: MemoryEdge[];
   message?: string;
 }
+interface ControlSettings {
+  cameraEnabled: boolean;
+  microphoneEnabled: boolean;
+  ttsEnabled: boolean;
+  speakerEnabled: boolean;
+  sttEnabled: boolean;
+  ttsVoice: string;
+  micSensitivity: number;
+  masterVolume: number;
+  cameraResolution: string;
+  cameraExposure: number;
+  cameraBrightness: number;
+  llmModelPath: string;
+  visionModelPath: string;
+  audioModelPath: string;
+  sttModelPath: string;
+  llmTemperature: number;
+  llmMaxTokens: number;
+}
+
 interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
+  settings: ControlSettings;
+}
+
+const TARGET_SAMPLE_RATE = 16000;
+
+interface MicChain {
+  ctx: AudioContext;
+  stream: MediaStream;
+  source: MediaStreamAudioSourceNode;
+  analyser: AnalyserNode;
+  processor: ScriptProcessorNode;
+  gain: GainNode;
+  raf?: number;
+  residual?: Float32Array;
+}
+
+function concatFloat32(a: Float32Array | undefined, b: Float32Array): Float32Array {
+  if (!a || a.length === 0) {
+    return b.slice();
+  }
+  const out = new Float32Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function floatTo16BitPCM(samples: Float32Array): Uint8Array {
+  const buffer = new ArrayBuffer(samples.length * 2);
+  const view = new DataView(buffer);
+  let offset = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
+  return new Uint8Array(buffer);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    const slice = bytes.subarray(i, i + chunk);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+function encodeAudioChunk(chain: MicChain, chunk: Float32Array, sampleRate: number): string | null {
+  if (chunk.length === 0) {
+    return null;
+  }
+
+  const combined = concatFloat32(chain.residual, chunk);
+  const ratio = sampleRate / TARGET_SAMPLE_RATE;
+
+  if (ratio <= 0) {
+    chain.residual = new Float32Array(0);
+    return null;
+  }
+
+  if (ratio < 1) {
+    const upRatio = TARGET_SAMPLE_RATE / sampleRate;
+    const newLength = Math.floor(combined.length * upRatio);
+    if (newLength <= 0) {
+      chain.residual = combined;
+      return null;
+    }
+    const upsampled = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i++) {
+      const idx = i / upRatio;
+      const low = Math.floor(idx);
+      const high = Math.min(low + 1, combined.length - 1);
+      const weight = idx - low;
+      const sample = combined[low] + (combined[high] - combined[low]) * weight;
+      upsampled[i] = sample;
+    }
+    chain.residual = new Float32Array(0);
+    return bytesToBase64(floatTo16BitPCM(upsampled));
+  }
+
+  const newLength = Math.floor(combined.length / ratio);
+  if (newLength <= 0) {
+    chain.residual = combined;
+    return null;
+  }
+
+  const downsampled = new Float32Array(newLength);
+  let offset = 0;
+  for (let i = 0; i < newLength; i++) {
+    const nextOffset = Math.floor((i + 1) * ratio);
+    let sum = 0;
+    let count = 0;
+    for (let j = offset; j < nextOffset && j < combined.length; j++) {
+      sum += combined[j];
+      count++;
+    }
+    downsampled[i] = count > 0 ? sum / count : 0;
+    offset = nextOffset;
+  }
+
+  chain.residual = combined.slice(offset);
+  return bytesToBase64(floatTo16BitPCM(downsampled));
 }
 
 function useNomousBridge() {
+  const defaultSettings: ControlSettings = {
+    cameraEnabled: true,
+    microphoneEnabled: false,
+    ttsEnabled: true,
+    speakerEnabled: true,
+    sttEnabled: true,
+    ttsVoice: "piper/en_US-amy-medium",
+    micSensitivity: 60,
+    masterVolume: 70,
+    cameraResolution: "1280x720",
+    cameraExposure: 45,
+    cameraBrightness: 55,
+    llmModelPath: "/models/llm/main.gguf",
+    visionModelPath: "/models/vision/runtime.bin",
+    audioModelPath: "/models/audio/piper.onnx",
+    sttModelPath: "/models/stt/whisper-small",
+    llmTemperature: 0.8,
+    llmMaxTokens: 4096,
+  };
+
   const [state, setState] = useState<DashboardState>({
     status: "idle", statusDetail: "Disconnected",
     tokenWindow: Array.from({ length: 30 }, (_, i) => ({ t: i, inTok: 0, outTok: 0 })),
@@ -43,11 +186,24 @@ function useNomousBridge() {
     audioEnabled: true, visionEnabled: true, connected: false,
     url: typeof window !== "undefined" ? (localStorage.getItem("nomous.ws") || "ws://localhost:8765") : "ws://localhost:8765",
     micOn: false, vu: 0, consoleLines: [], thoughtLines: [],
+    settings: defaultSettings,
   });
   const wsRef = useRef<WebSocket | null>(null);
-  const recRef = useRef<MediaRecorder | null>(null);
+  const micRef = useRef<MicChain | null>(null);
   const hbRef = useRef<number | null>(null);
   const tCounter = useRef(0);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = localStorage.getItem("nomous.settings");
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw);
+      setState(p => ({ ...p, settings: { ...defaultSettings, ...parsed } }));
+    } catch {
+      // ignore invalid settings payloads
+    }
+  }, []);
 
   const log = useCallback((line: string) => {
     // Filter out spam/duplicates
@@ -134,46 +290,144 @@ function useNomousBridge() {
     } catch (e: any) { log(`connect error: ${e?.message}`); }
   }, [handleMessage, log, push, state.url]);
 
-  const disconnect = useCallback(() => {
-    recRef.current?.stop(); recRef.current = null;
-    wsRef.current?.close(); wsRef.current = null;
-  }, []);
+  const stopMic = useCallback(() => {
+    const chain = micRef.current;
+    if (!chain) {
+      return;
+    }
+    micRef.current = null;
+    if (chain.raf) {
+      cancelAnimationFrame(chain.raf);
+    }
+    try {
+      chain.processor.disconnect();
+      chain.analyser.disconnect();
+      chain.gain.disconnect();
+      chain.source.disconnect();
+      chain.processor.onaudioprocess = null;
+    } catch {
+      // ignore cleanup errors
+    }
+    try {
+      chain.stream.getTracks().forEach(track => track.stop());
+    } catch {
+      // ignore
+    }
+    chain.ctx.close().catch(() => {});
+    setState(p => ({ ...p, micOn: false, vu: 0 }));
+  }, [setState]);
 
   const setMic = useCallback(async (on: boolean) => {
-    if (!on) { recRef.current?.stop(); recRef.current = null; setState(p => ({ ...p, micOn: false, vu: 0 })); return; }
+    if (!on) {
+      stopMic();
+      return;
+    }
+
+    if (typeof window === "undefined" || typeof navigator === "undefined") {
+      log("mic error: unavailable in this environment");
+      return;
+    }
+
+    if (micRef.current) {
+      return;
+    }
+
+    const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+    if (!AudioContextClass) {
+      log("mic error: AudioContext unsupported");
+      return;
+    }
+
+    let stream: MediaStream | null = null;
+    let ctx: AudioContext | null = null;
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 16000 }, video: false });
-      const ctx = new AudioContext({ sampleRate: 16000 });
-      const src = ctx.createMediaStreamSource(stream);
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, sampleRate: TARGET_SAMPLE_RATE, echoCancellation: true, noiseSuppression: true },
+        video: false,
+      });
+
+      ctx = new AudioContextClass({ sampleRate: TARGET_SAMPLE_RATE }) as AudioContext;
+      await ctx.resume();
+      const inputSampleRate = ctx.sampleRate;
+
+      if (typeof ctx.createScriptProcessor !== "function") {
+        throw new Error("ScriptProcessorNode not supported in this browser");
+      }
+
+      const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
-      analyser.fftSize = 2048; src.connect(analyser);
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      source.connect(processor);
+
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      processor.connect(gain);
+      gain.connect(ctx.destination);
+
+      const chain: MicChain = { ctx, stream, source, analyser, processor, gain, residual: new Float32Array(0) };
+      micRef.current = chain;
+
       const data = new Uint8Array(analyser.frequencyBinCount);
-      let raf: number;
       const tick = () => {
+        if (micRef.current !== chain) {
+          return;
+        }
         analyser.getByteTimeDomainData(data);
-        let peak = 0; for (let i=0;i<data.length;i++){ const v=(data[i]-128)/128; peak=Math.max(peak, Math.abs(v)); }
-        setState(p => ({ ...p, vu: Math.min(1, peak*2) }));
-        raf = requestAnimationFrame(tick);
+        let peak = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128;
+          peak = Math.max(peak, Math.abs(v));
+        }
+        setState(p => ({ ...p, vu: Math.min(1, peak * 2) }));
+        chain.raf = requestAnimationFrame(tick);
       };
       tick();
 
-      const rec = new MediaRecorder(stream);
-      recRef.current = rec;
-      rec.ondataavailable = async (ev) => {
-        if (!ev.data || ev.data.size === 0) return;
-        const buf = await ev.data.arrayBuffer();
-        const raw = new Uint8Array(buf);
-        const b64 = btoa(String.fromCharCode(...raw));
-        push({ type: "audio", rate: 16000, pcm16: b64 });
+      processor.onaudioprocess = (event) => {
+        if (micRef.current !== chain) {
+          return;
+        }
+        const channelData = event.inputBuffer.getChannelData(0);
+        const encoded = encodeAudioChunk(chain, channelData, inputSampleRate);
+        if (encoded) {
+          push({ type: "audio", rate: TARGET_SAMPLE_RATE, pcm16: encoded });
+        }
       };
-      rec.start(250);
+
       setState(p => ({ ...p, micOn: true }));
     } catch (e: any) {
-      setState(p => ({ ...p, micOn: false })); log(`mic error: ${e?.message}`);
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      if (ctx) {
+        ctx.close().catch(() => {});
+      }
+      micRef.current = null;
+      setState(p => ({ ...p, micOn: false, settings: { ...p.settings, microphoneEnabled: false }, vu: 0 }));
+      log(`mic error: ${e?.message ?? e}`);
     }
-  }, [push, log]);
+  }, [log, push, setState, stopMic]);
 
-  return { state, setState, connect, disconnect, setMic, push, log };
+  const disconnect = useCallback(() => {
+    stopMic();
+    wsRef.current?.close(); wsRef.current = null;
+  }, [stopMic]);
+
+  const updateSettings = useCallback((patch: Partial<ControlSettings>) => {
+    setState(prev => {
+      const nextSettings = { ...prev.settings, ...patch };
+      if (typeof window !== "undefined") {
+        localStorage.setItem("nomous.settings", JSON.stringify(nextSettings));
+      }
+      return { ...prev, settings: nextSettings };
+    });
+  }, []);
+
+  return { state, setState, connect, disconnect, setMic, push, log, updateSettings };
 }
 
 const statusMap: Record<NomousStatus, { color: string; label: string }> = {
@@ -229,14 +483,303 @@ function MemoryGraph({ nodes, edges }: { nodes: MemoryNode[]; edges: MemoryEdge[
   );
 }
 
+interface ControlCenterProps {
+  open: boolean;
+  onClose: () => void;
+  state: DashboardState;
+  connect: () => void;
+  disconnect: () => void;
+  setMic: (on: boolean) => void;
+  push: (data: any) => void;
+  updateSettings: (patch: Partial<ControlSettings>) => void;
+  setState: React.Dispatch<React.SetStateAction<DashboardState>>;
+}
+
+function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push, updateSettings, setState }: ControlCenterProps) {
+  const voices = useMemo(() => [
+    "piper/en_US-amy-medium",
+    "piper/en_US-kathleen-low",
+    "piper/en_GB-sarah-medium",
+    "piper/ja_JP-kokoro-high",
+    "piper/es_ES-mls_10246-low"
+  ], []);
+
+  if (!open) return null;
+
+  const handleToggle = (key: keyof ControlSettings, value: boolean, action?: () => void) => {
+    updateSettings({ [key]: value } as Partial<ControlSettings>);
+    action?.();
+  };
+
+  const sliderKey = (label: string, value: number) => `${label}-${value}`;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4 py-6">
+      <div className="relative w-full max-w-5xl max-h-[90vh] overflow-hidden rounded-3xl border border-zinc-800/70 bg-zinc-950/95 shadow-[0_30px_120px_rgba(0,0,0,0.45)]">
+        <div className="flex items-start justify-between border-b border-zinc-800/60 px-6 py-4">
+          <div>
+            <div className="text-xs uppercase tracking-[0.3em] text-zinc-500">Control Center</div>
+            <h2 className="text-2xl font-semibold text-zinc-100">Runtime, Devices &amp; LLM Settings</h2>
+            <p className="text-sm text-zinc-400">Configure every input, output, and model path for Nomous from a single glassmorphic panel.</p>
+          </div>
+          <Button variant="secondary" className="bg-zinc-800/80 hover:bg-zinc-700/80 text-zinc-100" onClick={onClose}>Close</Button>
+        </div>
+        <div className="overflow-y-auto px-6 py-6 space-y-6">
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-lg font-semibold text-zinc-100">Bridge Connection</h3>
+                <p className="text-xs text-zinc-400">Manage the WebSocket runtime bridge and endpoint.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {!state.connected ? (
+                  <Button className="bg-emerald-600/90 hover:bg-emerald-500/90 text-white" onClick={connect}><Play className="w-4 h-4 mr-1"/>Connect</Button>
+                ) : (
+                  <Button variant="danger" className="bg-red-600/90 hover:bg-red-500/90 text-white" onClick={disconnect}><Square className="w-4 h-4 mr-1"/>Disconnect</Button>
+                )}
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-[2fr_1fr]">
+              <label className="flex flex-col gap-2">
+                <span className="text-xs uppercase tracking-wide text-zinc-400">Runtime URL</span>
+                <input value={state.url} onChange={(e)=>setState(p=>({ ...p, url: e.target.value }))} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm focus:border-emerald-500/80 focus:outline-none focus:ring-0 text-zinc-100"/>
+              </label>
+              <Card className="bg-zinc-900/60 border-zinc-800/60">
+                <CardContent className="p-4 text-xs text-zinc-400 space-y-1">
+                  <div className="font-semibold text-zinc-200 text-sm">Status</div>
+                  <div className="flex items-center gap-2 text-zinc-300"><span className={`w-2.5 h-2.5 rounded-full ${state.connected ? "bg-emerald-500" : "bg-red-500"}`}></span>{state.connected ? "Connected" : "Disconnected"}</div>
+                  <div className="text-zinc-500">The UI will remember this endpoint and auto-reconnect.</div>
+                </CardContent>
+              </Card>
+            </div>
+          </section>
+
+          <Separator className="bg-zinc-800/60" />
+
+          <section className="grid gap-4 lg:grid-cols-2">
+            <Card className="bg-zinc-900/60 border-zinc-800/60">
+              <CardContent className="space-y-4 p-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-zinc-100">Device Routing</h3>
+                  <p className="text-xs text-zinc-400">Toggle hardware inputs &amp; outputs used by the autonomy stack.</p>
+                </div>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Camera className="w-4 h-4"/>Camera</div>
+                      <p className="text-xs text-zinc-400">Enable or disable vision streaming to the runtime.</p>
+                    </div>
+                    <Switch checked={state.settings.cameraEnabled} onCheckedChange={(value)=>{
+                      handleToggle("cameraEnabled", value, () => {
+                        setState(p => ({ ...p, visionEnabled: value }));
+                        push({ type: "toggle", what: "vision", value });
+                      });
+                    }}/>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Mic className="w-4 h-4"/>Microphone Capture</div>
+                      <p className="text-xs text-zinc-400">Stream live audio into STT and conversational buffers.</p>
+                    </div>
+                    <Switch checked={state.settings.microphoneEnabled || state.micOn} onCheckedChange={(value)=>{
+                      handleToggle("microphoneEnabled", value, () => setMic(value));
+                    }}/>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Volume2 className="w-4 h-4"/>Speaker Output</div>
+                      <p className="text-xs text-zinc-400">Route TTS audio to speakers and remote peers.</p>
+                    </div>
+                    <Switch checked={state.settings.speakerEnabled} onCheckedChange={(value)=>{
+                      handleToggle("speakerEnabled", value, () => push({ type: "toggle", what: "speaker", value }));
+                    }}/>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Radio className="w-4 h-4"/>Text-to-Speech</div>
+                      <p className="text-xs text-zinc-400">Controls synthetic voice playback in the runtime.</p>
+                    </div>
+                    <Switch checked={state.settings.ttsEnabled && state.audioEnabled} onCheckedChange={(value)=>{
+                      handleToggle("ttsEnabled", value, () => {
+                        setState(p => ({ ...p, audioEnabled: value }));
+                        push({ type: "toggle", what: "tts", value });
+                      });
+                    }}/>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Brain className="w-4 h-4"/>Speech-to-Text</div>
+                      <p className="text-xs text-zinc-400">Enable transcription for microphone and streamed audio.</p>
+                    </div>
+                    <Switch checked={state.settings.sttEnabled} onCheckedChange={(value)=>{
+                      handleToggle("sttEnabled", value, () => push({ type: "toggle", what: "stt", value }));
+                    }}/>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-zinc-900/60 border-zinc-800/60">
+              <CardContent className="space-y-4 p-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-zinc-100">Audio Pipeline</h3>
+                  <p className="text-xs text-zinc-400">Tune voice characteristics, sensitivity, and levels.</p>
+                </div>
+                <div className="space-y-4">
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">Piper Voice</span>
+                    <select value={state.settings.ttsVoice} onChange={(e)=>{
+                      updateSettings({ ttsVoice: e.target.value });
+                      push({ type: "param", key: "tts_voice", value: e.target.value });
+                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none">
+                      {voices.map(v => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  </label>
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Mic Sensitivity</span><span>{state.settings.micSensitivity}%</span></div>
+                    <Slider key={sliderKey("mic", state.settings.micSensitivity)} defaultValue={[state.settings.micSensitivity]} min={0} max={100} step={5} onValueChange={(v)=>{
+                      updateSettings({ micSensitivity: v[0] });
+                      push({ type: "param", key: "mic_sensitivity", value: v[0] });
+                    }}/>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Output Volume</span><span>{state.settings.masterVolume}%</span></div>
+                    <Slider key={sliderKey("vol", state.settings.masterVolume)} defaultValue={[state.settings.masterVolume]} min={0} max={100} step={5} onValueChange={(v)=>{
+                      updateSettings({ masterVolume: v[0] });
+                      push({ type: "param", key: "master_volume", value: v[0] });
+                    }}/>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+
+          <Separator className="bg-zinc-800/60" />
+
+          <section className="grid gap-4 lg:grid-cols-2">
+            <Card className="bg-zinc-900/60 border-zinc-800/60">
+              <CardContent className="space-y-4 p-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-zinc-100">Camera Configuration</h3>
+                  <p className="text-xs text-zinc-400">Frame rate, exposure, and clarity tuning for the perception stack.</p>
+                </div>
+                <div className="space-y-4">
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">Resolution</span>
+                    <select value={state.settings.cameraResolution} onChange={(e)=>{
+                      updateSettings({ cameraResolution: e.target.value });
+                      push({ type: "param", key: "camera_resolution", value: e.target.value });
+                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none">
+                      {['1920x1080','1280x720','1024x576','640x480'].map(res => <option key={res} value={res}>{res}</option>)}
+                    </select>
+                  </label>
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Exposure</span><span>{state.settings.cameraExposure}%</span></div>
+                    <Slider key={sliderKey("exposure", state.settings.cameraExposure)} defaultValue={[state.settings.cameraExposure]} min={0} max={100} step={5} onValueChange={(v)=>{
+                      updateSettings({ cameraExposure: v[0] });
+                      push({ type: "param", key: "camera_exposure", value: v[0] });
+                    }}/>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Brightness</span><span>{state.settings.cameraBrightness}%</span></div>
+                    <Slider key={sliderKey("brightness", state.settings.cameraBrightness)} defaultValue={[state.settings.cameraBrightness]} min={0} max={100} step={5} onValueChange={(v)=>{
+                      updateSettings({ cameraBrightness: v[0] });
+                      push({ type: "param", key: "camera_brightness", value: v[0] });
+                    }}/>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-zinc-900/60 border-zinc-800/60">
+              <CardContent className="space-y-4 p-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-zinc-100">LLM Runtime</h3>
+                  <p className="text-xs text-zinc-400">All controls that shape cognition stay together for clarity.</p>
+                </div>
+                <div className="space-y-3">
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">Conversation Model</span>
+                    <input value={state.settings.llmModelPath} onChange={(e)=>{
+                      updateSettings({ llmModelPath: e.target.value });
+                      push({ type: "param", key: "llm_model_path", value: e.target.value });
+                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
+                  </label>
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">Vision Model</span>
+                    <input value={state.settings.visionModelPath} onChange={(e)=>{
+                      updateSettings({ visionModelPath: e.target.value });
+                      push({ type: "param", key: "vision_model_path", value: e.target.value });
+                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
+                  </label>
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">Audio Model</span>
+                    <input value={state.settings.audioModelPath} onChange={(e)=>{
+                      updateSettings({ audioModelPath: e.target.value });
+                      push({ type: "param", key: "audio_model_path", value: e.target.value });
+                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
+                  </label>
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">STT Model</span>
+                    <input value={state.settings.sttModelPath} onChange={(e)=>{
+                      updateSettings({ sttModelPath: e.target.value });
+                      push({ type: "param", key: "stt_model_path", value: e.target.value });
+                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
+                  </label>
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Temperature</span><span>{state.settings.llmTemperature.toFixed(2)}</span></div>
+                    <Slider key={sliderKey("temp", Math.round(state.settings.llmTemperature*100))} defaultValue={[Math.round(state.settings.llmTemperature*100)]} min={0} max={120} step={5} onValueChange={(v)=>{
+                      const val = Math.round((v[0] / 100) * 100) / 100;
+                      updateSettings({ llmTemperature: val });
+                      push({ type: "param", key: "llm_temperature", value: val });
+                    }}/>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Max Tokens</span><span>{state.settings.llmMaxTokens}</span></div>
+                    <Slider key={sliderKey("maxtok", state.settings.llmMaxTokens)} defaultValue={[state.settings.llmMaxTokens]} min={512} max={8192} step={256} onValueChange={(v)=>{
+                      updateSettings({ llmMaxTokens: v[0] });
+                      push({ type: "param", key: "llm_max_tokens", value: v[0] });
+                    }}/>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+
+          <Separator className="bg-zinc-800/60" />
+
+          <section>
+            <Card className="bg-zinc-900/60 border-zinc-800/60">
+              <CardContent className="p-4">
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-zinc-100">Live Diagnostics</h3>
+                    <p className="text-xs text-zinc-400">Adjustments stream immediately to the runtime and persist between sessions.</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs text-zinc-300">
+                    <Badge className="bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">LLM</Badge>
+                    <Badge className="bg-purple-500/10 text-purple-300 border border-purple-500/20">Audio</Badge>
+                    <Badge className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">Vision</Badge>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App(){
-  const { state, setState, connect, disconnect, setMic, push, log } = useNomousBridge();
+  const { state, setState, connect, disconnect, setMic, push, log, updateSettings } = useNomousBridge();
   const st = statusMap[state.status];
   const tokenTotal = state.tokenWindow.reduce((a, p) => a + p.inTok + p.outTok, 0);
+  const [controlCenterOpen, setControlCenterOpen] = useState(false);
 
   return (
     <TooltipProvider>
-      <div className="min-h-screen bg-gradient-to-b from-zinc-950 via-zinc-950 to-black text-zinc-50 p-4 md:p-6 space-y-4">
+      <div className="min-h-screen bg-gradient-to-br from-black via-zinc-950 to-zinc-900 text-zinc-50 p-4 md:p-6 space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className={`w-3.5 h-3.5 rounded-full ${st.color} shadow-[0_0_20px_rgba(255,255,255,.15)]`} />
@@ -253,6 +796,9 @@ export default function App(){
               {state.connected ? <Wifi className="w-4 h-4"/> : <WifiOff className="w-4 h-4"/>}
               <span>{state.url}</span>
             </div>
+            <Button variant="secondary" onClick={()=>setControlCenterOpen(true)} className="hidden sm:inline-flex bg-zinc-900/80 hover:bg-zinc-800/80 text-zinc-100 border border-zinc-700/60">
+              <Cog className="w-4 h-4 mr-2"/> Control Center
+            </Button>
             {!state.connected ? (
               <Button onClick={connect} className="px-3 py-1 text-sm bg-emerald-600/90 hover:bg-emerald-500/90 text-white"><Play className="w-4 h-4 mr-1"/> Connect</Button>
             ) : (
@@ -270,10 +816,8 @@ export default function App(){
                 <TabsTrigger value="console">Console</TabsTrigger>
                 <TabsTrigger value="behavior">Behavior</TabsTrigger>
                 <TabsTrigger value="tokens">Tokens</TabsTrigger>
-                <TabsTrigger value="runtime">Runtime</TabsTrigger>
                 <TabsTrigger value="memory">Memory</TabsTrigger>
                 <TabsTrigger value="thoughts">Thoughts</TabsTrigger>
-                <TabsTrigger value="settings">Settings</TabsTrigger>
               </TabsList>
 
               <TabsContent value="overview" className="pt-4">
@@ -304,9 +848,9 @@ export default function App(){
                           <div className="flex items-center gap-2 text-zinc-200 font-semibold"><Volume2 className="w-4 h-4"/> Voice</div>
                           <div className="flex items-center gap-2">
                             {!state.micOn ? (
-                              <Button onClick={() => setMic(true)} className="px-3 py-1 text-sm bg-emerald-600/90 hover:bg-emerald-500/90 text-white"><Mic className="w-4 h-4 mr-1"/> Mic: OFF</Button>
+                              <Button onClick={() => { setMic(true); updateSettings({ microphoneEnabled: true }); }} className="px-3 py-1 text-sm bg-emerald-600/90 hover:bg-emerald-500/90 text-white"><Mic className="w-4 h-4 mr-1"/> Mic: OFF</Button>
                             ) : (
-                              <Button variant="secondary" onClick={() => setMic(false)} className="px-3 py-1 text-sm bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700/80"><MicOff className="w-4 h-4 mr-1"/> Mic: ON</Button>
+                              <Button variant="secondary" onClick={() => { setMic(false); updateSettings({ microphoneEnabled: false }); }} className="px-3 py-1 text-sm bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700/80"><MicOff className="w-4 h-4 mr-1"/> Mic: ON</Button>
                             )}
                           </div>
                         </div>
@@ -429,27 +973,6 @@ export default function App(){
                 </Card>
               </TabsContent>
 
-              <TabsContent value="runtime" className="pt-4">
-                <Card className="bg-zinc-900/70 border-zinc-800/60">
-                  <CardContent className="p-4 space-y-3 text-zinc-200">
-                    <div className="flex items-center gap-2 mb-1"><Cog className="w-4 h-4"/><span className="font-semibold">Runtime Controls</span></div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span>Vision</span>
-                      <Switch checked={state.visionEnabled} onCheckedChange={(v)=>{ setState({ ...state, visionEnabled: v }); push({ type: "toggle", what: "vision", value: v }); }} />
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span>Audio (TTS)</span>
-                      <Switch checked={state.audioEnabled} onCheckedChange={(v)=>{ setState({ ...state, audioEnabled: v }); push({ type: "toggle", what: "tts", value: v }); }} />
-                    </div>
-                    <Separator/>
-                    <div className="text-xs text-zinc-300">Debounce snapshots (sec)</div>
-                    <Slider defaultValue={[4]} min={1} max={10} step={0.5} onValueChange={(v)=>push({ type: "param", key: "snapshot_debounce", value: v[0] })} />
-                    <div className="text-xs text-zinc-300">Motion sensitivity</div>
-                    <Slider defaultValue={[30]} min={5} max={80} step={1} onValueChange={(v)=>push({ type: "param", key: "motion_sensitivity", value: v[0] })} />
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
               <TabsContent value="memory" className="pt-4">
                 <Card className="bg-zinc-900/70 border-zinc-800/60">
                   <CardContent className="p-4 text-zinc-200">
@@ -475,29 +998,26 @@ export default function App(){
                   </CardContent>
                 </Card>
               </TabsContent>
-
-                <TabsContent value="settings" className="pt-4">
-                  <Card className="bg-zinc-900/70 border-zinc-800/60">
-                    <CardContent className="p-4 space-y-3 text-zinc-200">
-                      <div className="font-semibold">Bridge</div>
-                      <div className="flex items-center gap-2">
-                        <input className="w-full px-2 py-1 rounded bg-zinc-950 border border-zinc-800 text-sm" value={state.url} onChange={(e)=>setState(p=>({ ...p, url: e.target.value }))}/>
-                        {!state.connected ? (
-                          <Button onClick={connect} className="px-3 py-1 text-sm"><Play className="w-4 h-4 mr-1"/>Connect</Button>
-                        ) : (
-                          <Button variant="danger" onClick={disconnect} className="px-3 py-1 text-sm"><Square className="w-4 h-4 mr-1"/>Disconnect</Button>
-                        )}
-                      </div>
-                      <div className="text-xs text-zinc-400">The UI speaks JSON frames over WebSocket. Run the Python bridge on ws://localhost:8765.</div>
-                    </CardContent>
-                  </Card>
-                </TabsContent>
                 </Tabs>
               </div>
           </CardContent>
         </Card>
 
-        <div className="text-[10px] text-zinc-400/80">Nomous Autonomy UI â€¢ WebSocket JSON from Python. Colors: purple=thinking, amber=noticed, emerald=speaking, cyan=learning, red=error. Mic sends 16kHz chunks.</div>
+        <div className="text-[10px] text-zinc-400/80">Nomous Autonomy UI • WebSocket JSON from Python. Colors: purple=thinking, amber=noticed, emerald=speaking, cyan=learning, red=error. Mic sends 16kHz chunks.</div>
+        <Button onClick={()=>setControlCenterOpen(true)} className="sm:hidden fixed bottom-6 right-6 rounded-full px-5 py-3 text-sm shadow-xl bg-emerald-600/90 hover:bg-emerald-500/90 text-white">
+          <Cog className="w-4 h-4 mr-2"/> Controls
+        </Button>
+        <ControlCenter
+          open={controlCenterOpen}
+          onClose={()=>setControlCenterOpen(false)}
+          state={state}
+          connect={connect}
+          disconnect={disconnect}
+          setMic={setMic}
+          push={push}
+          updateSettings={updateSettings}
+          setState={setState}
+        />
       </div>
     </TooltipProvider>
   );
