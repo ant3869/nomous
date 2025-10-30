@@ -217,12 +217,13 @@ function useNomousBridge() {
       return;  // Skip noisy messages
     }
     
+    const stamped = `[${new Date().toLocaleTimeString()}] ${line}`;
     setState(p => {
       // Check if last message is identical (prevent duplicates)
-      if (p.consoleLines[0] === `[${new Date().toLocaleTimeString()}] ${line}`) {
+      if (p.consoleLines[0] === stamped) {
         return p;
       }
-      return { ...p, consoleLines: [`[${new Date().toLocaleTimeString()}] ${line}`, ...p.consoleLines.slice(0, 150)] };
+      return { ...p, consoleLines: [stamped, ...p.consoleLines.slice(0, 150)] };
     });
   }, []);
 
