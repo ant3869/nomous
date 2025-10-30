@@ -5,6 +5,7 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 from llama_cpp import Llama
 from .utils import msg_event, msg_token, msg_speak, msg_status
 
@@ -15,26 +16,29 @@ class LocalLLM:
     def __init__(self, cfg, bridge, tts):
         self.bridge = bridge
         self.tts = tts
+        self._cfg = cfg
         p = cfg["paths"]
-        
+
         logger.info(f"Loading LLM from {p['gguf_path']}")
-        
+
         n_gpu_layers = int(cfg["llm"].get("n_gpu_layers", 0))
         if n_gpu_layers > 0:
             logger.info(f"GPU acceleration enabled: {n_gpu_layers} layers on GPU")
         
+        self.model_path = p["gguf_path"]
         self.model = Llama(
-            model_path=p["gguf_path"],
+            model_path=self.model_path,
             n_ctx=cfg["llm"]["n_ctx"],
             n_threads=cfg["llm"]["n_threads"],
             n_gpu_layers=n_gpu_layers,
             verbose=False
         )
-        
+
         self.temperature = float(cfg["llm"]["temperature"])
         self.top_p = float(cfg["llm"]["top_p"])
+        self.max_tokens = int(cfg["llm"].get("max_tokens", 256))
         self._reinforcement = 0.0
-        
+
         # Autonomous behavior
         self.autonomous_mode = True
         self.last_vision_analysis = 0
@@ -49,11 +53,46 @@ class LocalLLM:
         # Processing lock
         self._processing = False
         self._lock = asyncio.Lock()
-        
+
         logger.info("LLM initialized successfully")
 
     async def stop(self):
         logger.info("LLM stopping...")
+
+    def update_sampling(self, temperature: float | None = None, max_tokens: int | None = None):
+        if temperature is not None:
+            self.temperature = float(temperature)
+            logger.info(f"LLM temperature set to {self.temperature:.2f}")
+        if max_tokens is not None:
+            self.max_tokens = max(32, int(max_tokens))
+            logger.info(f"LLM max tokens set to {self.max_tokens}")
+
+    async def reload_model(self, model_path: str):
+        model_path = model_path.strip()
+        if not model_path:
+            raise ValueError("Model path cannot be empty")
+
+        async with self._lock:
+            if self._processing:
+                raise RuntimeError("Cannot reload LLM while processing")
+
+            logger.info(f"Reloading LLM from {model_path}")
+            await self.bridge.post(msg_event("Reloading LLM model..."))
+
+            def _load():
+                return Llama(
+                    model_path=model_path,
+                    n_ctx=self._cfg["llm"]["n_ctx"],
+                    n_threads=self._cfg["llm"]["n_threads"],
+                    n_gpu_layers=int(self._cfg["llm"].get("n_gpu_layers", 0)),
+                    verbose=False,
+                )
+
+            new_model = await asyncio.to_thread(_load)
+            self.model = new_model
+            self.model_path = model_path
+            await self.bridge.post(msg_event(f"LLM model → {Path(model_path).name}"))
+            logger.info("LLM model reloaded successfully")
 
     async def reinforce(self, delta: float):
         """Apply reinforcement learning signal."""
@@ -106,17 +145,18 @@ You (reply naturally):"""
         
         return prompt
 
-    async def _generate(self, prompt: str, max_tokens: int = 128, min_tokens: int = 10) -> str:
+    async def _generate(self, prompt: str, max_tokens: int | None = None, min_tokens: int = 10) -> str:
         """Generate response from model with token streaming."""
         try:
             await self.bridge.post(msg_status("thinking", "Processing..."))
-            
+
             # Send thinking process to UI
             await self.bridge.post({"type": "thought", "text": f"Prompt: {prompt[:200]}..."})
-            
+
+            max_tok = max_tokens or self.max_tokens
             stream = self.model(
                 prompt,
-                max_tokens=max_tokens,
+                max_tokens=max_tok,
                 temperature=self.temperature,
                 top_p=self.top_p,
                 stream=True,
@@ -151,7 +191,7 @@ You (reply naturally):"""
             
             if len(response) < 3 and total_tokens < min_tokens:
                 logger.warning(f"Response too short ({len(response)} chars, {total_tokens} tokens), regenerating...")
-                return await self._generate(prompt, max_tokens, min_tokens=0)
+                return await self._generate(prompt, max_tokens=max_tok, min_tokens=0)
             
             logger.info(f"Generated ({total_tokens} tokens): {response[:100]}")
             await self.bridge.post({"type": "thought", "text": f"Final: {response}"})
@@ -290,6 +330,6 @@ You (reply naturally):"""
                 await self.tts.speak(response)
             else:
                 logger.info("Autonomous thought: no output")
-                
+
         finally:
             self._processing = False

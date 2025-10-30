@@ -7,6 +7,7 @@ import sys
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -41,6 +42,97 @@ class Server:
         self.tts: Optional[PiperTTS] = None
         self.cam: Optional[CameraLoop] = None
         self._autonomous_task: Optional[asyncio.Task] = None
+
+    async def handle_toggle(self, what: str, value: bool):
+        if not what:
+            logger.warning("Toggle without target")
+            return
+        handled = False
+        if what == "tts" and self.tts:
+            self.tts.set_enabled(value)
+            handled = True
+        elif what == "speaker" and self.tts:
+            self.tts.set_auto_play(value)
+            handled = True
+        elif what == "vision" and self.cam:
+            self.cam.set_enabled(value)
+            handled = True
+        elif what == "stt" and self.stt:
+            self.stt.set_enabled(value)
+            handled = True
+        elif what == "autonomous" and self.llm:
+            self.llm.autonomous_mode = value
+            handled = True
+
+        if handled:
+            state = "enabled" if value else "disabled"
+            await self.bridge.post(msg_event(f"{what} {state}"))
+        else:
+            logger.warning(f"Unknown toggle target: {what}")
+
+    async def handle_param(self, key: str, value):
+        if not key:
+            logger.warning("Param without key")
+            return
+        if key == "tts_voice" and self.tts:
+            await self.tts.set_voice(str(value))
+            return
+        if key == "audio_model_path" and self.tts:
+            await self.tts.set_voice_path(str(value))
+            return
+        if key == "master_volume" and self.tts:
+            self.tts.set_volume(int(value))
+            await self.bridge.post(msg_event(f"master volume → {int(value)}%"))
+            return
+        if key == "mic_sensitivity" and self.stt:
+            self.stt.set_sensitivity(int(value))
+            await self.bridge.post(msg_event(f"mic sensitivity → {int(value)}%"))
+            return
+        if key == "stt_model_path" and self.stt:
+            await self.stt.reload_model(str(value))
+            await self.bridge.post(msg_event(f"STT model → {Path(str(value)).name}"))
+            return
+        if key == "camera_resolution" and self.cam:
+            try:
+                width, height = str(value).lower().split("x")
+                self.cam.set_resolution(int(width), int(height))
+            except Exception as e:
+                logger.error(f"Invalid camera resolution '{value}': {e}")
+            return
+        if key == "camera_exposure" and self.cam:
+            self.cam.set_exposure(int(value))
+            return
+        if key == "camera_brightness" and self.cam:
+            self.cam.set_brightness(int(value))
+            return
+        if key == "vision_model_path" and self.cam:
+            self.cam.set_vision_model_path(str(value))
+            return
+        if key == "llm_temperature" and self.llm:
+            self.llm.update_sampling(temperature=float(value))
+            await self.bridge.post(msg_event(f"temperature → {float(value):.2f}"))
+            return
+        if key == "llm_max_tokens" and self.llm:
+            self.llm.update_sampling(max_tokens=int(value))
+            await self.bridge.post(msg_event(f"max tokens → {int(value)}"))
+            return
+        if key == "llm_model_path" and self.llm:
+            await self.llm.reload_model(str(value))
+            return
+        if key == "snapshot_debounce" and self.cam:
+            self.cam.debounce_sec = float(value)
+            return
+        if key == "motion_sensitivity" and self.cam:
+            self.cam.motion_threshold = int(value)
+            return
+        if key == "vision_cooldown" and self.cam:
+            self.cam.analysis_cooldown = float(value)
+            return
+        if key == "thought_cooldown" and self.llm:
+            self.llm.thought_cooldown = float(value)
+            return
+
+        logger.warning(f"Unknown parameter: {key}")
 
     async def start_workers(self):
         """Initialize and start all worker components."""
@@ -187,32 +279,13 @@ class Server:
                         what = msg.get("what")
                         value = bool(msg.get("value"))
                         logger.info(f"Toggle {what} = {value}")
-                        
-                        if what == "tts" and self.tts:
-                            self.tts.enabled = value
-                        elif what == "vision" and self.cam:
-                            self.cam.enabled = value
-                        elif what == "autonomous" and self.llm:
-                            self.llm.autonomous_mode = value
-                            logger.info(f"Autonomous mode: {value}")
-                        else:
-                            logger.warning(f"Unknown toggle target: {what}")
-                    
+                        await self.handle_toggle(what, value)
+
                     elif msg_type == "param":
                         key = msg.get("key")
                         value = msg.get("value")
                         logger.info(f"Parameter {key} = {value}")
-                        
-                        if key == "snapshot_debounce" and self.cam:
-                            self.cam.debounce_sec = float(value)
-                        elif key == "motion_sensitivity" and self.cam:
-                            self.cam.motion_threshold = int(value)
-                        elif key == "vision_cooldown" and self.cam:
-                            self.cam.analysis_cooldown = float(value)
-                        elif key == "thought_cooldown" and self.llm:
-                            self.llm.thought_cooldown = float(value)
-                        else:
-                            logger.warning(f"Unknown parameter: {key}")
+                        await self.handle_param(key, value)
                     
                     elif msg_type == "reinforce":
                         if self.llm:
