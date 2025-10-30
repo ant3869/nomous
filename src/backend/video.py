@@ -8,6 +8,8 @@ import time
 import asyncio
 import logging
 import numpy as np
+from pathlib import Path
+from queue import SimpleQueue, Empty
 from .utils import to_data_url, msg_event, msg_image
 
 logger = logging.getLogger(__name__)
@@ -43,14 +45,16 @@ class CameraLoop:
         
         self.debounce_sec = float(cfg["ui"]["snapshot_debounce"])
         self.motion_threshold = int(cfg["ui"]["motion_sensitivity"])
-        
+
         self._thr = None
         self._stop = threading.Event()
         self._running = False
-        
+        self._command_queue = SimpleQueue()
+
         # Vision analysis
         self.llm = None
         self.vision_description_enabled = True
+        self.vision_model_path = None
         self.last_analysis_time = 0
         self.analysis_cooldown = float(cfg["ui"].get("vision_cooldown", 12))
         
@@ -86,10 +90,42 @@ class CameraLoop:
                    f"{self.process_width}x{self.process_height} processing, "
                    f"frame_skip={self.frame_skip}")
 
+    def _enqueue(self, name: str, *args):
+        try:
+            self._command_queue.put_nowait((name, args))
+        except Exception as e:
+            logger.error(f"Failed to queue camera command {name}: {e}")
+
     def set_llm(self, llm):
         """Set LLM reference for vision analysis."""
         self.llm = llm
         logger.info("LLM reference set for vision analysis")
+
+    def set_enabled(self, value: bool):
+        self.enabled = bool(value)
+        logger.info(f"Camera {'enabled' if self.enabled else 'disabled'}")
+
+    def set_resolution(self, width: int, height: int):
+        self.capture_width = int(width)
+        self.capture_height = int(height)
+        self.process_width = max(160, self.capture_width // 2)
+        self.process_height = max(120, self.capture_height // 2)
+        self._enqueue("resolution", self.capture_width, self.capture_height)
+        self._post_event(f"Camera resolution → {self.capture_width}x{self.capture_height}")
+
+    def set_exposure(self, percent: int):
+        percent = max(0, min(100, int(percent)))
+        self._enqueue("exposure", percent)
+        self._post_event(f"Camera exposure → {percent}%")
+
+    def set_brightness(self, percent: int):
+        percent = max(0, min(100, int(percent)))
+        self._enqueue("brightness", percent)
+        self._post_event(f"Camera brightness → {percent}%")
+
+    def set_vision_model_path(self, path: str):
+        self.vision_model_path = path
+        self._post_event(f"Vision model → {Path(path).name if Path(path).exists() else path}")
 
     def start(self):
         """Start the camera capture thread."""
@@ -281,6 +317,31 @@ class CameraLoop:
             
             # Main capture loop
             while not self._stop.is_set():
+                # Apply pending control commands
+                while True:
+                    try:
+                        cmd, args = self._command_queue.get_nowait()
+                    except Empty:
+                        break
+                    try:
+                        if cmd == "resolution":
+                            w, h = args
+                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(w))
+                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(h))
+                            logger.info(f"Camera resolution updated to {w}x{h}")
+                        elif cmd == "exposure":
+                            (percent,) = args
+                            exposure = -13 + (percent / 100.0) * 12  # map 0-100 -> [-13,-1]
+                            cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
+                            logger.info(f"Camera exposure set to {exposure:.2f}")
+                        elif cmd == "brightness":
+                            (percent,) = args
+                            brightness = percent / 100.0
+                            cap.set(cv2.CAP_PROP_BRIGHTNESS, brightness)
+                            logger.info(f"Camera brightness set to {brightness:.2f}")
+                    except Exception as e:
+                        logger.error(f"Failed to apply camera command {cmd}: {e}")
+
                 ok, frame = cap.read()
                 if not ok:
                     time.sleep(0.03)

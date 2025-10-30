@@ -6,6 +6,8 @@ import os
 import time
 import asyncio
 import logging
+import wave
+import audioop
 from pathlib import Path
 from .utils import msg_speak, msg_event
 
@@ -23,6 +25,9 @@ class PiperTTS:
         self.rate = 22050
         self.enabled = bool(cfg["ui"]["tts_enabled"])
         self.auto_play = True  # NEW: Auto-play generated speech
+        self.master_volume = 0.7
+
+        self._voices_root = Path(self.voice).parent
         
         # Validate paths
         if not os.path.exists(self.exe):
@@ -48,6 +53,37 @@ class PiperTTS:
 
     async def stop(self):
         logger.info("PiperTTS stopping...")
+
+    def set_enabled(self, value: bool):
+        self.enabled = bool(value)
+        logger.info(f"PiperTTS {'enabled' if self.enabled else 'disabled'}")
+
+    def set_auto_play(self, value: bool):
+        self.auto_play = bool(value)
+        logger.info(f"Piper auto-play {'enabled' if self.auto_play else 'disabled'}")
+
+    def set_volume(self, percent: int):
+        percent = max(0, min(100, int(percent)))
+        self.master_volume = percent / 100.0
+        logger.info(f"Piper master volume set to {percent}%")
+
+    def _resolve_voice_path(self, voice: str) -> Path:
+        path = Path(voice)
+        if path.exists():
+            return path
+        candidate = self._voices_root / voice
+        if candidate.exists():
+            return candidate
+        raise FileNotFoundError(f"Voice model not found: {voice}")
+
+    async def set_voice(self, voice: str):
+        voice_path = await asyncio.to_thread(self._resolve_voice_path, voice)
+        self.voice = str(voice_path)
+        logger.info(f"Piper voice set to {self.voice}")
+        await self.bridge.post(msg_event(f"TTS voice → {voice_path.name}"))
+
+    async def set_voice_path(self, path: str):
+        await self.set_voice(path)
 
     async def _play_audio(self, wav_path: str):
         """Play audio file using Windows sound API."""
@@ -75,6 +111,23 @@ class PiperTTS:
                 pass
         except Exception as e:
             logger.error(f"Error playing audio: {e}")
+
+    def _apply_volume(self, wav_path: str):
+        if not os.path.exists(wav_path):
+            return
+
+        if abs(self.master_volume - 1.0) < 0.01:
+            return
+
+        with wave.open(wav_path, "rb") as src:
+            params = src.getparams()
+            frames = src.readframes(src.getnframes())
+
+        scaled = audioop.mul(frames, params.sampwidth, self.master_volume)
+
+        with wave.open(wav_path, "wb") as dst:
+            dst.setparams(params)
+            dst.writeframes(scaled)
 
     async def speak(self, text: str):
         """Synthesize speech from text and play it."""
@@ -122,10 +175,11 @@ class PiperTTS:
             # Check result
             if proc.returncode == 0:
                 if os.path.exists(wav):
+                    self._apply_volume(wav)
                     file_size = os.path.getsize(wav)
                     logger.info(f"Speech generated: {wav} ({file_size} bytes)")
                     await self.bridge.post(msg_event(f"🔊 Speech saved: {os.path.basename(wav)}"))
-                    
+
                     # NEW: Auto-play the audio
                     if self.auto_play:
                         await self._play_audio(wav)
