@@ -53,7 +53,7 @@ interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
-  settings: ControlSettings;
+  speechLines: string[]; systemLines: string[]; settings: ControlSettings;
 }
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -186,7 +186,7 @@ function useNomousBridge() {
     memory: { nodes: [{ id: "self", label: "Nomous", strength: 1, kind: "self" }], edges: [] },
     audioEnabled: true, visionEnabled: true, connected: false,
     url: typeof window !== "undefined" ? (localStorage.getItem("nomous.ws") || "ws://localhost:8765") : "ws://localhost:8765",
-    micOn: false, vu: 0, consoleLines: [], thoughtLines: [],
+    micOn: false, vu: 0, consoleLines: [], thoughtLines: [], speechLines: [], systemLines: [],
     settings: defaultSettings,
   });
   const wsRef = useRef<WebSocket | null>(null);
@@ -218,12 +218,13 @@ function useNomousBridge() {
       return;  // Skip noisy messages
     }
     
+    const stamped = `[${new Date().toLocaleTimeString()}] ${line}`;
     setState(p => {
       // Check if last message is identical (prevent duplicates)
-      if (p.consoleLines[0] === `[${new Date().toLocaleTimeString()}] ${line}`) {
+      if (p.consoleLines[0] === stamped) {
         return p;
       }
-      return { ...p, consoleLines: [`[${new Date().toLocaleTimeString()}] ${line}`, ...p.consoleLines.slice(0, 150)] };
+      return { ...p, consoleLines: [stamped, ...p.consoleLines.slice(0, 150)] };
     });
   }, []);
 
@@ -236,7 +237,18 @@ function useNomousBridge() {
     try {
       const msg = JSON.parse(typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data));
       switch (msg.type) {
-        case "status": setState(p => ({ ...p, status: msg.value, statusDetail: msg.detail ?? p.statusDetail })); break;
+        case "status": {
+          const stamp = `[${new Date().toLocaleTimeString()}]`;
+          setState(p => ({
+            ...p,
+            status: msg.value,
+            statusDetail: msg.detail ?? p.statusDetail,
+            systemLines: msg.detail
+              ? [`${stamp} ${String(msg.value ?? "status").toUpperCase()} → ${msg.detail}`, ...p.systemLines.slice(0, 200)]
+              : p.systemLines,
+          }));
+          break;
+        }
         case "token": {
           const inc = Number(msg.count || 0);
           tCounter.current += inc;
@@ -247,7 +259,17 @@ function useNomousBridge() {
           });
           break;
         }
-        case "speak": log(`speak â†’ ${msg.text}`); setState(p => ({ ...p, status: "speaking", statusDetail: msg.text })); break;
+        case "speak": {
+          const stamp = `[${new Date().toLocaleTimeString()}]`;
+          log(`speak â†’ ${msg.text}`);
+          setState(p => ({
+            ...p,
+            status: "speaking",
+            statusDetail: msg.text,
+            speechLines: msg.text ? [`${stamp} ${msg.text}`, ...p.speechLines.slice(0, 200)] : p.speechLines,
+          }));
+          break;
+        }
         case "thought": 
           setState(p => ({ ...p, thoughtLines: [`[${new Date().toLocaleTimeString()}] ${msg.text}`, ...p.thoughtLines.slice(0, 200)] })); 
           break;
@@ -260,7 +282,17 @@ function useNomousBridge() {
           rewardTotal: msg.payload.rewardTotal ?? p.behavior.rewardTotal,
         } })); break;
         case "memory": setState(p => ({ ...p, memory: { nodes: msg.nodes ?? p.memory.nodes, edges: msg.edges ?? p.memory.edges } })); break;
-        case "event": log(msg.message || "event"); setState(p => ({ ...p, lastEvent: msg.message })); break;
+        case "event": {
+          const stamp = `[${new Date().toLocaleTimeString()}]`;
+          const payload = msg.message;
+          log(payload || "event");
+          setState(p => ({
+            ...p,
+            lastEvent: payload,
+            systemLines: payload ? [`${stamp} EVENT → ${payload}`, ...p.systemLines.slice(0, 200)] : p.systemLines,
+          }));
+          break;
+        }
         default: log(`unknown message: ${ev.data?.toString()?.slice(0, 120)}`);
       }
     } catch (e: any) {
@@ -586,6 +618,33 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect }: MemoryGraphProp
   );
 }
 
+type StreamCardProps = {
+  title: string;
+  icon: React.ComponentType<{ className?: string }>;
+  description?: string;
+  lines: string[];
+  emptyLabel: string;
+  accentClassName: string;
+  height?: string;
+};
+
+function StreamCard({ title, icon: Icon, description, lines, emptyLabel, accentClassName, height }: StreamCardProps) {
+  const bodyHeight = height ?? "h-56";
+  return (
+    <Card className="bg-zinc-900/70 border-zinc-800/60">
+      <CardContent className="p-4 text-zinc-200 space-y-3">
+        <div className="flex items-center gap-2">
+          <Icon className="w-4 h-4" />
+          <span className="font-semibold">{title}</span>
+        </div>
+        {description ? <p className="text-xs text-zinc-400 leading-relaxed">{description}</p> : null}
+        <div className={`overflow-auto rounded-md bg-black/60 p-3 font-mono text-xs leading-relaxed text-zinc-100/95 whitespace-pre-wrap ${bodyHeight}`}>
+          {lines.length > 0 ? (
+            lines.map((l, i) => (
+              <div key={i} className={`mb-1 last:mb-0 ${accentClassName}`}>{l}</div>
+            ))
+          ) : (
+            <div className="text-zinc-500 text-center mt-8">{emptyLabel}</div>
 function MemorySummaryStat({ label, value, helper }: { label: string; value: string; helper?: string }) {
   return (
     <div className="rounded-xl border border-zinc-800/60 bg-black/40 px-4 py-3">
@@ -1318,20 +1377,39 @@ export default function App(){
               </TabsContent>
 
               <TabsContent value="thoughts" className="pt-4">
-                <Card className="bg-zinc-900/70 border-zinc-800/60">
-                  <CardContent className="p-4 text-zinc-200">
-                    <div className="flex items-center gap-2 mb-2"><MessageSquare className="w-4 h-4"/><span className="font-semibold">Thought Trace</span></div>
-                    <div className="h-60 overflow-auto rounded-md bg-black/60 p-3 font-mono text-xs leading-relaxed text-zinc-100/95">
-                      {state.thoughtLines.length > 0 ? (
-                        state.thoughtLines.map((l,i)=>(
-                          <div key={i} className="mb-1 text-purple-300">{l}</div>
-                        ))
-                      ) : (
-                        <div className="text-zinc-500 text-center mt-8">Waiting for thoughts...</div>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
+                <div className="grid gap-4 lg:grid-cols-3">
+                  <div className="lg:col-span-2">
+                    <StreamCard
+                      title="Cognitive Stream"
+                      icon={MessageSquare}
+                      description="Live reasoning trace as the model explores options and intermediate thoughts."
+                      lines={state.thoughtLines}
+                      emptyLabel="Waiting for thoughts..."
+                      accentClassName="text-purple-300"
+                      height="h-72"
+                    />
+                  </div>
+                  <div className="space-y-4 lg:col-span-1">
+                    <StreamCard
+                      title="Speech Commitments"
+                      icon={Volume2}
+                      description="Finalized responses that were sent to speech synthesis."
+                      lines={state.speechLines}
+                      emptyLabel="No speech prepared yet."
+                      accentClassName="text-emerald-300"
+                      height="h-36"
+                    />
+                    <StreamCard
+                      title="System & Prompt Signals"
+                      icon={Radio}
+                      description="System prompts, status transitions, and other generated directives."
+                      lines={state.systemLines}
+                      emptyLabel="No system activity captured yet."
+                      accentClassName="text-sky-300"
+                      height="h-36"
+                    />
+                  </div>
+                </div>
               </TabsContent>
                 </Tabs>
               </div>
