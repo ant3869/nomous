@@ -1,0 +1,125 @@
+# Nomous
+
+<div align="center">
+  <img src="logo.png" alt="Nomous Logo" width="200"/>
+  <br>
+  <strong>A Local Autonomy Runtime Bridge</strong>
+</div>
+
+## Overview
+
+Nomous is an offline-first WebSocket bridge that seamlessly connects your React dashboard to powerful local AI capabilities:
+- 🧠 **Local LLM** via `llama.cpp` (GGUF models)
+- 🎤 **Speech-to-Text** via **Vosk** + **WebRTC VAD**
+- 🗣️ **Text-to-Speech** via **Piper** (Windows-optimized)
+- 👁️ **Computer Vision** via OpenCV (DirectShow)
+
+## Features
+
+- ✨ Real-time token streaming with partial speech text to UI
+- 🎯 Reinforcement learning controls (reward/penalty) with running total
+- 📹 Live camera preview with configurable snapshot debounce
+- 🎙️ Browser microphone streaming (PCM16) with Vosk recognition
+- 🔊 Optional Piper TTS synthesis for model outputs
+- 🔄 Thread-safe WebSocket broadcast system
+
+## Quick Start
+
+1. Clone the repository
+```bash
+git clone https://github.com/ant3869/nomous.git
+cd nomous
+```
+
+2. Install dependencies
+```bash
+# Backend
+pip install -r requirements.txt
+
+# Frontend
+npm install
+```
+
+3. Configure `config.yaml` with your model paths and settings
+
+4. Start the bridge
+```bash
+python scripts/run_bridge.py
+```
+
+## Project Structure
+
+```
+nomous/
+├─ src/
+│  ├─ backend/         # Python WebSocket server
+│  │  ├─ audio.py     # Audio processing
+│  │  ├─ video.py     # Video capture
+│  │  ├─ llm.py       # LLM integration
+│  │  └─ tts.py       # Text-to-speech
+│  │
+│  └─ frontend/       # React TypeScript UI
+│     ├─ components/  # UI components
+│     └─ App.tsx      # Main application
+│
+├─ scripts/           # Utility scripts
+├─ tests/            # Test suite
+└─ config.yaml       # Configuration
+```
+
+## Configuration
+
+Key configuration sections in `config.yaml`:
+
+```yaml
+paths:
+  gguf_path: path/to/model.gguf
+  embed_gguf_path: models/embed/bge-small-en-v1.5-f16.gguf
+  vosk_model_dir: path/to/vosk-model
+  piper_exe: path/to/piper.exe
+  piper_voice: path/to/voice.onnx
+  piper_out_dir: path/to/output
+
+llm:
+  enable: true
+  n_ctx: 2048
+  n_threads: 4
+  temperature: 0.6
+  top_p: 0.95
+```
+
+See [INSTALL_INSTRUCTIONS.md](docs/INSTALL_INSTRUCTIONS.md) for detailed setup steps.
+
+## Testing
+
+Run the test suite:
+```bash
+python -m pytest tests/
+```
+
+## Documentation
+
+- [Installation Guide](docs/INSTALL_INSTRUCTIONS.md)
+- [Frontend Documentation](docs/README_FE.md)
+- [Changelog](docs/CHANGELOG.md)
+- [Bug Fixes](docs/BUG_FIXES.md)
+- [Testing Guide](docs/TESTING.md)
+
+## Technical Stack
+
+- **Backend**: Python, asyncio, websockets, OpenCV, Vosk, Piper
+- **Frontend**: React 18+, TypeScript, Tailwind CSS, shadcn/ui
+- **ML**: llama.cpp, GGUF models, BGE embeddings
+- **Build**: Vite, PostCSS
+
+## License
+
+MIT License - See [LICENSE](LICENSE) for details
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
