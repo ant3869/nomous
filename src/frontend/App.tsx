@@ -638,13 +638,24 @@ function StreamCard({ title, icon: Icon, description, lines, emptyLabel, accentC
           <span className="font-semibold">{title}</span>
         </div>
         {description ? <p className="text-xs text-zinc-400 leading-relaxed">{description}</p> : null}
-        <div className={`overflow-auto rounded-md bg-black/60 p-3 font-mono text-xs leading-relaxed text-zinc-100/95 whitespace-pre-wrap ${bodyHeight}`}>
+        <div
+          className={`overflow-auto rounded-md bg-black/60 p-3 font-mono text-xs leading-relaxed text-zinc-100/95 whitespace-pre-wrap ${bodyHeight}`}
+        >
           {lines.length > 0 ? (
             lines.map((l, i) => (
-              <div key={i} className={`mb-1 last:mb-0 ${accentClassName}`}>{l}</div>
+              <div key={i} className={`mb-1 last:mb-0 ${accentClassName}`}>
+                {l}
+              </div>
             ))
           ) : (
             <div className="text-zinc-500 text-center mt-8">{emptyLabel}</div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function MemorySummaryStat({ label, value, helper }: { label: string; value: string; helper?: string }) {
   return (
     <div className="rounded-xl border border-zinc-800/60 bg-black/40 px-4 py-3">
