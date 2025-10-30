@@ -1,0 +1,1 @@
+export function TooltipProvider({children}:{children:any}){return children}

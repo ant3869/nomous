@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "baseUrl": "./",
+    "paths": {
+      "@/*": ["src/*"],
+      "ui/*": ["src/frontend/components/ui/*"]
+    },
+    "allowJs": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "typeRoots": ["node_modules/@types", "src/frontend/components/ui"]
+  },
+  "include": [
+    "src/frontend/**/*",
+    "src/frontend/components/ui/**/*",
+    "vite.config.ts"
+  ],
+  "exclude": ["node_modules"]
+}
