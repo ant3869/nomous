@@ -1,14 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Card, CardContent } from "@/frontend/components/ui/card";
-import { Button } from "@/frontend/components/ui/button";
-import { Badge } from "@/frontend/components/ui/badge";
-import { Slider } from "@/frontend/components/ui/slider";
-import { Tabs, TabsContent, TabsTrigger } from "@/frontend/components/ui/tabs";
-import { TabsList } from "@/frontend/components/ui/TabsList";
-import { Switch } from "@/frontend/components/ui/switch";
-import { Progress } from "@/frontend/components/ui/progress";
-import { TooltipProvider } from "@/frontend/components/ui/tooltip";
-import { Separator } from "@/frontend/components/ui/separator";
+import { Card, CardContent } from "./components/ui/card";
+import { Button } from "./components/ui/button";
+import { Badge } from "./components/ui/badge";
+import { Slider } from "./components/ui/slider";
+import { Tabs, TabsContent, TabsTrigger } from "./components/ui/tabs";
+import { TabsList } from "./components/ui/TabsList";
+import { Switch } from "./components/ui/switch";
+import { Progress } from "./components/ui/progress";
+import { TooltipProvider } from "./components/ui/tooltip";
+import { Separator } from "./components/ui/separator";
 import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 

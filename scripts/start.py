@@ -48,9 +48,19 @@ def setup_virtual_env():
     venv_path = Path('.venv')
     if not venv_path.exists():
         print_status("Creating virtual environment...")
-        venv.create('.venv', with_pip=True)
-        print_success("Virtual environment created")
-        return True
+        try:
+            venv.create('.venv', with_pip=True, system_site_packages=True)
+            # Upgrade pip in the new environment
+            if sys.platform == 'win32':
+                pip_cmd = str(Path('.venv/Scripts/python.exe').absolute()) + ' -m pip'
+            else:
+                pip_cmd = str(Path('.venv/bin/python').absolute()) + ' -m pip'
+            run_command(f'{pip_cmd} install --upgrade pip')
+            print_success("Virtual environment created")
+            return True
+        except Exception as e:
+            print_error(f"Failed to create virtual environment: {e}")
+            return False
     return False
 
 def activate_virtual_env():
@@ -94,8 +104,19 @@ def check_and_install_dependencies():
     # Install Python requirements if new venv or requirements changed
     if is_new_venv or not Path('.venv/pip-installed').exists():
         print_status("Installing Python dependencies...")
-        venv_pip = '.venv/Scripts/pip' if sys.platform == 'win32' else '.venv/bin/pip'
-        success, output = run_command(f"{venv_pip} install -r requirements.txt")
+        if sys.platform == 'win32':
+            pip_cmd = str(Path('.venv/Scripts/python.exe').absolute()) + ' -m pip'
+        else:
+            pip_cmd = str(Path('.venv/bin/python').absolute()) + ' -m pip'
+        
+        # Install core dependencies first
+        success, output = run_command(f'{pip_cmd} install rich torch')
+        if not success:
+            print_error(f"Failed to install core dependencies: {output}")
+            return False
+        
+        # Install project requirements
+        success, output = run_command(f'{pip_cmd} install -r requirements.txt')
         if success:
             # Create marker file to track installation
             Path('.venv/pip-installed').touch()
@@ -133,15 +154,13 @@ def update_config_for_gpu(use_gpu):
 
 def is_port_in_use(port):
     """Check if a port is in use"""
-    for proc in psutil.process_iter(['pid', 'name', 'connections']):
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
-            connections = proc.connections()
-            for conn in connections:
-                if conn.laddr.port == port:
-                    return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-    return False
+            s.bind(('127.0.0.1', port))
+            return False
+        except socket.error:
+            return True
 
 def wait_for_backend(ws_host, ws_port, timeout=30):
     """Wait for backend to be ready"""

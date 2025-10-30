@@ -1,58 +1,44 @@
-# === RUNTIME PATHS ===
-paths:
-  gguf_path: "E:/Models/DavidAU/L3.2-Rogue-Creative-Instruct-Uncensored-Abliterated-7B-GGUF/L3.2-Rogue-Creative-Instruct-Uncensored-Abliterated-7B-D_AU-Q8_0.gguf"
-  embed_gguf_path: "modules/models/embed/bge-small-en-v1.5-f16.gguf"
-  vosk_model_dir: "modules/models/vosk-model-small-en-us-0.15"
-  piper_exe: "modules/piper/piper.exe"
-  piper_voice: "modules/piper/voices/en_US-libritts-high.onnx"
-  piper_out_dir: "modules/piper/piper_out"
-
-# === LLM ===
+audio:
+  chunk_ms: 250
+  device: default
+  sample_rate: 16000
+  vad_aggressiveness: 2
+camera:
+  backend: dshow
+  frame_skip: 2
+  height: 720
+  index: 0
+  process_height: 360
+  process_width: 640
+  width: 1280
 llm:
   enable: true
   n_ctx: 2048
+  n_gpu_layers: 0
   n_threads: 4
-  n_gpu_layers: 35
   temperature: 0.7
   top_p: 0.95
-
-# === AUDIO / STT / VAD ===
-audio:
-  sample_rate: 16000
-  vad_aggressiveness: 2
-  chunk_ms: 250
-  device: default
-
-# === CAMERA ===
-camera:
-  backend: dshow
-  index: 0
-  width: 1280
-  height: 720
-  process_width: 640
-  process_height: 360
-  frame_skip: 2
-
-# === WS BRIDGE ===
+memory:
+  db_path: ./memory/rag.sqlite
+  enable: true
+paths:
+  embed_gguf_path: modules/models/embed/bge-small-en-v1.5-f16.gguf
+  gguf_path: E:/Models/DavidAU/L3.2-Rogue-Creative-Instruct-Uncensored-Abliterated-7B-GGUF/L3.2-Rogue-Creative-Instruct-Uncensored-Abliterated-7B-D_AU-Q8_0.gguf
+  piper_exe: modules/piper/piper.exe
+  piper_out_dir: modules/piper/piper_out
+  piper_voice: modules/piper/voices/en_US-libritts-high.onnx
+  vosk_model_dir: modules/models/vosk-model-small-en-us-0.15
+rag:
+  db_path: ./rag/rag.sqlite
+  enable: true
+ui:
+  gesture_cooldown: 3
+  gesture_enabled: true
+  motion_sensitivity: 25
+  snapshot_debounce: 3
+  tts_enabled: true
+  vision_cooldown: 12
+  vision_enabled: true
 ws:
   host: 127.0.0.1
   port: 8765
-
-# === MEMORY & RAG ===
-memory:
-  enable: true
-  db_path: ./memory/rag.sqlite
-
-rag:
-  enable: true
-  db_path: ./rag/rag.sqlite
-
-# === UI TOGGLES ===
-ui:
-  snapshot_debounce: 3
-  motion_sensitivity: 25
-  tts_enabled: true
-  vision_enabled: true
-  gesture_enabled: true
-  gesture_cooldown: 3
-  vision_cooldown: 12
