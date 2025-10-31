@@ -57,7 +57,7 @@ class MockMemory:
             "tags": tags
         })
     
-    def _load_graph_sync(self):
+    async def load_graph(self):
         """Mock load graph."""
         nodes = [
             {

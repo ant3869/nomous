@@ -18,6 +18,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Configuration constants
+SENTIMENT_POSITIVE_WORDS = ["good", "great", "happy", "love", "excellent", "wonderful", "thanks", "thank you", "amazing", "fantastic"]
+SENTIMENT_NEGATIVE_WORDS = ["bad", "sad", "angry", "hate", "terrible", "awful", "annoyed", "frustrated", "disappointed", "upset"]
+
+APPROPRIATENESS_MAX_LENGTH = 500
+APPROPRIATENESS_MIN_LENGTH = 5
+APPROPRIATENESS_MAX_EXCLAMATION = 5
+
 
 @dataclass
 class ToolParameter:
@@ -303,7 +311,7 @@ class ToolExecutor:
         
         try:
             # Get nodes and edges from memory
-            nodes, edges = await asyncio.to_thread(self.llm.memory._load_graph_sync) if hasattr(self.llm.memory, '_load_graph_sync') else ([], [])
+            nodes, edges = await self.llm.memory.load_graph()
             
             # Simple text search through nodes
             query_lower = query.lower()
@@ -451,12 +459,9 @@ class ToolExecutor:
             recent = self.llm.recent_context[-3:] if len(self.llm.recent_context) > 0 else []
             text = " ".join([ctx.get("content", "") for ctx in recent]).lower()
         
-        # Basic sentiment indicators
-        positive_words = ["good", "great", "happy", "love", "excellent", "wonderful", "thanks", "thank you"]
-        negative_words = ["bad", "sad", "angry", "hate", "terrible", "awful", "annoyed", "frustrated"]
-        
-        positive_count = sum(1 for word in positive_words if word in text)
-        negative_count = sum(1 for word in negative_words if word in text)
+        # Use configured sentiment word lists
+        positive_count = sum(1 for word in SENTIMENT_POSITIVE_WORDS if word in text)
+        negative_count = sum(1 for word in SENTIMENT_NEGATIVE_WORDS if word in text)
         
         if positive_count > negative_count:
             sentiment = "positive"
@@ -490,12 +495,12 @@ class ToolExecutor:
     async def _check_appropriate_response(self, proposed_response: str, 
                                          context: Optional[str] = None) -> Dict[str, Any]:
         """Check if a response is appropriate."""
-        # Basic appropriateness checks
+        # Use configured appropriateness thresholds
         checks = {
-            "length_ok": len(proposed_response) < 500,  # Not too long
-            "has_content": len(proposed_response.strip()) > 5,  # Has substance
-            "no_spam": proposed_response.count("!") < 5,  # Not over-excited
-            "no_caps_spam": proposed_response.upper() != proposed_response  # Not all caps
+            "length_ok": len(proposed_response) < APPROPRIATENESS_MAX_LENGTH,
+            "has_content": len(proposed_response.strip()) > APPROPRIATENESS_MIN_LENGTH,
+            "no_spam": proposed_response.count("!") < APPROPRIATENESS_MAX_EXCLAMATION,
+            "no_caps_spam": proposed_response.upper() != proposed_response
         }
         
         is_appropriate = all(checks.values())
@@ -556,7 +561,7 @@ class ToolExecutor:
         # Get milestone count if memory available
         if self.llm.memory and self.llm.memory.enabled:
             try:
-                nodes, _ = await asyncio.to_thread(self.llm.memory._load_graph_sync) if hasattr(self.llm.memory, '_load_graph_sync') else ([], [])
+                nodes, _ = await self.llm.memory.load_graph()
                 milestones = [n for n in nodes if "milestone" in (n.get("tags") or [])]
                 capabilities["milestones_achieved"] = len(milestones)
                 capabilities["recent_milestones"] = [

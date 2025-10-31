@@ -64,9 +64,11 @@ function formatToolResult(tool: string, result: any): string {
     case 'evaluate_interaction':
       return `Quality: ${result.quality_score || 'N/A'}/10`;
     case 'identify_pattern':
-      return `Pattern: ${result.pattern?.substring(0, 30) || 'recorded'}...`;
+      const PATTERN_PREVIEW_LENGTH = 30;
+      return `Pattern: ${result.pattern?.substring(0, PATTERN_PREVIEW_LENGTH) || 'recorded'}...`;
     case 'track_milestone':
-      return `${result.milestone?.substring(0, 30) || 'Milestone'}...`;
+      const MILESTONE_PREVIEW_LENGTH = 30;
+      return `${result.milestone?.substring(0, MILESTONE_PREVIEW_LENGTH) || 'Milestone'}...`;
     case 'get_current_capabilities':
       return `${result.tools_available || 0} tools, ${result.milestones_achieved || 0} milestones`;
     case 'analyze_sentiment':
