@@ -17,7 +17,7 @@ DEFAULT = {
         "piper_voice": "modules/piper/voices/en_US-libritts-high.onnx",  # Updated to match actual file
         "piper_out_dir": "modules/piper/piper_out"
     },
-    "llm": {"enable": True, "n_ctx": 2048, "n_threads": 4, "temperature": 0.6, "top_p": 0.95},
+    "llm": {"enable": True, "n_ctx": 2048, "n_threads": 4, "temperature": 0.6, "top_p": 0.95, "tools_enabled": True},
     "audio": {"sample_rate": 16000, "vad_aggressiveness": 2, "chunk_ms": 250, "device": "default"},
     "camera": {"backend": "dshow", "index": 0, "width": 1280, "height": 720},
     "ws": {"host": "127.0.0.1", "port": 8765},

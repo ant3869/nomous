@@ -1,0 +1,575 @@
+# Title: LLM Tools - Function calling capabilities for autonomous AI
+# Path: backend/tools.py
+# Purpose: Provide LLM with tools for memory, learning, observation, and self-improvement
+
+"""
+Tool definitions and execution framework for LLM function calling.
+Enables the model to interact with memory, track learning, make observations,
+and manage developmental milestones.
+"""
+
+import asyncio
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ToolParameter:
+    """Definition of a tool parameter."""
+    name: str
+    type: str  # "string", "number", "boolean", "array", "object"
+    description: str
+    required: bool = True
+    enum: Optional[List[Any]] = None
+    default: Optional[Any] = None
+
+
+@dataclass
+class Tool:
+    """Definition of a tool that the LLM can use."""
+    name: str
+    description: str
+    parameters: List[ToolParameter]
+    function: Callable
+    category: str = "general"  # general, memory, learning, observation, social
+
+
+class ToolExecutor:
+    """Executes tools called by the LLM and manages tool registry."""
+    
+    def __init__(self, llm_instance):
+        """Initialize with reference to LLM instance for context access."""
+        self.llm = llm_instance
+        self.tools: Dict[str, Tool] = {}
+        self.execution_history: List[Dict[str, Any]] = []
+        self.max_history = 100
+        
+        # Register built-in tools
+        self._register_builtin_tools()
+        
+    def _register_builtin_tools(self):
+        """Register all built-in tools."""
+        # Memory tools
+        self.register_tool(Tool(
+            name="search_memory",
+            description="Search through past memories and interactions to recall relevant information. Use this when you need to remember previous conversations, observations, or learnings.",
+            parameters=[
+                ToolParameter("query", "string", "What to search for in memory", required=True),
+                ToolParameter("limit", "number", "Maximum number of results to return", required=False, default=5),
+                ToolParameter("modality", "string", "Filter by interaction type", required=False, 
+                            enum=["text", "audio", "vision", "autonomous", "all"])
+            ],
+            function=self._search_memory,
+            category="memory"
+        ))
+        
+        self.register_tool(Tool(
+            name="recall_recent_context",
+            description="Retrieve the most recent context and interactions. Use this to maintain conversation continuity and understand what just happened.",
+            parameters=[
+                ToolParameter("count", "number", "Number of recent items to recall", required=False, default=5)
+            ],
+            function=self._recall_recent_context,
+            category="memory"
+        ))
+        
+        # Observation tools
+        self.register_tool(Tool(
+            name="record_observation",
+            description="Record an important observation or insight about the environment, user behavior, or patterns you notice. This helps build understanding over time.",
+            parameters=[
+                ToolParameter("observation", "string", "What you observed", required=True),
+                ToolParameter("category", "string", "Type of observation", required=True,
+                            enum=["user_preference", "pattern", "behavior", "environment", "insight"]),
+                ToolParameter("importance", "number", "How important (1-10)", required=False, default=5),
+                ToolParameter("tags", "array", "Tags for categorization", required=False)
+            ],
+            function=self._record_observation,
+            category="observation"
+        ))
+        
+        # Learning tools
+        self.register_tool(Tool(
+            name="evaluate_interaction",
+            description="Evaluate how well you handled the last interaction. Use this for self-improvement by analyzing what worked and what didn't.",
+            parameters=[
+                ToolParameter("quality_score", "number", "Rate your response quality (1-10)", required=True),
+                ToolParameter("what_worked", "string", "What you did well", required=False),
+                ToolParameter("what_to_improve", "string", "What could be better", required=False)
+            ],
+            function=self._evaluate_interaction,
+            category="learning"
+        ))
+        
+        self.register_tool(Tool(
+            name="identify_pattern",
+            description="Identify and record a pattern you've noticed in user behavior, interactions, or your environment. Helps develop social understanding.",
+            parameters=[
+                ToolParameter("pattern", "string", "Description of the pattern", required=True),
+                ToolParameter("occurrences", "number", "How many times observed", required=False, default=1),
+                ToolParameter("confidence", "number", "How confident (0.0-1.0)", required=False, default=0.7)
+            ],
+            function=self._identify_pattern,
+            category="learning"
+        ))
+        
+        # Social behavior tools
+        self.register_tool(Tool(
+            name="analyze_sentiment",
+            description="Analyze the sentiment or emotional tone of recent interactions. Use this to understand how people are feeling and respond appropriately.",
+            parameters=[
+                ToolParameter("context", "string", "What to analyze (leave empty for recent)", required=False)
+            ],
+            function=self._analyze_sentiment,
+            category="social"
+        ))
+        
+        self.register_tool(Tool(
+            name="check_appropriate_response",
+            description="Before responding, check if a response is appropriate given the context and social norms. Helps avoid mistakes.",
+            parameters=[
+                ToolParameter("proposed_response", "string", "What you're thinking of saying", required=True),
+                ToolParameter("context", "string", "Current situation context", required=False)
+            ],
+            function=self._check_appropriate_response,
+            category="social"
+        ))
+        
+        # Development/milestone tools
+        self.register_tool(Tool(
+            name="track_milestone",
+            description="Record a developmental milestone or achievement. Track your growth and capabilities over time.",
+            parameters=[
+                ToolParameter("milestone", "string", "What was achieved", required=True),
+                ToolParameter("category", "string", "Type of development", required=True,
+                            enum=["communication", "understanding", "capability", "social", "technical"]),
+                ToolParameter("notes", "string", "Additional context", required=False)
+            ],
+            function=self._track_milestone,
+            category="learning"
+        ))
+        
+        self.register_tool(Tool(
+            name="get_current_capabilities",
+            description="Review your current capabilities and tracked milestones. Use this to understand what you can do and what you've learned.",
+            parameters=[],
+            function=self._get_current_capabilities,
+            category="learning"
+        ))
+        
+        logger.info(f"Registered {len(self.tools)} built-in tools across categories: memory, observation, learning, social")
+    
+    def register_tool(self, tool: Tool):
+        """Register a tool for LLM use."""
+        self.tools[tool.name] = tool
+        logger.debug(f"Registered tool: {tool.name} ({tool.category})")
+    
+    def get_tools_schema(self) -> List[Dict[str, Any]]:
+        """Get OpenAI-compatible function calling schema."""
+        schema = []
+        for tool in self.tools.values():
+            params = {}
+            required = []
+            
+            for param in tool.parameters:
+                param_def = {
+                    "type": param.type,
+                    "description": param.description
+                }
+                if param.enum:
+                    param_def["enum"] = param.enum
+                if param.default is not None:
+                    param_def["default"] = param.default
+                    
+                params[param.name] = param_def
+                if param.required:
+                    required.append(param.name)
+            
+            schema.append({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": params,
+                    "required": required
+                }
+            })
+        
+        return schema
+    
+    def get_tools_prompt(self) -> str:
+        """Generate a prompt describing available tools."""
+        tools_by_category = {}
+        for tool in self.tools.values():
+            if tool.category not in tools_by_category:
+                tools_by_category[tool.category] = []
+            tools_by_category[tool.category].append(tool)
+        
+        prompt = "You have access to the following tools:\n\n"
+        
+        for category, tools in sorted(tools_by_category.items()):
+            prompt += f"## {category.title()} Tools\n"
+            for tool in tools:
+                prompt += f"- **{tool.name}**: {tool.description}\n"
+                for param in tool.parameters:
+                    req = "required" if param.required else "optional"
+                    prompt += f"  - {param.name} ({param.type}, {req}): {param.description}\n"
+            prompt += "\n"
+        
+        prompt += "To use a tool, include in your response: TOOL_CALL: {\"tool\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n"
+        return prompt
+    
+    async def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a tool and return the result."""
+        if tool_name not in self.tools:
+            return {"error": f"Unknown tool: {tool_name}"}
+        
+        tool = self.tools[tool_name]
+        
+        try:
+            # Validate arguments
+            validated_args = {}
+            for param in tool.parameters:
+                if param.name in args:
+                    validated_args[param.name] = args[param.name]
+                elif param.required:
+                    return {"error": f"Missing required parameter: {param.name}"}
+                elif param.default is not None:
+                    validated_args[param.name] = param.default
+            
+            logger.info(f"Executing tool: {tool_name} with args: {validated_args}")
+            
+            # Execute the tool
+            result = await tool.function(**validated_args)
+            
+            # Record execution
+            self.execution_history.append({
+                "tool": tool_name,
+                "args": validated_args,
+                "result": result,
+                "timestamp": time.time(),
+                "success": True
+            })
+            
+            if len(self.execution_history) > self.max_history:
+                self.execution_history.pop(0)
+            
+            return {"success": True, "result": result}
+            
+        except Exception as e:
+            logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
+            error_result = {"error": str(e)}
+            
+            self.execution_history.append({
+                "tool": tool_name,
+                "args": args,
+                "result": error_result,
+                "timestamp": time.time(),
+                "success": False
+            })
+            
+            return error_result
+    
+    def parse_tool_calls(self, text: str) -> List[Dict[str, Any]]:
+        """Parse tool calls from LLM output."""
+        tool_calls = []
+        lines = text.split('\n')
+        
+        for line in lines:
+            if 'TOOL_CALL:' in line:
+                try:
+                    json_start = line.index('{')
+                    json_str = line[json_start:]
+                    call_data = json.loads(json_str)
+                    
+                    if 'tool' in call_data:
+                        tool_calls.append(call_data)
+                except (ValueError, json.JSONDecodeError) as e:
+                    logger.warning(f"Failed to parse tool call: {e}")
+        
+        return tool_calls
+    
+    # Tool implementation methods
+    async def _search_memory(self, query: str, limit: int = 5, modality: str = "all") -> Dict[str, Any]:
+        """Search memory for relevant past interactions."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"found": 0, "results": [], "message": "Memory system not available"}
+        
+        try:
+            # Get nodes and edges from memory
+            nodes, edges = await asyncio.to_thread(self.llm.memory._load_graph_sync) if hasattr(self.llm.memory, '_load_graph_sync') else ([], [])
+            
+            # Simple text search through nodes
+            query_lower = query.lower()
+            results = []
+            
+            for node in nodes:
+                # Filter by modality if specified
+                if modality != "all" and node.get("source") != modality:
+                    continue
+                
+                # Search in label and description
+                label = (node.get("label") or "").lower()
+                desc = (node.get("description") or "").lower()
+                
+                if query_lower in label or query_lower in desc:
+                    results.append({
+                        "type": node.get("kind"),
+                        "content": node.get("description") or node.get("label"),
+                        "source": node.get("source"),
+                        "timestamp": node.get("timestamp"),
+                        "relevance": 1.0 if query_lower in label else 0.5
+                    })
+            
+            # Sort by relevance and limit
+            results.sort(key=lambda x: x["relevance"], reverse=True)
+            results = results[:limit]
+            
+            return {
+                "found": len(results),
+                "results": results,
+                "query": query
+            }
+        except Exception as e:
+            logger.error(f"Memory search failed: {e}")
+            return {"found": 0, "results": [], "error": str(e)}
+    
+    async def _recall_recent_context(self, count: int = 5) -> Dict[str, Any]:
+        """Recall recent context from LLM's short-term memory."""
+        recent = self.llm.recent_context[-count:] if len(self.llm.recent_context) > 0 else []
+        
+        return {
+            "count": len(recent),
+            "context": [
+                {
+                    "type": ctx["type"],
+                    "content": ctx["content"][:200],  # Truncate long content
+                    "timestamp": ctx.get("timestamp")
+                }
+                for ctx in recent
+            ]
+        }
+    
+    async def _record_observation(self, observation: str, category: str, 
+                                  importance: int = 5, tags: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Record an observation."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available"}
+        
+        tags_list = tags or []
+        tags_list.append(f"importance_{importance}")
+        tags_list.append(f"category_{category}")
+        
+        try:
+            await self.llm.memory.record_interaction(
+                modality="observation",
+                stimulus=f"[{category.upper()}] {observation}",
+                response=f"Recorded observation (importance: {importance}/10)",
+                tags=tags_list
+            )
+            
+            return {
+                "success": True,
+                "message": f"Observation recorded: {observation[:50]}...",
+                "category": category,
+                "importance": importance
+            }
+        except Exception as e:
+            logger.error(f"Failed to record observation: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def _evaluate_interaction(self, quality_score: int, 
+                                   what_worked: Optional[str] = None,
+                                   what_to_improve: Optional[str] = None) -> Dict[str, Any]:
+        """Self-evaluate an interaction."""
+        evaluation = {
+            "quality_score": quality_score,
+            "what_worked": what_worked or "Not specified",
+            "what_to_improve": what_to_improve or "Not specified",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Record as observation
+        if self.llm.memory and self.llm.memory.enabled:
+            try:
+                eval_text = f"Self-evaluation: Quality {quality_score}/10. Worked: {what_worked or 'N/A'}. Improve: {what_to_improve or 'N/A'}"
+                await self.llm.memory.record_interaction(
+                    modality="self_evaluation",
+                    stimulus="Internal reflection",
+                    response=eval_text,
+                    tags=["self_improvement", f"quality_{quality_score}"]
+                )
+            except Exception as e:
+                logger.error(f"Failed to record evaluation: {e}")
+        
+        # Apply reinforcement based on score
+        if self.llm:
+            delta = (quality_score - 5) * 2  # Map 1-10 to -8 to +10
+            await self.llm.reinforce(delta)
+        
+        return evaluation
+    
+    async def _identify_pattern(self, pattern: str, occurrences: int = 1, 
+                               confidence: float = 0.7) -> Dict[str, Any]:
+        """Record an identified pattern."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available"}
+        
+        try:
+            await self.llm.memory.record_interaction(
+                modality="pattern_recognition",
+                stimulus=f"Pattern identified: {pattern}",
+                response=f"Observed {occurrences} time(s)",
+                confidence=confidence,
+                tags=["pattern", f"occurrences_{occurrences}"]
+            )
+            
+            return {
+                "success": True,
+                "pattern": pattern,
+                "occurrences": occurrences,
+                "confidence": confidence,
+                "message": "Pattern recorded for future reference"
+            }
+        except Exception as e:
+            logger.error(f"Failed to record pattern: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def _analyze_sentiment(self, context: Optional[str] = None) -> Dict[str, Any]:
+        """Analyze sentiment of context or recent interactions."""
+        # Simple keyword-based sentiment analysis
+        if context:
+            text = context.lower()
+        else:
+            # Use recent context
+            recent = self.llm.recent_context[-3:] if len(self.llm.recent_context) > 0 else []
+            text = " ".join([ctx.get("content", "") for ctx in recent]).lower()
+        
+        # Basic sentiment indicators
+        positive_words = ["good", "great", "happy", "love", "excellent", "wonderful", "thanks", "thank you"]
+        negative_words = ["bad", "sad", "angry", "hate", "terrible", "awful", "annoyed", "frustrated"]
+        
+        positive_count = sum(1 for word in positive_words if word in text)
+        negative_count = sum(1 for word in negative_words if word in text)
+        
+        if positive_count > negative_count:
+            sentiment = "positive"
+            confidence = min(0.95, 0.5 + (positive_count * 0.1))
+        elif negative_count > positive_count:
+            sentiment = "negative"
+            confidence = min(0.95, 0.5 + (negative_count * 0.1))
+        else:
+            sentiment = "neutral"
+            confidence = 0.6
+        
+        return {
+            "sentiment": sentiment,
+            "confidence": confidence,
+            "indicators": {
+                "positive": positive_count,
+                "negative": negative_count
+            },
+            "suggestion": self._get_sentiment_suggestion(sentiment)
+        }
+    
+    def _get_sentiment_suggestion(self, sentiment: str) -> str:
+        """Get suggestion based on sentiment."""
+        if sentiment == "positive":
+            return "Continue being supportive and engaging"
+        elif sentiment == "negative":
+            return "Be empathetic and helpful, avoid being too casual"
+        else:
+            return "Maintain neutral, helpful tone"
+    
+    async def _check_appropriate_response(self, proposed_response: str, 
+                                         context: Optional[str] = None) -> Dict[str, Any]:
+        """Check if a response is appropriate."""
+        # Basic appropriateness checks
+        checks = {
+            "length_ok": len(proposed_response) < 500,  # Not too long
+            "has_content": len(proposed_response.strip()) > 5,  # Has substance
+            "no_spam": proposed_response.count("!") < 5,  # Not over-excited
+            "no_caps_spam": proposed_response.upper() != proposed_response  # Not all caps
+        }
+        
+        is_appropriate = all(checks.values())
+        
+        issues = [key for key, value in checks.items() if not value]
+        
+        return {
+            "appropriate": is_appropriate,
+            "checks": checks,
+            "issues": issues,
+            "recommendation": "Good to send" if is_appropriate else f"Consider revising: {', '.join(issues)}"
+        }
+    
+    async def _track_milestone(self, milestone: str, category: str, 
+                              notes: Optional[str] = None) -> Dict[str, Any]:
+        """Track a developmental milestone."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available"}
+        
+        try:
+            milestone_text = f"🎯 MILESTONE [{category.upper()}]: {milestone}"
+            if notes:
+                milestone_text += f" | Notes: {notes}"
+            
+            await self.llm.memory.record_interaction(
+                modality="milestone",
+                stimulus=milestone_text,
+                response="Milestone achieved",
+                tags=["milestone", f"category_{category}", "achievement"]
+            )
+            
+            # Also send event to UI
+            if self.llm.bridge:
+                await self.llm.bridge.post({
+                    "type": "event",
+                    "message": f"🎯 Milestone: {milestone}"
+                })
+            
+            return {
+                "success": True,
+                "milestone": milestone,
+                "category": category,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        except Exception as e:
+            logger.error(f"Failed to track milestone: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def _get_current_capabilities(self) -> Dict[str, Any]:
+        """Get current capabilities and milestones."""
+        capabilities = {
+            "tools_available": len(self.tools),
+            "tool_categories": list(set(tool.category for tool in self.tools.values())),
+            "recent_tool_usage": len([h for h in self.execution_history[-20:] if h.get("success")]),
+            "reinforcement_score": self.llm._reinforcement if hasattr(self.llm, "_reinforcement") else 0.0
+        }
+        
+        # Get milestone count if memory available
+        if self.llm.memory and self.llm.memory.enabled:
+            try:
+                nodes, _ = await asyncio.to_thread(self.llm.memory._load_graph_sync) if hasattr(self.llm.memory, '_load_graph_sync') else ([], [])
+                milestones = [n for n in nodes if "milestone" in (n.get("tags") or [])]
+                capabilities["milestones_achieved"] = len(milestones)
+                capabilities["recent_milestones"] = [
+                    {
+                        "description": m.get("description", "")[:100],
+                        "timestamp": m.get("timestamp")
+                    }
+                    for m in milestones[-5:]
+                ]
+            except Exception as e:
+                logger.error(f"Failed to load milestones: {e}")
+        
+        return capabilities
+
+
+__all__ = ["Tool", "ToolParameter", "ToolExecutor"]
