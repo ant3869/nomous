@@ -5,6 +5,7 @@ import { Badge } from "./components/ui/badge";
 import { Slider } from "./components/ui/slider";
 import { Tabs, TabsContent, TabsTrigger } from "./components/ui/tabs";
 import { TabsList } from "./components/ui/TabsList";
+import { FilePathInput } from "./components/FilePathInput";
 import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
@@ -47,7 +48,11 @@ interface ControlSettings {
   sttModelPath: string;
   llmTemperature: number;
   llmMaxTokens: number;
+  modelStrategy: "speed" | "balanced" | "accuracy" | "custom";
 }
+
+type ModelPathKey = "llmModelPath" | "visionModelPath" | "audioModelPath" | "sttModelPath";
+type PresetStrategy = Exclude<ControlSettings["modelStrategy"], "custom">;
 
 interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
@@ -177,6 +182,7 @@ function useNomousBridge() {
     sttModelPath: "/models/stt/whisper-small",
     llmTemperature: 0.8,
     llmMaxTokens: 4096,
+    modelStrategy: "balanced",
   };
 
   const [state, setState] = useState<DashboardState>({
@@ -828,9 +834,10 @@ interface ControlCenterProps {
   push: (data: any) => void;
   updateSettings: (patch: Partial<ControlSettings>) => void;
   setState: React.Dispatch<React.SetStateAction<DashboardState>>;
+  beginModelSwitch: (label: string) => void;
 }
 
-function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push, updateSettings, setState }: ControlCenterProps) {
+function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push, updateSettings, setState, beginModelSwitch }: ControlCenterProps) {
   const voices = useMemo(() => [
     "piper/en_US-amy-medium",
     "piper/en_US-kathleen-low",
@@ -838,6 +845,125 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
     "piper/ja_JP-kokoro-high",
     "piper/es_ES-mls_10246-low"
   ], []);
+
+  const { llmModelPath, visionModelPath, audioModelPath, sttModelPath, modelStrategy } = state.settings;
+
+  const performancePresets = useMemo<Array<{
+    id: PresetStrategy;
+    label: string;
+    description: string;
+    conditions: string[];
+    models: { llm: string; vision: string; audio: string; stt: string };
+  }>>(
+    () => [
+      {
+        id: "speed",
+        label: "Low-Latency",
+        description: "Favor responsiveness for live, reactive loops.",
+        conditions: ["Latency < 150ms", "Short prompts"],
+        models: {
+          llm: "/models/llm/main-q4_0.gguf",
+          vision: "/models/vision/runtime-lite.bin",
+          audio: "/models/audio/piper-fast.onnx",
+          stt: "/models/stt/whisper-small",
+        },
+      },
+      {
+        id: "balanced",
+        label: "Balanced",
+        description: "Blend quality and speed for everyday operations.",
+        conditions: ["Adaptive context", "Standard workloads"],
+        models: {
+          llm: "/models/llm/main.gguf",
+          vision: "/models/vision/runtime.bin",
+          audio: "/models/audio/piper.onnx",
+          stt: "/models/stt/whisper-small",
+        },
+      },
+      {
+        id: "accuracy",
+        label: "High Accuracy",
+        description: "Maximize reasoning depth and recognition fidelity.",
+        conditions: ["Long-form tasks", "Detailed perception"],
+        models: {
+          llm: "/models/llm/main-q6_k.gguf",
+          vision: "/models/vision/runtime-highres.bin",
+          audio: "/models/audio/piper-high.onnx",
+          stt: "/models/stt/whisper-large-v3",
+        },
+      },
+    ],
+    []
+  );
+
+  const applyPreset = useCallback(
+    (presetId: PresetStrategy) => {
+      const preset = performancePresets.find(item => item.id === presetId);
+      if (!preset) return;
+
+      const changes: { key: string; value: string }[] = [];
+      if (llmModelPath !== preset.models.llm) {
+        changes.push({ key: "llm_model_path", value: preset.models.llm });
+      }
+      if (visionModelPath !== preset.models.vision) {
+        changes.push({ key: "vision_model_path", value: preset.models.vision });
+      }
+      if (audioModelPath !== preset.models.audio) {
+        changes.push({ key: "audio_model_path", value: preset.models.audio });
+      }
+      if (sttModelPath !== preset.models.stt) {
+        changes.push({ key: "stt_model_path", value: preset.models.stt });
+      }
+
+      const strategyChanged = modelStrategy !== preset.id;
+      if (!strategyChanged && changes.length === 0) {
+        return;
+      }
+
+      updateSettings({
+        modelStrategy: preset.id,
+        llmModelPath: preset.models.llm,
+        visionModelPath: preset.models.vision,
+        audioModelPath: preset.models.audio,
+        sttModelPath: preset.models.stt,
+      });
+
+      if (changes.length > 0) {
+        beginModelSwitch(`Applying ${preset.label} preset`);
+        changes.forEach(change => {
+          push({ type: "param", key: change.key, value: change.value });
+        });
+      }
+    },
+    [audioModelPath, beginModelSwitch, llmModelPath, modelStrategy, performancePresets, push, sttModelPath, updateSettings, visionModelPath]
+  );
+
+  const createModelCommitHandler = useCallback(
+    (key: ModelPathKey, paramKey: string, label: string) => (next: string) => {
+      const trimmed = next.trim();
+      const currentValue =
+        key === "llmModelPath"
+          ? llmModelPath
+          : key === "visionModelPath"
+            ? visionModelPath
+            : key === "audioModelPath"
+              ? audioModelPath
+              : sttModelPath;
+
+      const pathChanged = trimmed !== currentValue;
+      const patch: Partial<ControlSettings> = { [key]: trimmed } as Partial<ControlSettings>;
+      if (pathChanged && modelStrategy !== "custom") {
+        patch.modelStrategy = "custom";
+      }
+      updateSettings(patch);
+
+      if (pathChanged && trimmed) {
+        beginModelSwitch(label);
+        push({ type: "param", key: paramKey, value: trimmed });
+      }
+    },
+    [audioModelPath, beginModelSwitch, llmModelPath, modelStrategy, push, sttModelPath, updateSettings, visionModelPath]
+  );
 
   if (!open) return null;
 
@@ -1032,50 +1158,123 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
                   <h3 className="text-lg font-semibold text-zinc-100">LLM Runtime</h3>
                   <p className="text-xs text-zinc-400">All controls that shape cognition stay together for clarity.</p>
                 </div>
-                <div className="space-y-3">
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Conversation Model</span>
-                    <input value={state.settings.llmModelPath} onChange={(e)=>{
-                      updateSettings({ llmModelPath: e.target.value });
-                      push({ type: "param", key: "llm_model_path", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
-                  </label>
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Vision Model</span>
-                    <input value={state.settings.visionModelPath} onChange={(e)=>{
-                      updateSettings({ visionModelPath: e.target.value });
-                      push({ type: "param", key: "vision_model_path", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
-                  </label>
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Audio Model</span>
-                    <input value={state.settings.audioModelPath} onChange={(e)=>{
-                      updateSettings({ audioModelPath: e.target.value });
-                      push({ type: "param", key: "audio_model_path", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
-                  </label>
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">STT Model</span>
-                    <input value={state.settings.sttModelPath} onChange={(e)=>{
-                      updateSettings({ sttModelPath: e.target.value });
-                      push({ type: "param", key: "stt_model_path", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
-                  </label>
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Temperature</span><span>{state.settings.llmTemperature.toFixed(2)}</span></div>
-                    <Slider key={sliderKey("temp", Math.round(state.settings.llmTemperature*100))} defaultValue={[Math.round(state.settings.llmTemperature*100)]} min={0} max={120} step={5} onValueChange={(v)=>{
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">Conditional Presets</span>
+                    <div className="grid gap-2 md:grid-cols-3">
+                      {performancePresets.map(preset => {
+                        const active = state.settings.modelStrategy === preset.id;
+                        const presetClasses = active
+                          ? "border-emerald-500/60 bg-emerald-500/10"
+                          : "border-zinc-800/70 bg-zinc-950/40 hover:border-emerald-500/40";
+                        const buttonClasses = "rounded-xl border px-3 py-3 text-left transition " + presetClasses;
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => applyPreset(preset.id)}
+                            className={buttonClasses}
+                          >
+                            <div className="flex items-center justify-between text-sm font-semibold text-zinc-100">
+                              {preset.label}
+                              {active && (
+                                <Badge className="bg-emerald-500/20 text-emerald-100 border border-emerald-400/30">Active</Badge>
+                              )}
+                            </div>
+                            <p className="mt-1 text-xs text-zinc-400">{preset.description}</p>
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {preset.conditions.map(condition => (
+                                <Badge
+                                  key={condition}
+                                  className="bg-zinc-900/70 text-zinc-300 border border-zinc-800/70"
+                                >
+                                  {condition}
+                                </Badge>
+                              ))}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {state.settings.modelStrategy === "custom" && (
+                      <p className="text-xs text-amber-300/80">
+                        Using custom model paths. Presets will overwrite your manual configuration.
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-3">
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">Conversation Model</span>
+                      <FilePathInput
+                        value={state.settings.llmModelPath}
+                        onChange={val => updateSettings({ llmModelPath: val })}
+                        onCommit={createModelCommitHandler("llmModelPath", "llm_model_path", "Switching conversation model")}
+                        accept={[".gguf"]}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">Vision Model</span>
+                      <FilePathInput
+                        value={state.settings.visionModelPath}
+                        onChange={val => updateSettings({ visionModelPath: val })}
+                        onCommit={createModelCommitHandler("visionModelPath", "vision_model_path", "Switching vision model")}
+                        accept={[".bin", ".onnx"]}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">Audio Model</span>
+                      <FilePathInput
+                        value={state.settings.audioModelPath}
+                        onChange={val => updateSettings({ audioModelPath: val })}
+                        onCommit={createModelCommitHandler("audioModelPath", "audio_model_path", "Switching audio model")}
+                        accept={[".onnx", ".bin"]}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">STT Model</span>
+                      <FilePathInput
+                        value={state.settings.sttModelPath}
+                        onChange={val => updateSettings({ sttModelPath: val })}
+                        onCommit={createModelCommitHandler("sttModelPath", "stt_model_path", "Switching speech-to-text model")}
+                        allowDirectories
+                      />
+                    </label>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between text-xs text-zinc-400">
+                    <span>Temperature</span>
+                    <span>{state.settings.llmTemperature.toFixed(2)}</span>
+                  </div>
+                  <Slider
+                    key={sliderKey("temp", Math.round(state.settings.llmTemperature * 100))}
+                    defaultValue={[Math.round(state.settings.llmTemperature * 100)]}
+                    min={0}
+                    max={120}
+                    step={5}
+                    onValueChange={(v)=>{
                       const val = Math.round((v[0] / 100) * 100) / 100;
                       updateSettings({ llmTemperature: val });
                       push({ type: "param", key: "llm_temperature", value: val });
-                    }}/>
+                    }}
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between text-xs text-zinc-400">
+                    <span>Max Tokens</span>
+                    <span>{state.settings.llmMaxTokens}</span>
                   </div>
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Max Tokens</span><span>{state.settings.llmMaxTokens}</span></div>
-                    <Slider key={sliderKey("maxtok", state.settings.llmMaxTokens)} defaultValue={[state.settings.llmMaxTokens]} min={512} max={8192} step={256} onValueChange={(v)=>{
+                  <Slider
+                    key={sliderKey("maxtok", state.settings.llmMaxTokens)}
+                    defaultValue={[state.settings.llmMaxTokens]}
+                    min={512}
+                    max={8192}
+                    step={256}
+                    onValueChange={(v)=>{
                       updateSettings({ llmMaxTokens: v[0] });
                       push({ type: "param", key: "llm_max_tokens", value: v[0] });
-                    }}/>
-                  </div>
+                    }}
+                  />
                 </div>
               </CardContent>
             </Card>
@@ -1113,6 +1312,83 @@ export default function App(){
   const [controlCenterOpen, setControlCenterOpen] = useState(false);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const memoryInsights = useMemo(() => computeMemoryInsights(state.memory.nodes, state.memory.edges), [state.memory.nodes, state.memory.edges]);
+  const [modelSwitching, setModelSwitching] = useState<{ label: string; progress: number } | null>(null);
+  const modelSwitchStartRef = useRef<number>(0);
+  const hideModelSwitchRef = useRef<number | null>(null);
+
+  const beginModelSwitch = useCallback((label: string) => {
+    modelSwitchStartRef.current = Date.now();
+    if (hideModelSwitchRef.current !== null) {
+      window.clearTimeout(hideModelSwitchRef.current);
+      hideModelSwitchRef.current = null;
+    }
+    setModelSwitching({ label, progress: 5 });
+  }, []);
+
+  const completeModelSwitch = useCallback(() => {
+    setModelSwitching(prev => {
+      if (!prev) return prev;
+      if (prev.progress >= 100) {
+        return prev;
+      }
+      return { ...prev, progress: 100 };
+    });
+    if (hideModelSwitchRef.current !== null) {
+      window.clearTimeout(hideModelSwitchRef.current);
+    }
+    hideModelSwitchRef.current = window.setTimeout(() => {
+      setModelSwitching(null);
+      hideModelSwitchRef.current = null;
+    }, 220);
+  }, []);
+
+  const isSwitching = modelSwitching !== null;
+
+  useEffect(() => {
+    if (!isSwitching) return;
+    let frame = 0;
+    const step = () => {
+      const elapsed = Date.now() - modelSwitchStartRef.current;
+      const progress = Math.min(95, Math.round((elapsed / 2000) * 100));
+      setModelSwitching(prev => {
+        if (!prev) return prev;
+        if (progress <= prev.progress) {
+          return prev;
+        }
+        return { ...prev, progress };
+      });
+      if (progress < 95) {
+        frame = requestAnimationFrame(step);
+      }
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [isSwitching]);
+
+  useEffect(() => {
+    if (!isSwitching) return;
+    const timeout = window.setTimeout(() => {
+      completeModelSwitch();
+    }, 3200);
+    return () => window.clearTimeout(timeout);
+  }, [completeModelSwitch, isSwitching]);
+
+  useEffect(() => {
+    if (!isSwitching) return;
+    const elapsed = Date.now() - modelSwitchStartRef.current;
+    if (elapsed < 600) return;
+    if (state.status !== "learning") {
+      completeModelSwitch();
+    }
+  }, [completeModelSwitch, isSwitching, state.status]);
+
+  useEffect(() => {
+    return () => {
+      if (hideModelSwitchRef.current !== null) {
+        window.clearTimeout(hideModelSwitchRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedMemoryId && !memoryInsights.nodeById.has(selectedMemoryId)) {
@@ -1441,7 +1717,22 @@ export default function App(){
           push={push}
           updateSettings={updateSettings}
           setState={setState}
+          beginModelSwitch={beginModelSwitch}
         />
+        {modelSwitching && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
+            <div className="w-full max-w-md rounded-2xl border border-emerald-500/30 bg-zinc-950/90 p-6 shadow-[0_24px_100px_rgba(16,185,129,0.25)]">
+              <div className="mb-4 flex items-center gap-3 text-emerald-200">
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                <div>
+                  <div className="text-sm font-semibold text-emerald-100">{modelSwitching.label}</div>
+                  <div className="text-xs text-zinc-400">Loading models and refreshing the runtime…</div>
+                </div>
+              </div>
+              <Progress value={Math.min(modelSwitching.progress, 100)} />
+            </div>
+          </div>
+        )}
       </div>
     </TooltipProvider>
   );
