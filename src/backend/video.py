@@ -257,30 +257,33 @@ class CameraLoop:
                 logger.debug(f"Face detection error: {e}")
         
         # Construct description
-        parts = []
-        
-        # Gesture takes priority
+        description_bits = []
+
+        if face_info:
+            description_bits.append(face_info)
+            description_bits.append(f"in a {light} environment")
+        else:
+            description_bits.append(f"The space looks {light}")
+
+        if motion_level > 5:
+            description_bits.append(activity)
+
+        description = ", ".join(description_bits)
+        if not description:
+            description = f"The scene looks {light}."
+        elif not description.endswith("."):
+            description += "."
+
         if gesture:
             gesture_text = {
-                "waving": "waving their hand",
-                "peace_sign": "making a peace sign",
-                "thumbs_up": "giving a thumbs up",
-                "open_hand": "showing their open hand",
-                "pointing": "pointing"
-            }.get(gesture, f"making a gesture ({gesture})")
-            parts.append(f"I see you {gesture_text}")
-        elif face_info:
-            parts.append(face_info)
-        
-        parts.append(f"in a {light} environment")
-        
-        if motion_level > 5:
-            parts.append(activity)
-        
-        description = ", ".join(parts)
-        if not description.endswith("."):
-            description += "."
-        
+                "waving": "a quick wave",
+                "peace_sign": "a peace sign",
+                "thumbs_up": "a thumbs up",
+                "open_hand": "an open hand",
+                "pointing": "a pointing motion"
+            }.get(gesture, f"a {gesture} gesture")
+            description += f" I also notice {gesture_text}."
+
         return description
 
     def _run(self):
