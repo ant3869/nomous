@@ -7,16 +7,21 @@ import logging
 import re
 import time
 from pathlib import Path
+from typing import Optional
+
 from llama_cpp import Llama
+
+from .memory import MemoryStore
 from .utils import msg_event, msg_token, msg_speak, msg_status
 
 logger = logging.getLogger(__name__)
 
 
 class LocalLLM:
-    def __init__(self, cfg, bridge, tts):
+    def __init__(self, cfg, bridge, tts, memory: Optional[MemoryStore] = None):
         self.bridge = bridge
         self.tts = tts
+        self.memory = memory
         self._cfg = cfg
         p = cfg["paths"]
 
@@ -254,11 +259,13 @@ You (reply naturally):"""
             
             prompt = self._build_prompt(user_text, "text")
             response = await self._generate(prompt)
-            
+
             if response:
                 self._add_context("assistant", response)
                 yield msg_speak(response)
                 await self.tts.speak(response)
+                if self.memory:
+                    await self.memory.record_interaction("text", user_text, response)
         finally:
             self._processing = False
 
@@ -279,11 +286,13 @@ You (reply naturally):"""
             
             prompt = self._build_prompt(transcribed_text, "audio")
             response = await self._generate(prompt)
-            
+
             if response:
                 self._add_context("assistant", response)
                 await self.bridge.post(msg_speak(response))
                 await self.tts.speak(response)
+                if self.memory:
+                    await self.memory.record_interaction("audio", transcribed_text, response)
                 
         finally:
             self._processing = False
@@ -320,11 +329,13 @@ You (reply naturally):"""
             
             prompt = self._build_prompt(description, "vision")
             response = await self._generate(prompt, max_tokens=80)
-            
+
             if response:
                 self._add_context("assistant", response)
                 await self.bridge.post(msg_speak(response))
                 await self.tts.speak(response)
+                if self.memory:
+                    await self.memory.record_interaction("vision", description, response, tags=["vision"])
                 
         finally:
             self._processing = False
@@ -358,11 +369,13 @@ You (reply naturally):"""
             
             prompt = self._build_prompt("", "autonomous")
             response = await self._generate(prompt, max_tokens=50)
-            
+
             if response and len(response) > 3:
                 self._add_context("assistant_autonomous", response)
                 await self.bridge.post(msg_speak(response))
                 await self.tts.speak(response)
+                if self.memory:
+                    await self.memory.record_interaction("autonomous", "internal_reflection", response)
             else:
                 logger.info("Autonomous thought: no output")
 

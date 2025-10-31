@@ -21,6 +21,7 @@ from src.backend.utils import Bridge, msg_status, msg_event
 from src.backend.video import CameraLoop
 from src.backend.audio import AudioSTT
 from src.backend.llm import LocalLLM
+from src.backend.memory import MemoryStore
 from src.backend.tts import PiperTTS
 
 # Set up logging
@@ -42,6 +43,7 @@ class Server:
         self.tts: Optional[PiperTTS] = None
         self.cam: Optional[CameraLoop] = None
         self._autonomous_task: Optional[asyncio.Task] = None
+        self.memory: Optional[MemoryStore] = None
 
     async def handle_toggle(self, what: str, value: bool):
         if not what:
@@ -142,12 +144,18 @@ class Server:
             logger.info("Starting workers...")
             
             # Initialize components in correct order
+            self.memory = MemoryStore(CFG, self.bridge)
+            if self.memory.enabled:
+                logger.info("Memory store initialized")
+            else:
+                logger.info("Memory store unavailable (disabled)")
+
             self.tts = PiperTTS(CFG, self.bridge)
             logger.info("TTS initialized")
-            
-            self.llm = LocalLLM(CFG, self.bridge, self.tts)
+
+            self.llm = LocalLLM(CFG, self.bridge, self.tts, self.memory)
             logger.info("LLM initialized")
-            
+
             self.stt = AudioSTT(CFG, self.bridge)
             logger.info("STT initialized")
             
@@ -163,7 +171,10 @@ class Server:
             
             await self.bridge.post(msg_status("idle", "Ready"))
             logger.info("All workers started successfully")
-            
+
+            if self.memory and self.memory.enabled:
+                await self.memory.publish_graph()
+
             # Start autonomous thinking loop
             self._autonomous_task = asyncio.create_task(self._autonomous_loop())
             logger.info("Autonomous thinking loop started")
@@ -228,7 +239,16 @@ class Server:
                 logger.info("TTS stopped")
         except Exception as e:
             logger.error(f"Error stopping TTS: {e}")
-        
+
+        try:
+            if self.memory:
+                await self.memory.stop()
+                logger.info("Memory store stopped")
+        except Exception as e:
+            logger.error(f"Error stopping memory store: {e}")
+        finally:
+            self.memory = None
+
         logger.info("All workers stopped")
 
     async def handle(self, ws: WebSocketServerProtocol):
@@ -241,7 +261,9 @@ class Server:
         
         try:
             await self.bridge.post(msg_event("connected"))
-            
+            if self.memory and self.memory.enabled:
+                await self.memory.publish_graph()
+
             async for data in ws:
                 try:
                     msg = json.loads(data)
