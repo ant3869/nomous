@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 from llama_cpp import Llama
@@ -55,6 +56,36 @@ class LocalLLM:
         self._lock = asyncio.Lock()
 
         logger.info("LLM initialized successfully")
+
+    def _sanitize_response(self, text: str) -> str:
+        """Remove stage directions/emotes and keep output brief."""
+        if not text:
+            return ""
+
+        def _strip_stage(match) -> str:
+            inner = match.group(1).strip()
+            # Keep if it looks like a full sentence or URL
+            if not inner:
+                return " "
+            if any(punct in inner for punct in ".!?"):
+                return match.group(0)
+            if len(inner.split()) > 6:
+                return match.group(0)
+            return " "
+
+        cleaned = text
+        cleaned = re.sub(r"\*([^*\n]{0,80})\*", _strip_stage, cleaned)
+        cleaned = re.sub(r"\(([^\)\n]{0,80})\)", _strip_stage, cleaned)
+        cleaned = re.sub(r"\[([^\]\n]{0,80})\]", _strip_stage, cleaned)
+        cleaned = re.sub(r"(?i)\b(?:assistant|nomous|ai|system|bot)\s*:\s*", "", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+
+        # Limit to at most two sentences to avoid rambling
+        sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+        if len(sentences) > 2:
+            cleaned = " ".join(sentences[:2]).strip()
+
+        return cleaned
 
     async def stop(self):
         logger.info("LLM stopping...")
@@ -185,17 +216,21 @@ You (reply naturally):"""
                             await self.bridge.post({"type": "thought", "text": f"Generating: {''.join(tokens[-9:])}"})
             
             response = "".join(tokens).strip()
-            
+
             # Remove any role-play artifacts
             response = response.replace("You:", "").replace("Person:", "").strip()
-            
+
+            sanitized = self._sanitize_response(response)
+            if sanitized:
+                response = sanitized
+
             if len(response) < 3 and total_tokens < min_tokens:
                 logger.warning(f"Response too short ({len(response)} chars, {total_tokens} tokens), regenerating...")
                 return await self._generate(prompt, max_tokens=max_tok, min_tokens=0)
-            
+
             logger.info(f"Generated ({total_tokens} tokens): {response[:100]}")
             await self.bridge.post({"type": "thought", "text": f"Final: {response}"})
-            
+
             await self.bridge.post(msg_status("idle", "Ready"))
             return response
             
