@@ -53,16 +53,16 @@ class AudioSTT:
         # Higher sensitivity -> accept shorter snippets
         if self.sensitivity >= 85:
             self._min_partial_chars = 1
-            self._min_final_chars = 2
+            self._min_final_chars = 1
         elif self.sensitivity >= 60:
             self._min_partial_chars = 2
-            self._min_final_chars = 3
+            self._min_final_chars = 2
         elif self.sensitivity >= 35:
             self._min_partial_chars = 3
-            self._min_final_chars = 4
+            self._min_final_chars = 3
         else:
             self._min_partial_chars = 4
-            self._min_final_chars = 6
+            self._min_final_chars = 4
 
     async def reload_model(self, model_path: str):
         """Hot-reload the STT acoustic model."""
@@ -107,9 +107,10 @@ class AudioSTT:
                     result = json.loads(self.rec.Result())
                     text = (result.get("text") or "").strip()
 
-                    if text and len(text) >= self._min_final_chars:
+                    words = [w for w in text.split() if w]
+                    if text and (len(text) >= self._min_final_chars or len(words) >= 1):
                         logger.info(f"STT FINAL: '{text}'")
-                        await self.bridge.post(msg_event(f"🎤 Heard: {text}"))
+                        await self.bridge.post(msg_event(f"🎤 You said: {text}"))
 
                         if self.llm:
                             logger.info(f"Triggering LLM with audio: {text}")
