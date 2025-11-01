@@ -1,15 +1,20 @@
+import json
+import logging
+import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import time
-import webbrowser
-import yaml
-import os
-import signal
-import shutil
 import venv
+import webbrowser
+
+import yaml
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
+
 from rich.console import Console
 from rich.panel import Panel
 
@@ -19,53 +24,165 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "nomous.log"
+
+logger = logging.getLogger("nomous.start")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(file_handler)
+logger.propagate = False
+
+ASCII_BANNER = """
+ _   _                      _                 
+| \\ | |                    | |                
+|  \\| | ___  _ __ ___   ___| |_ ___  _   _ ___
+| . ` |/ _ \\| '_ ` _ \\ / _ \\ __/ _ \\| | | / __|
+| |\\  | (_) | | | | | |  __/ || (_) | |_| \\__ \\
+|_| \\_|\\___/|_| |_| |_|\\___|\\__\\___/ \\__,_|___/
+"""
+
+
+def get_runtime_version() -> str:
+    """Derive the nomous runtime version from repository metadata."""
+
+    version_file = PROJECT_ROOT / "VERSION"
+    if version_file.exists():
+        version = version_file.read_text(encoding="utf-8").strip()
+        if version:
+            return version
+
+    package_json = PROJECT_ROOT / "package.json"
+    if package_json.exists():
+        try:
+            with package_json.open("r", encoding="utf-8") as handle:
+                package_data = json.load(handle)
+            version = str(package_data.get("version", "")).strip()
+            if version:
+                return version
+        except Exception as exc:
+            logger.warning("Unable to read package.json version: %s", exc)
+
+    return "unknown"
+
+
+NOMOUS_VERSION = get_runtime_version()
+
+
+def emit_start_banner():
+    """Render the startup banner to the console and log file."""
+
+    separator = "=" * 80
+    header = f"nomous runtime start • version {NOMOUS_VERSION} • pid {os.getpid()}"
+
+    logger.info("")
+    logger.info(separator)
+    logger.info(header)
+    for line in ASCII_BANNER.strip().splitlines():
+        logger.info(line)
+    logger.info(separator)
+
+    console.print(f"[bold blue]{ASCII_BANNER}[/]")
+    console.print(
+        Panel.fit(
+            f"[bold blue]nomous[/] v{NOMOUS_VERSION} - Local Autonomy Runtime",
+            border_style="blue",
+        )
+    )
+
+
+def _emit(message: str, level: int, icon: str, style: str) -> None:
+    """Log a message and render it to the console with consistent styling."""
+
+    logger.log(level, message)
+    console.print(f"[{style}]{icon}[/] {message}")
+
 def print_status(message, style="bold green"):
     """Print styled status message"""
-    console.print(f"[{style}]▶[/] {message}")
+    _emit(message, logging.INFO, "▶", style)
 
 def print_error(message):
     """Print error message"""
-    console.print(f"[bold red]✖[/] {message}")
+    _emit(message, logging.ERROR, "✖", "bold red")
 
 def print_warning(message):
     """Print warning message"""
-    console.print(f"[bold yellow]⚠[/] {message}")
+    _emit(message, logging.WARNING, "⚠", "bold yellow")
 
 def print_success(message):
     """Print success message"""
-    console.print(f"[bold green]✓[/] {message}")
+    _emit(message, logging.INFO, "✓", "bold green")
 
-def get_pip_command() -> str:
-    """Return the pip command string for the local virtual environment."""
-    if sys.platform == 'win32':
-        return str(Path('.venv/Scripts/python.exe').absolute()) + ' -m pip'
-    return str(Path('.venv/bin/python').absolute()) + ' -m pip'
+@dataclass
+class PythonEnvironment:
+    """Details about the Python environment used for subprocesses."""
 
-def setup_virtual_env():
-    """Setup virtual environment if it doesn't exist"""
-    venv_path = Path('.venv')
-    if not venv_path.exists():
+    python_executable: Path
+    pip_command: str
+    root: Optional[Path]
+    created: bool
+    marker_path: Path
+
+
+def _environment_marker_path(env_root: Optional[Path]) -> Path:
+    """Return a writable marker path for tracking dependency installation."""
+
+    if env_root and env_root.exists() and os.access(env_root, os.W_OK):
+        return env_root / "nomous-pip-installed"
+    return PROJECT_ROOT / ".nomous-pip-installed"
+
+
+def ensure_python_environment() -> Optional[PythonEnvironment]:
+    """Ensure a working Python environment and return its metadata."""
+
+    # If we're already running inside a virtual environment, reuse it.
+    if sys.prefix != sys.base_prefix or os.environ.get("VIRTUAL_ENV"):
+        python_path = Path(sys.executable).resolve()
+        env_root = Path(os.environ.get("VIRTUAL_ENV", sys.prefix)).resolve()
+        pip_cmd = f'"{python_path}" -m pip'
+        marker = _environment_marker_path(env_root)
+        logger.info("Reusing active Python environment at %s", env_root)
+        return PythonEnvironment(python_path, pip_cmd, env_root, False, marker)
+
+    # Otherwise create or reuse the project-local virtual environment.
+    env_root = PROJECT_ROOT / ".venv"
+    python_path = env_root / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    pip_cmd = f'"{python_path}" -m pip'
+
+    created = False
+    if not env_root.exists():
         print_status("Creating virtual environment...")
         try:
-            venv.create('.venv', with_pip=True, system_site_packages=True)
-            # Upgrade pip in the new environment
-            pip_cmd = get_pip_command()
-            run_command(f'{pip_cmd} install --upgrade pip')
-            print_success("Virtual environment created")
-            return True
-        except Exception as e:
-            print_error(f"Failed to create virtual environment: {e}")
-            return False
-    return False
+            venv.create(env_root, with_pip=True, system_site_packages=True)
+            created = True
+            logger.info("Created new virtual environment at %s", env_root)
+        except Exception as exc:
+            print_error(f"Failed to create virtual environment: {exc}")
+            return None
 
-def activate_virtual_env():
-    """Get the activation command for the virtual environment"""
-    if sys.platform == 'win32':
-        return str(Path('.venv/Scripts/activate.bat'))
-    return f"source {str(Path('.venv/bin/activate'))}"
+        if not python_path.exists():
+            print_error(f"Virtual environment created but Python executable not found at {python_path}")
+            logger.error("Python executable missing after venv.create at %s", python_path)
+            return None
+        success, output = run_command(f"{pip_cmd} install --upgrade pip")
+        if success:
+            print_success("Virtual environment created")
+        else:
+            print_warning(
+                f"Virtual environment created but failed to upgrade pip: {output.strip() or 'see logs'}"
+            )
+    else:
+        logger.info("Using existing virtual environment at %s", env_root)
+
+    marker = _environment_marker_path(env_root)
+    return PythonEnvironment(python_path, pip_cmd, env_root, created, marker)
 
 def run_command(command, cwd=None, shell=True):
     """Run a command and return its output"""
+    logger.info("Running command: %s", command)
     try:
         result = subprocess.run(
             command,
@@ -75,8 +192,18 @@ def run_command(command, cwd=None, shell=True):
             text=True,
             capture_output=True
         )
+        stdout = (result.stdout or "").strip()
+        if stdout:
+            logger.info("Command output: %s", stdout)
         return True, result.stdout
     except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        stdout = (e.stdout or "").strip()
+        logger.error("Command failed with return code %s", e.returncode)
+        if stdout:
+            logger.error("Command stdout: %s", stdout)
+        if stderr:
+            logger.error("Command stderr: %s", stderr)
         return False, e.stderr
 
 def detect_system_cuda_version() -> str:
@@ -197,12 +324,16 @@ def ensure_gpu_support(pip_cmd: str, info: "ComputeDeviceInfo") -> "ComputeDevic
     )
     return refreshed
 
-def check_and_install_dependencies() -> Tuple[bool, str]:
+def check_and_install_dependencies() -> Tuple[bool, Optional[PythonEnvironment]]:
     """Check and install project dependencies."""
-    # Check virtual environment
-    is_new_venv = setup_virtual_env()
-    pip_cmd = get_pip_command()
-    
+
+    env_info = ensure_python_environment()
+    if env_info is None:
+        logger.error("Unable to initialize Python environment; aborting startup")
+        return False, None
+    pip_cmd = env_info.pip_command
+    logger.info("Python executable resolved to %s", env_info.python_executable)
+
     # Check node_modules
     if not Path('node_modules').exists():
         print_status("Installing Node.js dependencies...")
@@ -211,26 +342,31 @@ def check_and_install_dependencies() -> Tuple[bool, str]:
             print_success("Node.js dependencies installed")
         else:
             print_error(f"Failed to install Node.js dependencies: {output}")
-            return False, pip_cmd
+            return False, env_info
     else:
         print_success("Node.js dependencies already installed")
 
     # Install Python requirements if new venv or requirements changed
-    if is_new_venv or not Path('.venv/pip-installed').exists():
+    if env_info.created or not env_info.marker_path.exists():
         print_status("Installing Python dependencies...")
         # Install project requirements
         success, output = run_command(f'{pip_cmd} install -r requirements.txt')
         if success:
             # Create marker file to track installation
-            Path('.venv/pip-installed').touch()
+            try:
+                env_info.marker_path.parent.mkdir(parents=True, exist_ok=True)
+                env_info.marker_path.touch()
+            except OSError as exc:
+                print_warning(f"Could not update dependency marker: {exc}")
             print_success("Python dependencies installed")
         else:
             print_error(f"Failed to install Python dependencies: {output}")
-            return False, pip_cmd
+            return False, env_info
     else:
         print_success("Python dependencies already installed")
+        logger.info("Python dependencies previously satisfied")
 
-    return True, pip_cmd
+    return True, env_info
 
 def load_config():
     """Load configuration from config.yaml"""
@@ -268,12 +404,14 @@ def is_port_in_use(port):
 def wait_for_backend(ws_host, ws_port, timeout=30):
     """Wait for backend to be ready"""
     start_time = time.time()
+    logger.info("Waiting for backend service on ws://%s:%s", ws_host, ws_port)
     while time.time() - start_time < timeout:
         if is_port_in_use(ws_port):
-            print(f"✅ Backend is ready at ws://{ws_host}:{ws_port}")
+            print_success(f"Backend is ready at ws://{ws_host}:{ws_port}")
             return True
         time.sleep(1)
-        print("⌛ Waiting for backend to start...")
+        print_status("Waiting for backend to start...", style="bold cyan")
+    logger.error("Backend did not start within %s seconds", timeout)
     return False
 
 def cleanup_processes(processes):
@@ -281,32 +419,44 @@ def cleanup_processes(processes):
     for proc in processes:
         try:
             if sys.platform == 'win32':
-                proc.kill()
+                if proc.poll() is None:
+                    logger.info("Terminating process %s", proc.pid)
+                    proc.kill()
             else:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except:
-            pass
+                if proc.poll() is None:
+                    logger.info("Terminating process group %s", proc.pid)
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            logger.exception("Error while terminating process %s", getattr(proc, "pid", "unknown"))
 
 def main():
-    console.print(Panel.fit(
-        "[bold blue]Nomous[/] - Local Autonomy Runtime",
-        border_style="blue"
-    ))
+    emit_start_banner()
 
     # Change to project root directory
     os.chdir(Path(__file__).parent.parent)
+    print_status(f"Working directory set to {Path.cwd()}", style="bold cyan")
 
     # Check and install dependencies
-    ok, pip_cmd = check_and_install_dependencies()
-    if not ok:
+    ok, env_info = check_and_install_dependencies()
+    if not ok or env_info is None:
+        logger.error("Startup halted during dependency verification")
         return 1
 
     # Check CUDA availability and attempt to enable GPU acceleration
     device_info = check_compute_backend()
-    device_info = ensure_gpu_support(pip_cmd, device_info)
+    device_info = ensure_gpu_support(env_info.pip_command, device_info)
     update_config_for_gpu(device_info.is_gpu)
     
     device_label = f"{device_info.backend} ({device_info.name})"
+    system_summary = (
+        "System Configuration\n"
+        f"Device: {device_label}\n"
+        f"Reason: {device_info.reason}\n"
+        f"CUDA: {device_info.cuda_version or 'not detected'}\n"
+        f"Python: {sys.version.split()[0]}\n"
+        f"Operating System: {sys.platform}"
+    )
+    logger.info(system_summary.replace("\n", " | "))
     console.print(Panel(
         f"[bold]System Configuration[/]\n"
         f"Device: [bold {'green' if device_info.is_gpu else 'yellow'}]{device_label}[/]\n"
@@ -324,6 +474,7 @@ def main():
         ws_port = config['ws']['port']
     except Exception as e:
         print_error(f"Error loading configuration: {e}")
+        logger.exception("Failed to load configuration")
         return 1
 
     processes = []
@@ -331,18 +482,19 @@ def main():
     try:
         # Start backend
         print_status("Starting backend server...")
-        venv_python = '.venv/Scripts/python' if sys.platform == 'win32' else '.venv/bin/python'
         backend_script = Path('scripts/run_bridge.py')
         backend_proc = subprocess.Popen(
-            [venv_python, str(backend_script)],
+            [str(env_info.python_executable), str(backend_script)],
             creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
         )
         processes.append(backend_proc)
+        logger.info("Backend process started with PID %s", backend_proc.pid)
 
         # Wait for backend to be ready
         if not wait_for_backend(ws_host, ws_port):
             print_error("Backend failed to start within timeout period")
             cleanup_processes(processes)
+            logger.error("Backend startup timed out; services terminated")
             return 1
 
         # Start frontend
@@ -353,6 +505,7 @@ def main():
             creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
         )
         processes.append(frontend_proc)
+        logger.info("Frontend process started with PID %s", frontend_proc.pid)
 
         # Wait a moment for the dev server to start
         time.sleep(5)
@@ -361,6 +514,7 @@ def main():
         frontend_url = "http://localhost:5173"  # Default Vite dev server port
         print_status(f"Opening browser to {frontend_url}")
         webbrowser.open(frontend_url)
+        logger.info("Browser open requested for %s", frontend_url)
 
         console.print(Panel(
             "[bold green]Services are running![/]\n"
@@ -369,19 +523,38 @@ def main():
             f"• Backend: [bold blue]ws://{ws_host}:{ws_port}[/]",
             border_style="green"
         ))
+        logger.info(
+            "Services running • Frontend: %s • Backend: ws://%s:%s",
+            frontend_url,
+            ws_host,
+            ws_port,
+        )
 
         # Keep the script running and handle keyboard interrupt
         while True:
             if any(proc.poll() is not None for proc in processes):
                 print_error("One of the services has stopped unexpectedly")
+                logger.error("Detected unexpected process termination")
                 break
             time.sleep(1)
 
     except KeyboardInterrupt:
         print_status("\nStopping all services...", style="bold yellow")
+        logger.info("Keyboard interrupt received; shutting down services")
     finally:
         cleanup_processes(processes)
         print_success("All services have been stopped")
+        logger.info("nomous runtime shutdown complete")
+
+    return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        exit_code = main()
+    except Exception as exc:
+        logger.exception("Unhandled exception during startup")
+        print_error(f"Unhandled exception: {exc}")
+        exit_code = 1
+
+    logger.info("nomous start script exiting with code %s", exit_code)
+    sys.exit(exit_code)
