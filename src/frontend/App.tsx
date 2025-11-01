@@ -884,10 +884,25 @@ function formatTimestamp(value?: string) {
   return date.toLocaleString();
 }
 
+/**
+ * Generates a unique ID for chat messages.
+ * Uses crypto.randomUUID() if available, otherwise falls back to a random string.
+ */
+function generateUniqueId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  // Fallback: generate a random string (not cryptographically secure)
+  return (
+    Math.random().toString(36).slice(2) +
+    Math.random().toString(36).slice(2)
+  ).slice(0, 16);
+}
+
 function createChatMessage(role: ChatMessage["role"], text: string): ChatMessage {
   const ts = Date.now();
   return {
-    id: `${role}-${ts}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `${role}-${ts}-${generateUniqueId()}`,
     role,
     text,
     timestamp: ts,
