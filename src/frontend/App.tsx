@@ -15,6 +15,7 @@ import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tool
 import type { MemoryEdge, MemoryNode } from "./types/memory";
 import { buildMemoryNodeDetail, computeMemoryInsights } from "./utils/memory";
 import type { MemoryNodeDetail, MemoryInsightEntry } from "./utils/memory";
+import { ToolActivity, ToolStats } from "./components/ToolActivity";
 
 /** Nomous â€" Autonomy Dashboard (fixed) */
 export type NomousStatus = "idle" | "thinking" | "speaking" | "noticing" | "learning" | "error";
@@ -54,6 +55,11 @@ interface ControlSettings {
   modelStrategy: "speed" | "balanced" | "accuracy" | "custom";
 }
 
+interface ToolResult {
+  tool: string;
+  result: any;
+  timestamp: number;
+}
 type ModelPathKey = "llmModelPath" | "visionModelPath" | "audioModelPath" | "sttModelPath";
 type PresetStrategy = Exclude<ControlSettings["modelStrategy"], "custom">;
 
@@ -68,6 +74,7 @@ interface LoadingOverlay {
   label: string;
   progress: number;
   detail?: string;
+  speechLines: string[]; systemLines: string[]; toolActivity: ToolResult[]; settings: ControlSettings;
 }
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -204,6 +211,7 @@ function useNomousBridge() {
     micOn: false, vu: 0, consoleLines: [], thoughtLines: [], speechLines: [], systemLines: [],
     settings: defaultSettings,
     loadingOverlay: null,
+    toolActivity: [], settings: defaultSettings,
   });
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicChain | null>(null);
@@ -305,6 +313,19 @@ function useNomousBridge() {
           rewardTotal: msg.payload.rewardTotal ?? p.behavior.rewardTotal,
         } })); break;
         case "memory": setState(p => ({ ...p, memory: { nodes: msg.nodes ?? p.memory.nodes, edges: msg.edges ?? p.memory.edges } })); break;
+        case "tool_result": {
+          const toolResult: ToolResult = {
+            tool: msg.tool || 'unknown',
+            result: msg.result || {},
+            timestamp: Date.now()
+          };
+          setState(p => ({
+            ...p,
+            toolActivity: [...p.toolActivity, toolResult].slice(-100), // Keep last 100
+            systemLines: [`[${new Date().toLocaleTimeString()}] 🛠️ Tool: ${msg.tool}`, ...p.systemLines.slice(0, 200)]
+          }));
+          break;
+        }
         case "event": {
           const stamp = `[${new Date().toLocaleTimeString()}]`;
           const payload = msg.message;
@@ -1607,20 +1628,21 @@ export default function App(){
             />
           </div>
 
-          <Card className="border-zinc-800/70 bg-zinc-950/70 backdrop-blur">
-            <CardContent className="p-5">
-              <div className="w-full">
-                <Tabs defaultValue="overview">
-                  <TabsList>
-                    <TabsTrigger value="overview">Overview</TabsTrigger>
-                    <TabsTrigger value="console">Console</TabsTrigger>
-                    <TabsTrigger value="behavior">Behavior</TabsTrigger>
-                    <TabsTrigger value="tokens">Tokens</TabsTrigger>
-                    <TabsTrigger value="memory">Memory</TabsTrigger>
-                    <TabsTrigger value="thoughts">Thoughts</TabsTrigger>
-                  </TabsList>
+        <Card className="bg-zinc-900/60 backdrop-blur-sm border-zinc-800/70">
+          <CardContent className="p-4">
+            <div className="w-full">
+              <Tabs defaultValue="overview">
+              <TabsList className="flex flex-wrap gap-2 bg-zinc-950/60 border border-zinc-800/60">
+                <TabsTrigger value="overview">Overview</TabsTrigger>
+                <TabsTrigger value="console">Console</TabsTrigger>
+                <TabsTrigger value="behavior">Behavior</TabsTrigger>
+                <TabsTrigger value="tokens">Tokens</TabsTrigger>
+                <TabsTrigger value="memory">Memory</TabsTrigger>
+                <TabsTrigger value="tools">Tools</TabsTrigger>
+                <TabsTrigger value="thoughts">Thoughts</TabsTrigger>
+              </TabsList>
 
-                  <TabsContent value="overview" className="pt-4">
+              <TabsContent value="overview" className="pt-4">
                 <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                   <div className="xl:col-span-2 space-y-4">
                     <Card className="bg-zinc-900/70 border-zinc-800/60">
@@ -1858,6 +1880,30 @@ export default function App(){
                       accentClassName="text-sky-300"
                       height="h-36"
                     />
+                  </div>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="tools" className="pt-4">
+                <div className="grid gap-4 lg:grid-cols-3">
+                  <div className="lg:col-span-2">
+                    <ToolActivity tools={state.toolActivity} maxDisplay={20} />
+                  </div>
+                  <div className="space-y-4 lg:col-span-1">
+                    <ToolStats tools={state.toolActivity} />
+                    <Card className="bg-slate-900/50 border-slate-700">
+                      <CardContent className="pt-4">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Wrench className="h-4 w-4 text-slate-400" />
+                          <span className="text-sm font-medium text-slate-200">About Tools</span>
+                        </div>
+                        <p className="text-xs text-slate-400">
+                          The LLM can use 9 built-in tools to enhance its capabilities:
+                          memory search, observations, self-evaluation, pattern recognition,
+                          sentiment analysis, and more.
+                        </p>
+                      </CardContent>
+                    </Card>
                   </div>
                 </div>
               </TabsContent>

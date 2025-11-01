@@ -16,10 +16,14 @@ Nomous is an offline-first WebSocket bridge that seamlessly connects your React 
 ## Features
 - ✨ Real-time token streaming with partial speech text to UI
 - 🎯 Reinforcement learning controls (reward/penalty) with running total
+- 🛠️ **LLM Tool System** with 9 built-in tools for memory, learning, and observation
 - 📹 Live camera preview with configurable snapshot debounce
 - 🎙️ Browser microphone streaming (PCM16) with Vosk recognition
 - 🔊 Optional Piper TTS synthesis for model outputs
 - 🔄 Thread-safe WebSocket broadcast system
+- 🧠 Persistent memory with graph-based storage
+- 📊 Pattern recognition and social behavior learning
+- 🎯 Developmental milestone tracking
 
 ## Quick Start
 1. Clone the repository
@@ -108,6 +112,7 @@ python -m pytest tests/
 ## Documentation
 - [Installation Guide](docs/INSTALL_INSTRUCTIONS.md)
 - [Frontend Documentation](docs/README_FE.md)
+- [LLM Tool System](docs/TOOLS.md) - **NEW!** Comprehensive guide to the tool system
 - [Changelog](docs/CHANGELOG.md)
 - [Bug Fixes](docs/BUG_FIXES.md)
 - [Testing Guide](docs/TESTING.md)
