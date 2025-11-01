@@ -88,6 +88,7 @@ interface LoadingOverlay {
 }
 
 const TARGET_SAMPLE_RATE = 16000;
+const MAX_CHAT_HISTORY = 200;
 
 interface MicChain {
   ctx: AudioContext;
@@ -294,7 +295,7 @@ function useNomousBridge() {
     if (!ws || ws.readyState !== 1) {
       setState(p => ({
         ...p,
-        chatMessages: [...p.chatMessages, createChatMessage("system", "Unable to send message: not connected to runtime.")].slice(-200),
+        chatMessages: [...p.chatMessages, createChatMessage("system", "Unable to send message: not connected to runtime.")].slice(-MAX_CHAT_HISTORY),
       }));
       log("chat send failed: not connected");
       return;
@@ -303,7 +304,7 @@ function useNomousBridge() {
     const message = createChatMessage("user", trimmed);
     setState(p => ({
       ...p,
-      chatMessages: [...p.chatMessages, message].slice(-200),
+      chatMessages: [...p.chatMessages, message].slice(-MAX_CHAT_HISTORY),
     }));
     push({ type: "text", value: trimmed });
     setChatInput("");
@@ -327,7 +328,7 @@ function useNomousBridge() {
             status: msg.value,
             statusDetail: msg.detail ?? p.statusDetail,
             systemLines: msg.detail
-              ? [`${stamp} ${String(msg.value ?? "status").toUpperCase()} → ${msg.detail}`, ...p.systemLines.slice(0, 200)]
+              ? [`${stamp} ${String(msg.value ?? "status").toUpperCase()} → ${msg.detail}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
               : p.systemLines,
           }));
           break;
@@ -350,13 +351,13 @@ function useNomousBridge() {
             ...p,
             status: "speaking",
             statusDetail: msg.text,
-            speechLines: msg.text ? [`${stamp} ${msg.text}`, ...p.speechLines.slice(0, 200)] : p.speechLines,
-            chatMessages: assistantMessage ? [...p.chatMessages, assistantMessage].slice(-200) : p.chatMessages,
+            speechLines: msg.text ? [`${stamp} ${msg.text}`, ...p.speechLines.slice(0, MAX_CHAT_HISTORY)] : p.speechLines,
+            chatMessages: assistantMessage ? [...p.chatMessages, assistantMessage].slice(-MAX_CHAT_HISTORY) : p.chatMessages,
           }));
           break;
         }
         case "thought": 
-          setState(p => ({ ...p, thoughtLines: [`[${new Date().toLocaleTimeString()}] ${msg.text}`, ...p.thoughtLines.slice(0, 200)] })); 
+          setState(p => ({ ...p, thoughtLines: [`[${new Date().toLocaleTimeString()}] ${msg.text}`, ...p.thoughtLines.slice(0, MAX_CHAT_HISTORY)] })); 
           break;
         case "image": setState(p => ({ ...p, preview: msg.dataUrl })); break;
         case "metrics": setState(p => ({ ...p, behavior: {
@@ -383,7 +384,7 @@ function useNomousBridge() {
           setState(p => ({
             ...p,
             toolActivity: [...p.toolActivity, toolResult].slice(-100), // Keep last 100
-            systemLines: [`[${new Date().toLocaleTimeString()}] 🛠️ Tool: ${msg.tool}`, ...p.systemLines.slice(0, 200)]
+            systemLines: [`[${new Date().toLocaleTimeString()}] 🛠️ Tool: ${msg.tool}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
           }));
           break;
         }
@@ -394,7 +395,7 @@ function useNomousBridge() {
           setState(p => ({
             ...p,
             lastEvent: payload,
-            systemLines: payload ? [`${stamp} EVENT → ${payload}`, ...p.systemLines.slice(0, 200)] : p.systemLines,
+            systemLines: payload ? [`${stamp} EVENT → ${payload}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)] : p.systemLines,
           }));
           break;
         }
