@@ -224,13 +224,19 @@ class CameraLoop:
         height, width = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Brightness
+        # Brightness (0-255 scale, adjusted thresholds for more accurate detection)
         brightness = gray.mean()
-        if brightness < 70:
+        logger.debug(f"Frame brightness: {brightness:.1f}")
+        
+        if brightness < 40:
+            light = "very dark"
+        elif brightness < 85:
             light = "dark"
-        elif brightness < 140:
-            light = "moderately lit"
-        elif brightness < 220:
+        elif brightness < 120:
+            light = "dimly lit"
+        elif brightness < 170:
+            light = "well lit"
+        elif brightness < 210:
             light = "bright"
         else:
             light = "very bright"
@@ -304,6 +310,12 @@ class CameraLoop:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.capture_height)
             cap.set(cv2.CAP_PROP_FPS, 30)
             
+            # Enable auto-exposure for better lighting adaptation
+            try:
+                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)  # Enable auto-exposure
+            except Exception as e:
+                logger.debug(f"Could not enable auto-exposure: {e}")
+            
             logger.info(f"Camera opened: {self.capture_width}x{self.capture_height}, backend={self.backend}")
 
             # Determine native brightness scaling so slider percentages map correctly
@@ -318,6 +330,13 @@ class CameraLoop:
                     f"Camera brightness scale set to {self._brightness_scale:.2f} "
                     f"(backend={self.backend}, native={native_brightness})"
                 )
+                
+                # Set a reasonable default brightness (60% of max) if too low
+                if native_brightness is not None and native_brightness < (0.5 * self._brightness_scale):
+                    default_brightness = 0.6 * self._brightness_scale
+                    cap.set(cv2.CAP_PROP_BRIGHTNESS, default_brightness)
+                    logger.info(f"Camera brightness adjusted to {default_brightness:.1f} (60% of scale)")
+                    
             except Exception as e:
                 logger.debug(f"Unable to determine brightness scale: {e}")
                 self._brightness_scale = 1.0
