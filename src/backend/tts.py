@@ -89,7 +89,7 @@ class PiperTTS:
             with_suffix = path.with_suffix(".onnx")
             candidates.append(self._voices_root / with_suffix)
             if name_only:
-                candidates.append(self._voices_root / Path(name_only).with_suffix(".onnx"))
+                candidates.append(self._voices_root / f"{Path(name_only).stem}.onnx")
 
         for candidate in candidates:
             if candidate.exists():
