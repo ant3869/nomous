@@ -124,6 +124,7 @@ class SystemMonitor:
             try:
                 await self._task
             except asyncio.CancelledError:
+                # Task cancellation is expected during shutdown; safe to ignore.
                 pass
             self._task = None
         if self._nvml_initialised:
