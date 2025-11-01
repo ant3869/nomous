@@ -5,14 +5,18 @@ import webbrowser
 import yaml
 import os
 import signal
-import psutil
+import shutil
 import venv
-import torch
 from pathlib import Path
+from typing import Tuple
 from rich.console import Console
 from rich.panel import Panel
 
 console = Console()
+
+PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 def print_status(message, style="bold green"):
     """Print styled status message"""
@@ -30,18 +34,11 @@ def print_success(message):
     """Print success message"""
     console.print(f"[bold green]✓[/] {message}")
 
-def check_cuda():
-    """Check CUDA availability and configuration"""
-    cuda_available = torch.cuda.is_available()
-    if cuda_available:
-        device_count = torch.cuda.device_count()
-        device_name = torch.cuda.get_device_name(0)
-        print_success(f"CUDA is available! Found {device_count} device(s)")
-        print_success(f"Using: {device_name}")
-        return True, f"GPU ({device_name})"
-    else:
-        print_warning("CUDA is not available. Using CPU mode")
-        return False, "CPU"
+def get_pip_command() -> str:
+    """Return the pip command string for the local virtual environment."""
+    if sys.platform == 'win32':
+        return str(Path('.venv/Scripts/python.exe').absolute()) + ' -m pip'
+    return str(Path('.venv/bin/python').absolute()) + ' -m pip'
 
 def setup_virtual_env():
     """Setup virtual environment if it doesn't exist"""
@@ -51,10 +48,7 @@ def setup_virtual_env():
         try:
             venv.create('.venv', with_pip=True, system_site_packages=True)
             # Upgrade pip in the new environment
-            if sys.platform == 'win32':
-                pip_cmd = str(Path('.venv/Scripts/python.exe').absolute()) + ' -m pip'
-            else:
-                pip_cmd = str(Path('.venv/bin/python').absolute()) + ' -m pip'
+            pip_cmd = get_pip_command()
             run_command(f'{pip_cmd} install --upgrade pip')
             print_success("Virtual environment created")
             return True
@@ -84,10 +78,75 @@ def run_command(command, cwd=None, shell=True):
     except subprocess.CalledProcessError as e:
         return False, e.stderr
 
-def check_and_install_dependencies():
-    """Check and install project dependencies"""
+def check_compute_backend() -> "ComputeDeviceInfo":
+    """Check CUDA availability and provide a compute device summary."""
+    from src.backend.system import detect_compute_device
+
+    info = detect_compute_device()
+    if info.is_gpu:
+        print_success(
+            f"CUDA is available! Found {info.gpu_count} device(s): {info.name}"
+        )
+        if info.cuda_version:
+            print_success(f"CUDA version: {info.cuda_version}")
+    else:
+        print_warning("CUDA is not available. Using CPU mode")
+        print_warning(info.reason)
+    return info
+
+def ensure_gpu_support(pip_cmd: str, info: "ComputeDeviceInfo") -> "ComputeDeviceInfo":
+    """Attempt to install GPU-accelerated wheels when CUDA hardware is detected."""
+    from src.backend.system import detect_compute_device
+
+    if info.is_gpu:
+        return info
+
+    if not shutil.which("nvidia-smi"):
+        print_warning("No NVIDIA GPU detected by nvidia-smi; continuing with CPU mode.")
+        return info
+
+    print_status(
+        "NVIDIA GPU detected but CUDA unavailable. Attempting to install GPU dependencies...",
+        style="bold yellow",
+    )
+
+    gpu_installs = [
+        (
+            f"{pip_cmd} install --upgrade torch --index-url https://download.pytorch.org/whl/cu121",
+            "PyTorch CUDA build",
+        ),
+        (
+            f'{pip_cmd} install --upgrade "llama-cpp-python[cuda]"',
+            "llama-cpp-python CUDA extension",
+        ),
+    ]
+
+    for command, label in gpu_installs:
+        success, output = run_command(command)
+        if success:
+            print_success(f"Installed {label}")
+        else:
+            trimmed = output.strip() if isinstance(output, str) else ""
+            print_warning(f"Failed to install {label}: {trimmed or 'check logs for details'}")
+
+    print_status("Re-checking CUDA availability...", style="bold cyan")
+    refreshed = detect_compute_device()
+    if refreshed.is_gpu:
+        print_success(
+            f"GPU acceleration enabled: {refreshed.name} (CUDA {refreshed.cuda_version or 'unknown'})"
+        )
+        return refreshed
+
+    print_warning(
+        "CUDA still unavailable after attempted installs. Please ensure NVIDIA drivers and toolkit are installed."
+    )
+    return refreshed
+
+def check_and_install_dependencies() -> Tuple[bool, str]:
+    """Check and install project dependencies."""
     # Check virtual environment
     is_new_venv = setup_virtual_env()
+    pip_cmd = get_pip_command()
     
     # Check node_modules
     if not Path('node_modules').exists():
@@ -97,24 +156,13 @@ def check_and_install_dependencies():
             print_success("Node.js dependencies installed")
         else:
             print_error(f"Failed to install Node.js dependencies: {output}")
-            return False
+            return False, pip_cmd
     else:
         print_success("Node.js dependencies already installed")
 
     # Install Python requirements if new venv or requirements changed
     if is_new_venv or not Path('.venv/pip-installed').exists():
         print_status("Installing Python dependencies...")
-        if sys.platform == 'win32':
-            pip_cmd = str(Path('.venv/Scripts/python.exe').absolute()) + ' -m pip'
-        else:
-            pip_cmd = str(Path('.venv/bin/python').absolute()) + ' -m pip'
-        
-        # Install core dependencies first
-        success, output = run_command(f'{pip_cmd} install rich torch')
-        if not success:
-            print_error(f"Failed to install core dependencies: {output}")
-            return False
-        
         # Install project requirements
         success, output = run_command(f'{pip_cmd} install -r requirements.txt')
         if success:
@@ -123,11 +171,11 @@ def check_and_install_dependencies():
             print_success("Python dependencies installed")
         else:
             print_error(f"Failed to install Python dependencies: {output}")
-            return False
+            return False, pip_cmd
     else:
         print_success("Python dependencies already installed")
-    
-    return True
+
+    return True, pip_cmd
 
 def load_config():
     """Load configuration from config.yaml"""
@@ -194,16 +242,21 @@ def main():
     os.chdir(Path(__file__).parent.parent)
 
     # Check and install dependencies
-    if not check_and_install_dependencies():
+    ok, pip_cmd = check_and_install_dependencies()
+    if not ok:
         return 1
 
-    # Check CUDA availability
-    cuda_available, device_type = check_cuda()
-    update_config_for_gpu(cuda_available)
+    # Check CUDA availability and attempt to enable GPU acceleration
+    device_info = check_compute_backend()
+    device_info = ensure_gpu_support(pip_cmd, device_info)
+    update_config_for_gpu(device_info.is_gpu)
     
+    device_label = f"{device_info.backend} ({device_info.name})"
     console.print(Panel(
         f"[bold]System Configuration[/]\n"
-        f"Device: [bold {'green' if cuda_available else 'yellow'}]{device_type}[/]\n"
+        f"Device: [bold {'green' if device_info.is_gpu else 'yellow'}]{device_label}[/]\n"
+        f"Reason: [bold]{device_info.reason}[/]\n"
+        f"CUDA: [bold]{device_info.cuda_version or 'not detected'}[/]\n"
         f"Python: [bold]{sys.version.split()[0]}[/]\n"
         f"Operating System: [bold]{sys.platform}[/]",
         border_style="blue"

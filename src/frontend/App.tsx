@@ -13,9 +13,11 @@ import { Separator } from "./components/ui/separator";
 import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Scan } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode } from "./types/memory";
+import type { SystemMetricsPayload } from "./types/system";
 import { buildMemoryNodeDetail, computeMemoryInsights } from "./utils/memory";
 import type { MemoryNodeDetail, MemoryInsightEntry } from "./utils/memory";
 import { ToolActivity, ToolStats } from "./components/ToolActivity";
+import { SystemUsageCard } from "./components/SystemUsageCard";
 
 /** Nomous â€" Autonomy Dashboard (fixed) */
 export type NomousStatus = "idle" | "thinking" | "speaking" | "noticing" | "learning" | "error";
@@ -67,7 +69,8 @@ interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
-  speechLines: string[]; systemLines: string[]; settings: ControlSettings; loadingOverlay: LoadingOverlay | null;
+  speechLines: string[]; systemLines: string[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
+  settings: ControlSettings; loadingOverlay: LoadingOverlay | null;
 }
 
 interface LoadingOverlay {
@@ -209,9 +212,10 @@ function useNomousBridge() {
     audioEnabled: true, visionEnabled: true, connected: false,
     url: typeof window !== "undefined" ? (localStorage.getItem("nomous.ws") || "ws://localhost:8765") : "ws://localhost:8765",
     micOn: false, vu: 0, consoleLines: [], thoughtLines: [], speechLines: [], systemLines: [],
+    toolActivity: [],
+    systemMetrics: null,
     settings: defaultSettings,
     loadingOverlay: null,
-    toolActivity: [], settings: defaultSettings,
   });
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicChain | null>(null);
@@ -312,6 +316,13 @@ function useNomousBridge() {
           nonsenseRate: msg.payload.nonsenseRate ?? p.behavior.nonsenseRate,
           rewardTotal: msg.payload.rewardTotal ?? p.behavior.rewardTotal,
         } })); break;
+        case "system_metrics": {
+          if (msg.payload) {
+            const payload = msg.payload as SystemMetricsPayload;
+            setState(p => ({ ...p, systemMetrics: payload }));
+          }
+          break;
+        }
         case "memory": setState(p => ({ ...p, memory: { nodes: msg.nodes ?? p.memory.nodes, edges: msg.edges ?? p.memory.edges } })); break;
         case "tool_result": {
           const toolResult: ToolResult = {
@@ -1695,6 +1706,7 @@ export default function App(){
                   </div>
 
                   <div className="space-y-4">
+                    <SystemUsageCard metrics={state.systemMetrics} />
                     <Card className="bg-zinc-900/70 border-zinc-800/60">
                       <CardContent className="p-4">
                         <div className="flex items-center gap-2 mb-2 text-zinc-200"><Activity className="w-4 h-4"/><span className="font-semibold">Token Flow (last 30s)</span></div>
