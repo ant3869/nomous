@@ -86,12 +86,17 @@ class SystemMonitor:
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._nvml_initialized = False
+        self._nvml_initialised = False
         self._nvml_device_index = 0
         self._gpu_name_override: Optional[str] = None
 
         # Prime CPU utilization so subsequent reads are meaningful
         psutil.cpu_percent(interval=None)
         self._initialize_nvml()
+
+    def _set_nvml_initialized(self, value: bool) -> None:
+        self._nvml_initialized = value
+        self._nvml_initialised = value
 
     def _initialize_nvml(self) -> None:
         should_attempt = self.device_info.is_gpu or shutil.which("nvidia-smi")
@@ -100,14 +105,17 @@ class SystemMonitor:
 
         try:
             nvmlInit()
-            self._nvml_initialized = True
+            self._set_nvml_initialized(True)
             count = nvmlDeviceGetCount()
             if count:
                 self._nvml_device_index = 0
                 handle = nvmlDeviceGetHandleByIndex(self._nvml_device_index)
-                self._gpu_name_override = nvmlDeviceGetName(handle).decode("utf-8")
+                gpu_name = nvmlDeviceGetName(handle)
+                if isinstance(gpu_name, bytes):
+                    gpu_name = gpu_name.decode("utf-8")
+                self._gpu_name_override = gpu_name
         except NVMLError as exc:
-            self._nvml_initialized = False
+            self._set_nvml_initialized(False)
             self.device_info.reason = f"NVML unavailable: {exc}"
 
     async def start(self) -> None:
@@ -132,7 +140,7 @@ class SystemMonitor:
                 nvmlShutdown()
             except NVMLError:  # pragma: no cover - shutdown errors are non-fatal
                 pass
-            self._nvml_initialized = False
+            self._set_nvml_initialized(False)
 
     async def _run(self) -> None:
         try:
