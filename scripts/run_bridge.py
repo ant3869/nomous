@@ -374,17 +374,25 @@ async def main():
     s = Server()
     
     try:
-        await s.start_workers()
-        
         host = CFG["ws"]["host"]
         port = int(CFG["ws"]["port"])
-        
+
         logger.info(f"Starting WebSocket server on {host}:{port}")
-        
+
         async with websockets.serve(s.handle, host, port, max_size=2**22):
             await s.bridge.post(msg_event(f"listening on ws://{host}:{port}"))
             logger.info(f"🚀 Autonomous AI ready on ws://{host}:{port}")
-            
+
+            # Start background workers after the socket is bound so external
+            # readiness checks detect the service immediately (see start.py).
+            try:
+                await s.start_workers()
+            except Exception:
+                # Ensure partial startup is unwound before re-raising so the
+                # caller can log the original failure.
+                await s.stop_workers()
+                raise
+
             try:
                 # Keep server running indefinitely
                 await asyncio.Future()
