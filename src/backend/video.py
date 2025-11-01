@@ -309,7 +309,7 @@ class CameraLoop:
             # Determine native brightness scaling so slider percentages map correctly
             try:
                 native_brightness = cap.get(cv2.CAP_PROP_BRIGHTNESS)
-                if self.backend == 'dshow' or (native_brightness and native_brightness > 1.0):
+                if self.backend == 'dshow' or (native_brightness is not None and native_brightness > 1.0):
                     # DirectShow and similar backends typically use a 0-255 range
                     self._brightness_scale = 255.0
                 else:
