@@ -585,7 +585,21 @@ function useNomousBridge() {
     });
   }, []);
 
-  return { state, setState, connect, disconnect, setMic, push, log, updateSettings };
+  return { 
+    state, 
+    setState, 
+    connect, 
+    disconnect, 
+    setMic, 
+    push, 
+    log, 
+    updateSettings,
+    chatInput,
+    setChatInput,
+    chatScrollRef,
+    handleChatSubmit,
+    handleChatKeyDown,
+  };
 }
 
 const statusMap: Record<NomousStatus, { color: string; label: string }> = {
@@ -1500,7 +1514,21 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
 }
 
 export default function App(){
-  const { state, setState, connect, disconnect, setMic, push, log, updateSettings } = useNomousBridge();
+  const { 
+    state, 
+    setState, 
+    connect, 
+    disconnect, 
+    setMic, 
+    push, 
+    log, 
+    updateSettings,
+    chatInput,
+    setChatInput,
+    chatScrollRef,
+    handleChatSubmit,
+    handleChatKeyDown,
+  } = useNomousBridge();
   const st = statusMap[state.status];
   const tokenTotal = state.tokenWindow.reduce((a, p) => a + p.inTok + p.outTok, 0);
   const [controlCenterOpen, setControlCenterOpen] = useState(false);
