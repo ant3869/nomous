@@ -144,6 +144,12 @@ class MemoryStore:
         nodes, edges = await asyncio.to_thread(self._load_graph_sync)
         logger.debug("Broadcasting memory graph (%d nodes, %d edges)", len(nodes), len(edges))
         await self.bridge.post(msg_memory(nodes, edges))
+    
+    async def load_graph(self) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Public interface to load the memory graph."""
+        if not self.enabled or self._conn is None:
+            return ([], [])
+        return await asyncio.to_thread(self._load_graph_sync)
 
     async def record_interaction(
         self,
