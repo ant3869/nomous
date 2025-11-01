@@ -69,11 +69,32 @@ class PiperTTS:
 
     def _resolve_voice_path(self, voice: str) -> Path:
         path = Path(voice)
+
         if path.exists():
             return path
-        candidate = self._voices_root / voice
-        if candidate.exists():
-            return candidate
+
+        candidates = []
+
+        # Directly inside voices root keeping any nested folders
+        if not path.is_absolute():
+            candidates.append(self._voices_root / path)
+
+        # Attempt with only the filename component
+        name_only = path.name
+        if name_only:
+            candidates.append(self._voices_root / name_only)
+
+        # Ensure the ONNX extension is present when omitted
+        if path.suffix.lower() != ".onnx":
+            with_suffix = path.with_suffix(".onnx")
+            candidates.append(self._voices_root / with_suffix)
+            if name_only:
+                candidates.append(self._voices_root / Path(name_only).with_suffix(".onnx"))
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
         raise FileNotFoundError(f"Voice model not found: {voice}")
 
     async def set_voice(self, voice: str):

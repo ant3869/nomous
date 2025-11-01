@@ -29,6 +29,9 @@ interface WSMessage {
   nodes?: MemoryNode[];
   edges?: MemoryEdge[];
   message?: string;
+  progress?: number;
+  label?: string;
+  target?: string;
 }
 interface ControlSettings {
   cameraEnabled: boolean;
@@ -58,7 +61,13 @@ interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
-  speechLines: string[]; systemLines: string[]; settings: ControlSettings;
+  speechLines: string[]; systemLines: string[]; settings: ControlSettings; loadingOverlay: LoadingOverlay | null;
+}
+
+interface LoadingOverlay {
+  label: string;
+  progress: number;
+  detail?: string;
 }
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -170,7 +179,7 @@ function useNomousBridge() {
     ttsEnabled: true,
     speakerEnabled: true,
     sttEnabled: true,
-    ttsVoice: "piper/en_US-amy-medium",
+    ttsVoice: "en_US-libritts-high.onnx",
     micSensitivity: 60,
     masterVolume: 70,
     cameraResolution: "1280x720",
@@ -194,6 +203,7 @@ function useNomousBridge() {
     url: typeof window !== "undefined" ? (localStorage.getItem("nomous.ws") || "ws://localhost:8765") : "ws://localhost:8765",
     micOn: false, vu: 0, consoleLines: [], thoughtLines: [], speechLines: [], systemLines: [],
     settings: defaultSettings,
+    loadingOverlay: null,
   });
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicChain | null>(null);
@@ -206,6 +216,13 @@ function useNomousBridge() {
     if (!raw) return;
     try {
       const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.ttsVoice === "string") {
+        const stored = parsed.ttsVoice;
+        if (!stored.endsWith(".onnx")) {
+          const voiceName = stored.split("/").pop() ?? stored;
+          parsed.ttsVoice = voiceName.endsWith(".onnx") ? voiceName : `${voiceName}.onnx`;
+        }
+      }
       setState(p => ({ ...p, settings: { ...defaultSettings, ...parsed } }));
     } catch {
       // ignore invalid settings payloads
@@ -299,6 +316,19 @@ function useNomousBridge() {
           }));
           break;
         }
+        case "load_progress": {
+          const rawValue = Number.isFinite(msg.progress as number) ? Number(msg.progress) : 0;
+          const normalized = Math.max(0, Math.min(100, Math.round(rawValue)));
+          const overlay = normalized >= 100
+            ? null
+            : {
+                label: msg.label ?? "Loading models…",
+                progress: normalized,
+                detail: msg.detail,
+              };
+          setState(p => ({ ...p, loadingOverlay: overlay }));
+          break;
+        }
         default: log(`unknown message: ${ev.data?.toString()?.slice(0, 120)}`);
       }
     } catch (e: any) {
@@ -322,7 +352,7 @@ function useNomousBridge() {
       ws.onclose = () => {
         if (hbRef.current) window.clearInterval(hbRef.current);
         hbRef.current = null;
-        setState(p => ({ ...p, connected: false, status: "idle", statusDetail: "Disconnected" }));
+        setState(p => ({ ...p, connected: false, status: "idle", statusDetail: "Disconnected", loadingOverlay: null }));
         log("disconnected");
       };
       ws.onerror = () => { log("ws error"); };
@@ -876,11 +906,11 @@ interface ControlCenterProps {
 
 function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push, updateSettings, setState, beginModelSwitch }: ControlCenterProps) {
   const voices = useMemo(() => [
-    "piper/en_US-amy-medium",
-    "piper/en_US-kathleen-low",
-    "piper/en_GB-sarah-medium",
-    "piper/ja_JP-kokoro-high",
-    "piper/es_ES-mls_10246-low"
+    { value: "en_US-amy-medium.onnx", label: "Amy · en-US (Medium)" },
+    { value: "en_US-kristin-medium.onnx", label: "Kristin · en-US (Medium)" },
+    { value: "en_US-libritts_r-medium.onnx", label: "LibriTTS-R · en-US (Medium)" },
+    { value: "en_US-libritts-high.onnx", label: "LibriTTS · en-US (High)" },
+    { value: "en_US-ryan-high.onnx", label: "Ryan · en-US (High)" }
   ], []);
 
   const { llmModelPath, visionModelPath, audioModelPath, sttModelPath, modelStrategy } = state.settings;
@@ -1130,7 +1160,12 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
                       updateSettings({ ttsVoice: e.target.value });
                       push({ type: "param", key: "tts_voice", value: e.target.value });
                     }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none">
-                      {voices.map(v => <option key={v} value={v}>{v}</option>)}
+                      {voices.map(v => (
+                        <option key={v.value} value={v.value}>{v.label}</option>
+                      ))}
+                      {!voices.some(v => v.value === state.settings.ttsVoice) && state.settings.ttsVoice ? (
+                        <option value={state.settings.ttsVoice}>{state.settings.ttsVoice}</option>
+                      ) : null}
                     </select>
                   </label>
                   <div>
@@ -1847,6 +1882,24 @@ export default function App(){
           setState={setState}
           beginModelSwitch={beginModelSwitch}
         />
+        {state.loadingOverlay && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
+            <div className="w-full max-w-md rounded-2xl border border-emerald-500/30 bg-zinc-950/90 p-6 shadow-[0_24px_100px_rgba(16,185,129,0.25)]">
+              <div className="mb-4 flex items-center gap-3 text-emerald-200">
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                <div>
+                  <div className="text-sm font-semibold text-emerald-100">{state.loadingOverlay.label}</div>
+                  {state.loadingOverlay.detail ? (
+                    <div className="text-xs text-zinc-400">{state.loadingOverlay.detail}</div>
+                  ) : (
+                    <div className="text-xs text-zinc-400">Preparing weights and buffers…</div>
+                  )}
+                </div>
+              </div>
+              <Progress value={Math.min(state.loadingOverlay.progress, 100)} />
+            </div>
+          </div>
+        )}
         {modelSwitching && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
             <div className="w-full max-w-md rounded-2xl border border-emerald-500/30 bg-zinc-950/90 p-6 shadow-[0_24px_100px_rgba(16,185,129,0.25)]">
