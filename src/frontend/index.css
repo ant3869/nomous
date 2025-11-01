@@ -9,7 +9,7 @@
 .btn-secondary { @apply bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700/80; }
 .btn-danger { @apply bg-red-600/90 text-white hover:bg-red-500/90; }
 .badge { @apply inline-flex items-center rounded-md bg-zinc-800/80 px-2 py-0.5 text-xs text-zinc-100; }
-.tabs { @apply flex flex-wrap gap-2 rounded-md border border-zinc-800/60 bg-zinc-950/60 p-1; }
-.tab { @apply px-3 py-1.5 text-sm rounded-md text-zinc-300 hover:bg-zinc-800/60; }
-.tab.active { @apply bg-zinc-800/80 text-white; }
+.tabs { @apply flex flex-wrap items-center gap-2 rounded-full border border-zinc-800/60 bg-zinc-950/70 p-1.5 backdrop-blur; }
+.tab { @apply rounded-full px-4 py-1.5 text-sm font-medium text-zinc-400 transition hover:bg-zinc-900/70 hover:text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50; }
+.tab.active { @apply border border-emerald-500/40 bg-emerald-500/20 text-emerald-100 shadow-inner; }
 .separator { @apply h-px w-full bg-zinc-800/60; }

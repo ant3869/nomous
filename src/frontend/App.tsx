@@ -5,11 +5,12 @@ import { Badge } from "./components/ui/badge";
 import { Slider } from "./components/ui/slider";
 import { Tabs, TabsContent, TabsTrigger } from "./components/ui/tabs";
 import { TabsList } from "./components/ui/TabsList";
+import { FilePathInput } from "./components/FilePathInput";
 import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Separator } from "./components/ui/separator";
-import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Wrench } from "lucide-react";
+import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Scan } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode } from "./types/memory";
 import { buildMemoryNodeDetail, computeMemoryInsights } from "./utils/memory";
@@ -48,6 +49,7 @@ interface ControlSettings {
   sttModelPath: string;
   llmTemperature: number;
   llmMaxTokens: number;
+  modelStrategy: "speed" | "balanced" | "accuracy" | "custom";
 }
 
 interface ToolResult {
@@ -55,6 +57,8 @@ interface ToolResult {
   result: any;
   timestamp: number;
 }
+type ModelPathKey = "llmModelPath" | "visionModelPath" | "audioModelPath" | "sttModelPath";
+type PresetStrategy = Exclude<ControlSettings["modelStrategy"], "custom">;
 
 interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
@@ -184,6 +188,7 @@ function useNomousBridge() {
     sttModelPath: "/models/stt/whisper-small",
     llmTemperature: 0.8,
     llmMaxTokens: 4096,
+    modelStrategy: "balanced",
   };
 
   const [state, setState] = useState<DashboardState>({
@@ -497,6 +502,43 @@ function Meter({ value, label }: { value: number; label: string }) {
     <div className="space-y-1">
       <div className="flex justify-between text-xs text-zinc-300"><span>{label}</span><span>{Math.round(value*100)}%</span></div>
       <Progress value={value*100} />
+    </div>
+  );
+}
+
+function QuickStatCard({
+  icon: Icon,
+  label,
+  value,
+  helper,
+  status,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  helper?: string;
+  status?: "positive" | "negative" | "neutral";
+}) {
+  const accent =
+    status === "positive"
+      ? "text-emerald-300"
+      : status === "negative"
+        ? "text-red-300"
+        : "text-zinc-300";
+
+  return (
+    <div className="relative overflow-hidden rounded-2xl border border-zinc-800/60 bg-zinc-950/70 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition hover:border-emerald-500/40">
+      <div className="absolute -right-6 top-6 h-24 w-24 rounded-full bg-emerald-500/10 blur-3xl" aria-hidden />
+      <div className="flex items-center gap-3 text-sm text-zinc-300">
+        <div className="grid h-10 w-10 place-items-center rounded-xl border border-zinc-800/80 bg-zinc-900/70">
+          <Icon className="h-5 w-5 text-emerald-300" />
+        </div>
+        <div className="space-y-1">
+          <div className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">{label}</div>
+          <div className={`text-lg font-semibold ${accent}`}>{value}</div>
+          {helper ? <div className="text-[11px] text-zinc-500">{helper}</div> : null}
+        </div>
+      </div>
     </div>
   );
 }
@@ -848,9 +890,10 @@ interface ControlCenterProps {
   push: (data: any) => void;
   updateSettings: (patch: Partial<ControlSettings>) => void;
   setState: React.Dispatch<React.SetStateAction<DashboardState>>;
+  beginModelSwitch: (label: string) => void;
 }
 
-function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push, updateSettings, setState }: ControlCenterProps) {
+function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push, updateSettings, setState, beginModelSwitch }: ControlCenterProps) {
   const voices = useMemo(() => [
     "piper/en_US-amy-medium",
     "piper/en_US-kathleen-low",
@@ -858,6 +901,125 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
     "piper/ja_JP-kokoro-high",
     "piper/es_ES-mls_10246-low"
   ], []);
+
+  const { llmModelPath, visionModelPath, audioModelPath, sttModelPath, modelStrategy } = state.settings;
+
+  const performancePresets = useMemo<Array<{
+    id: PresetStrategy;
+    label: string;
+    description: string;
+    conditions: string[];
+    models: { llm: string; vision: string; audio: string; stt: string };
+  }>>(
+    () => [
+      {
+        id: "speed",
+        label: "Low-Latency",
+        description: "Favor responsiveness for live, reactive loops.",
+        conditions: ["Latency < 150ms", "Short prompts"],
+        models: {
+          llm: "/models/llm/main-q4_0.gguf",
+          vision: "/models/vision/runtime-lite.bin",
+          audio: "/models/audio/piper-fast.onnx",
+          stt: "/models/stt/whisper-small",
+        },
+      },
+      {
+        id: "balanced",
+        label: "Balanced",
+        description: "Blend quality and speed for everyday operations.",
+        conditions: ["Adaptive context", "Standard workloads"],
+        models: {
+          llm: "/models/llm/main.gguf",
+          vision: "/models/vision/runtime.bin",
+          audio: "/models/audio/piper.onnx",
+          stt: "/models/stt/whisper-small",
+        },
+      },
+      {
+        id: "accuracy",
+        label: "High Accuracy",
+        description: "Maximize reasoning depth and recognition fidelity.",
+        conditions: ["Long-form tasks", "Detailed perception"],
+        models: {
+          llm: "/models/llm/main-q6_k.gguf",
+          vision: "/models/vision/runtime-highres.bin",
+          audio: "/models/audio/piper-high.onnx",
+          stt: "/models/stt/whisper-large-v3",
+        },
+      },
+    ],
+    []
+  );
+
+  const applyPreset = useCallback(
+    (presetId: PresetStrategy) => {
+      const preset = performancePresets.find(item => item.id === presetId);
+      if (!preset) return;
+
+      const changes: { key: string; value: string }[] = [];
+      if (llmModelPath !== preset.models.llm) {
+        changes.push({ key: "llm_model_path", value: preset.models.llm });
+      }
+      if (visionModelPath !== preset.models.vision) {
+        changes.push({ key: "vision_model_path", value: preset.models.vision });
+      }
+      if (audioModelPath !== preset.models.audio) {
+        changes.push({ key: "audio_model_path", value: preset.models.audio });
+      }
+      if (sttModelPath !== preset.models.stt) {
+        changes.push({ key: "stt_model_path", value: preset.models.stt });
+      }
+
+      const strategyChanged = modelStrategy !== preset.id;
+      if (!strategyChanged && changes.length === 0) {
+        return;
+      }
+
+      updateSettings({
+        modelStrategy: preset.id,
+        llmModelPath: preset.models.llm,
+        visionModelPath: preset.models.vision,
+        audioModelPath: preset.models.audio,
+        sttModelPath: preset.models.stt,
+      });
+
+      if (changes.length > 0) {
+        beginModelSwitch(`Applying ${preset.label} preset`);
+        changes.forEach(change => {
+          push({ type: "param", key: change.key, value: change.value });
+        });
+      }
+    },
+    [audioModelPath, beginModelSwitch, llmModelPath, modelStrategy, performancePresets, push, sttModelPath, updateSettings, visionModelPath]
+  );
+
+  const createModelCommitHandler = useCallback(
+    (key: ModelPathKey, paramKey: string, label: string) => (next: string) => {
+      const trimmed = next.trim();
+      const currentValue =
+        key === "llmModelPath"
+          ? llmModelPath
+          : key === "visionModelPath"
+            ? visionModelPath
+            : key === "audioModelPath"
+              ? audioModelPath
+              : sttModelPath;
+
+      const pathChanged = trimmed !== currentValue;
+      const patch: Partial<ControlSettings> = { [key]: trimmed } as Partial<ControlSettings>;
+      if (pathChanged && modelStrategy !== "custom") {
+        patch.modelStrategy = "custom";
+      }
+      updateSettings(patch);
+
+      if (pathChanged && trimmed) {
+        beginModelSwitch(label);
+        push({ type: "param", key: paramKey, value: trimmed });
+      }
+    },
+    [audioModelPath, beginModelSwitch, llmModelPath, modelStrategy, push, sttModelPath, updateSettings, visionModelPath]
+  );
 
   if (!open) return null;
 
@@ -1052,50 +1214,123 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
                   <h3 className="text-lg font-semibold text-zinc-100">LLM Runtime</h3>
                   <p className="text-xs text-zinc-400">All controls that shape cognition stay together for clarity.</p>
                 </div>
-                <div className="space-y-3">
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Conversation Model</span>
-                    <input value={state.settings.llmModelPath} onChange={(e)=>{
-                      updateSettings({ llmModelPath: e.target.value });
-                      push({ type: "param", key: "llm_model_path", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
-                  </label>
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Vision Model</span>
-                    <input value={state.settings.visionModelPath} onChange={(e)=>{
-                      updateSettings({ visionModelPath: e.target.value });
-                      push({ type: "param", key: "vision_model_path", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
-                  </label>
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Audio Model</span>
-                    <input value={state.settings.audioModelPath} onChange={(e)=>{
-                      updateSettings({ audioModelPath: e.target.value });
-                      push({ type: "param", key: "audio_model_path", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
-                  </label>
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">STT Model</span>
-                    <input value={state.settings.sttModelPath} onChange={(e)=>{
-                      updateSettings({ sttModelPath: e.target.value });
-                      push({ type: "param", key: "stt_model_path", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none" />
-                  </label>
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Temperature</span><span>{state.settings.llmTemperature.toFixed(2)}</span></div>
-                    <Slider key={sliderKey("temp", Math.round(state.settings.llmTemperature*100))} defaultValue={[Math.round(state.settings.llmTemperature*100)]} min={0} max={120} step={5} onValueChange={(v)=>{
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">Conditional Presets</span>
+                    <div className="grid gap-2 md:grid-cols-3">
+                      {performancePresets.map(preset => {
+                        const active = state.settings.modelStrategy === preset.id;
+                        const presetClasses = active
+                          ? "border-emerald-500/60 bg-emerald-500/10"
+                          : "border-zinc-800/70 bg-zinc-950/40 hover:border-emerald-500/40";
+                        const buttonClasses = "rounded-xl border px-3 py-3 text-left transition " + presetClasses;
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => applyPreset(preset.id)}
+                            className={buttonClasses}
+                          >
+                            <div className="flex items-center justify-between text-sm font-semibold text-zinc-100">
+                              {preset.label}
+                              {active && (
+                                <Badge className="bg-emerald-500/20 text-emerald-100 border border-emerald-400/30">Active</Badge>
+                              )}
+                            </div>
+                            <p className="mt-1 text-xs text-zinc-400">{preset.description}</p>
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {preset.conditions.map(condition => (
+                                <Badge
+                                  key={condition}
+                                  className="bg-zinc-900/70 text-zinc-300 border border-zinc-800/70"
+                                >
+                                  {condition}
+                                </Badge>
+                              ))}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {state.settings.modelStrategy === "custom" && (
+                      <p className="text-xs text-amber-300/80">
+                        Using custom model paths. Presets will overwrite your manual configuration.
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-3">
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">Conversation Model</span>
+                      <FilePathInput
+                        value={state.settings.llmModelPath}
+                        onChange={val => updateSettings({ llmModelPath: val })}
+                        onCommit={createModelCommitHandler("llmModelPath", "llm_model_path", "Switching conversation model")}
+                        accept={[".gguf"]}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">Vision Model</span>
+                      <FilePathInput
+                        value={state.settings.visionModelPath}
+                        onChange={val => updateSettings({ visionModelPath: val })}
+                        onCommit={createModelCommitHandler("visionModelPath", "vision_model_path", "Switching vision model")}
+                        accept={[".bin", ".onnx"]}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">Audio Model</span>
+                      <FilePathInput
+                        value={state.settings.audioModelPath}
+                        onChange={val => updateSettings({ audioModelPath: val })}
+                        onCommit={createModelCommitHandler("audioModelPath", "audio_model_path", "Switching audio model")}
+                        accept={[".onnx", ".bin"]}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">STT Model</span>
+                      <FilePathInput
+                        value={state.settings.sttModelPath}
+                        onChange={val => updateSettings({ sttModelPath: val })}
+                        onCommit={createModelCommitHandler("sttModelPath", "stt_model_path", "Switching speech-to-text model")}
+                        allowDirectories
+                      />
+                    </label>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between text-xs text-zinc-400">
+                    <span>Temperature</span>
+                    <span>{state.settings.llmTemperature.toFixed(2)}</span>
+                  </div>
+                  <Slider
+                    key={sliderKey("temp", Math.round(state.settings.llmTemperature * 100))}
+                    defaultValue={[Math.round(state.settings.llmTemperature * 100)]}
+                    min={0}
+                    max={120}
+                    step={5}
+                    onValueChange={(v)=>{
                       const val = Math.round((v[0] / 100) * 100) / 100;
                       updateSettings({ llmTemperature: val });
                       push({ type: "param", key: "llm_temperature", value: val });
-                    }}/>
+                    }}
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between text-xs text-zinc-400">
+                    <span>Max Tokens</span>
+                    <span>{state.settings.llmMaxTokens}</span>
                   </div>
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Max Tokens</span><span>{state.settings.llmMaxTokens}</span></div>
-                    <Slider key={sliderKey("maxtok", state.settings.llmMaxTokens)} defaultValue={[state.settings.llmMaxTokens]} min={512} max={8192} step={256} onValueChange={(v)=>{
+                  <Slider
+                    key={sliderKey("maxtok", state.settings.llmMaxTokens)}
+                    defaultValue={[state.settings.llmMaxTokens]}
+                    min={512}
+                    max={8192}
+                    step={256}
+                    onValueChange={(v)=>{
                       updateSettings({ llmMaxTokens: v[0] });
                       push({ type: "param", key: "llm_max_tokens", value: v[0] });
-                    }}/>
-                  </div>
+                    }}
+                  />
                 </div>
               </CardContent>
             </Card>
@@ -1133,6 +1368,83 @@ export default function App(){
   const [controlCenterOpen, setControlCenterOpen] = useState(false);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const memoryInsights = useMemo(() => computeMemoryInsights(state.memory.nodes, state.memory.edges), [state.memory.nodes, state.memory.edges]);
+  const [modelSwitching, setModelSwitching] = useState<{ label: string; progress: number } | null>(null);
+  const modelSwitchStartRef = useRef<number>(0);
+  const hideModelSwitchRef = useRef<number | null>(null);
+
+  const beginModelSwitch = useCallback((label: string) => {
+    modelSwitchStartRef.current = Date.now();
+    if (hideModelSwitchRef.current !== null) {
+      window.clearTimeout(hideModelSwitchRef.current);
+      hideModelSwitchRef.current = null;
+    }
+    setModelSwitching({ label, progress: 5 });
+  }, []);
+
+  const completeModelSwitch = useCallback(() => {
+    setModelSwitching(prev => {
+      if (!prev) return prev;
+      if (prev.progress >= 100) {
+        return prev;
+      }
+      return { ...prev, progress: 100 };
+    });
+    if (hideModelSwitchRef.current !== null) {
+      window.clearTimeout(hideModelSwitchRef.current);
+    }
+    hideModelSwitchRef.current = window.setTimeout(() => {
+      setModelSwitching(null);
+      hideModelSwitchRef.current = null;
+    }, 220);
+  }, []);
+
+  const isSwitching = modelSwitching !== null;
+
+  useEffect(() => {
+    if (!isSwitching) return;
+    let frame = 0;
+    const step = () => {
+      const elapsed = Date.now() - modelSwitchStartRef.current;
+      const progress = Math.min(95, Math.round((elapsed / 2000) * 100));
+      setModelSwitching(prev => {
+        if (!prev) return prev;
+        if (progress <= prev.progress) {
+          return prev;
+        }
+        return { ...prev, progress };
+      });
+      if (progress < 95) {
+        frame = requestAnimationFrame(step);
+      }
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [isSwitching]);
+
+  useEffect(() => {
+    if (!isSwitching) return;
+    const timeout = window.setTimeout(() => {
+      completeModelSwitch();
+    }, 3200);
+    return () => window.clearTimeout(timeout);
+  }, [completeModelSwitch, isSwitching]);
+
+  useEffect(() => {
+    if (!isSwitching) return;
+    const elapsed = Date.now() - modelSwitchStartRef.current;
+    if (elapsed < 600) return;
+    if (state.status !== "learning") {
+      completeModelSwitch();
+    }
+  }, [completeModelSwitch, isSwitching, state.status]);
+
+  useEffect(() => {
+    return () => {
+      if (hideModelSwitchRef.current !== null) {
+        window.clearTimeout(hideModelSwitchRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedMemoryId && !memoryInsights.nodeById.has(selectedMemoryId)) {
@@ -1158,35 +1470,126 @@ export default function App(){
     return buildMemoryNodeDetail(selectedMemoryNode, state.memory.edges, memoryInsights.connectionIndex, memoryInsights.nodeById);
   }, [selectedMemoryNode, state.memory.edges, memoryInsights]);
 
+  const avgInTokens = state.tokenWindow.reduce((acc, point) => acc + point.inTok, 0) / Math.max(1, state.tokenWindow.length);
+  const avgOutTokens = state.tokenWindow.reduce((acc, point) => acc + point.outTok, 0) / Math.max(1, state.tokenWindow.length);
+  const tokenThroughput = Math.max(0, Math.round((avgInTokens + avgOutTokens) * 2));
+  const rewardTotal = state.behavior.rewardTotal;
+  const micSensitivity = state.settings.micSensitivity;
+  const micStatusLabel = state.micOn ? "Capturing" : state.settings.microphoneEnabled ? "Armed" : "Muted";
+  const micStatus: "positive" | "negative" | "neutral" = state.micOn
+    ? "positive"
+    : state.settings.microphoneEnabled
+      ? "neutral"
+      : "negative";
+  const visionActive = state.settings.cameraEnabled && state.visionEnabled;
+
   return (
     <TooltipProvider>
-      <div className="min-h-screen bg-gradient-to-br from-black via-zinc-950 to-zinc-900 text-zinc-50 p-4 md:p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className={`w-3.5 h-3.5 rounded-full ${st.color} shadow-[0_0_20px_rgba(255,255,255,.15)]`} />
-            <div>
-              <div className="text-xs uppercase tracking-wide text-zinc-400/90">Status</div>
-              <div className="font-semibold text-zinc-100">
-                {st.label}{state.statusDetail ? (<><span> â€” </span><span className="text-zinc-300">{state.statusDetail}</span></>) : null}
+      <div className="relative min-h-screen overflow-hidden bg-[#040406] text-zinc-50">
+        <div className="pointer-events-none absolute inset-0 -z-20 bg-[radial-gradient(circle_at_top,_rgba(124,58,237,0.22),_transparent_65%)]" aria-hidden />
+        <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden>
+          <div className="absolute -top-24 right-10 h-72 w-72 rounded-full bg-emerald-500/15 blur-3xl" />
+          <div className="absolute bottom-[-6rem] left-1/3 h-96 w-96 -translate-x-1/2 rounded-full bg-cyan-500/10 blur-[140px]" />
+        </div>
+        <div className="pointer-events-none absolute inset-0 -z-[15] bg-[linear-gradient(0deg,rgba(39,39,42,0.35)_1px,transparent_1px),linear-gradient(90deg,rgba(39,39,42,0.35)_1px,transparent_1px)] bg-[size:48px_48px] opacity-60" aria-hidden />
+
+        <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 pb-12 pt-10 md:px-8">
+          <header className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-6">
+              <div className="flex items-center gap-4">
+                <div className="relative">
+                  <div className="grid h-14 w-14 place-items-center rounded-2xl border border-zinc-800/70 bg-zinc-950/80 shadow-[0_25px_60px_rgba(10,10,15,0.65)]">
+                    <Brain className="h-7 w-7 text-emerald-300" />
+                  </div>
+                  <div className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full border border-zinc-800/70 bg-zinc-950/90">
+                    <Sparkles className="h-3 w-3 text-emerald-300" />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs uppercase tracking-[0.5em] text-zinc-500">Nomous Autonomy</p>
+                  <h1 className="text-3xl font-semibold text-zinc-100 md:text-[2.1rem]">Immersive Control Deck</h1>
+                  <p className="max-w-xl text-sm text-zinc-400">
+                    Visualize cognition, steer devices, and orchestrate every runtime decision with a purpose-built dark interface.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="hidden md:flex max-w-xs items-center gap-2 truncate rounded-full border border-zinc-800/70 bg-zinc-950/70 px-3 py-1.5 text-xs text-zinc-400">
+                  {state.connected ? <Wifi className="h-4 w-4 text-emerald-300" /> : <WifiOff className="h-4 w-4 text-red-400" />}
+                  <span className="truncate">{state.url}</span>
+                </div>
+                <Button
+                  variant="secondary"
+                  onClick={() => setControlCenterOpen(true)}
+                  className="hidden sm:inline-flex items-center gap-2 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-4 py-2 text-sm text-zinc-100 hover:bg-zinc-800/80"
+                >
+                  <Cog className="h-4 w-4" /> Control Center
+                </Button>
+                {!state.connected ? (
+                  <Button onClick={connect} className="flex items-center gap-2 rounded-full bg-emerald-600/90 px-4 py-2 text-sm text-white shadow-lg transition hover:bg-emerald-500/90">
+                    <Play className="h-4 w-4" /> Connect
+                  </Button>
+                ) : (
+                  <Button
+                    variant="danger"
+                    onClick={disconnect}
+                    className="flex items-center gap-2 rounded-full bg-red-600/90 px-4 py-2 text-sm text-white shadow-lg transition hover:bg-red-500/90"
+                  >
+                    <Square className="h-4 w-4" /> Disconnect
+                  </Button>
+                )}
               </div>
             </div>
-            <Badge className="ml-2 bg-zinc-800/80 text-zinc-100">Tokens: {tokenTotal}</Badge>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="hidden md:flex items-center gap-1 text-xs text-zinc-400 mr-2">
-              {state.connected ? <Wifi className="w-4 h-4"/> : <WifiOff className="w-4 h-4"/>}
-              <span>{state.url}</span>
+
+            <div className="flex flex-col gap-4 rounded-2xl border border-zinc-800/70 bg-zinc-950/70 px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] md:flex-row md:items-center md:justify-between">
+              <div className="flex items-center gap-3">
+                <div className={`h-3 w-3 rounded-full ${st.color} shadow-[0_0_20px_rgba(34,197,94,0.35)]`} />
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Runtime Status</div>
+                  <div className="text-lg font-semibold text-zinc-100">
+                    {st.label}
+                    {state.statusDetail ? <span className="ml-2 text-sm text-zinc-300">{state.statusDetail}</span> : null}
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
+                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Tokens window • {tokenTotal}</Badge>
+                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Mic {state.micOn ? "Active" : "Muted"}</Badge>
+                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Vision {state.visionEnabled ? "Online" : "Paused"}</Badge>
+              </div>
             </div>
-            <Button variant="secondary" onClick={()=>setControlCenterOpen(true)} className="hidden sm:inline-flex bg-zinc-900/80 hover:bg-zinc-800/80 text-zinc-100 border border-zinc-700/60">
-              <Cog className="w-4 h-4 mr-2"/> Control Center
-            </Button>
-            {!state.connected ? (
-              <Button onClick={connect} className="px-3 py-1 text-sm bg-emerald-600/90 hover:bg-emerald-500/90 text-white"><Play className="w-4 h-4 mr-1"/> Connect</Button>
-            ) : (
-              <Button variant="danger" onClick={disconnect} className="bg-red-600/90 text-white hover:bg-red-500/90"><Square className="w-4 h-4 mr-1"/> Disconnect</Button>
-            )}
+          </header>
+
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <QuickStatCard
+              icon={Gauge}
+              label="Token Throughput"
+              value={`${tokenThroughput} tok/s`}
+              helper="Inbound + outbound stream"
+            />
+            <QuickStatCard
+              icon={Sparkles}
+              label="Reward Signal"
+              value={rewardTotal.toFixed(1)}
+              helper="Cumulative reinforcement"
+              status={rewardTotal >= 0 ? "positive" : "negative"}
+            />
+            <QuickStatCard
+              icon={Mic}
+              label="Audio Capture"
+              value={micStatusLabel}
+              helper={`Sensitivity ${micSensitivity}%`}
+              status={micStatus}
+            />
+            <QuickStatCard
+              icon={Scan}
+              label="Vision Pipeline"
+              value={visionActive ? "Streaming" : "Standby"}
+              helper={state.settings.cameraResolution}
+              status={visionActive ? "positive" : "neutral"}
+            />
           </div>
-        </div>
 
         <Card className="bg-zinc-900/60 backdrop-blur-sm border-zinc-800/70">
           <CardContent className="p-4">
@@ -1486,8 +1889,24 @@ export default function App(){
           push={push}
           updateSettings={updateSettings}
           setState={setState}
+          beginModelSwitch={beginModelSwitch}
         />
+        {modelSwitching && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
+            <div className="w-full max-w-md rounded-2xl border border-emerald-500/30 bg-zinc-950/90 p-6 shadow-[0_24px_100px_rgba(16,185,129,0.25)]">
+              <div className="mb-4 flex items-center gap-3 text-emerald-200">
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                <div>
+                  <div className="text-sm font-semibold text-emerald-100">{modelSwitching.label}</div>
+                  <div className="text-xs text-zinc-400">Loading models and refreshing the runtime…</div>
+                </div>
+              </div>
+              <Progress value={Math.min(modelSwitching.progress, 100)} />
+            </div>
+          </div>
+        )}
       </div>
-    </TooltipProvider>
+    </div>
+  </TooltipProvider>
   );
 }
