@@ -1011,10 +1011,10 @@ function ChatBubble({ message }: { message: ChatMessage }) {
 
   return (
     <div className={`flex flex-col ${alignment} gap-1`}>
-      <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">
+      <div className="chat-label text-zinc-500">
         {label} • {new Date(message.timestamp).toLocaleTimeString()}
       </div>
-      <div className={`max-w-[85%] rounded-2xl border px-3 py-2 text-sm leading-relaxed shadow-sm ${bubbleClass}`}>
+      <div className={`max-w-xl rounded-2xl border px-3 py-2 text-sm leading-relaxed shadow-sm ${bubbleClass}`}>
         {message.text}
       </div>
     </div>
