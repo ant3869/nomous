@@ -23,6 +23,7 @@ from src.backend.audio import AudioSTT
 from src.backend.llm import LocalLLM
 from src.backend.memory import MemoryStore
 from src.backend.tts import PiperTTS
+from src.backend.system import SystemMonitor
 
 # Set up logging
 log_dir = Path(project_root) / "logs"
@@ -52,6 +53,7 @@ class Server:
         self.cam: Optional[CameraLoop] = None
         self._autonomous_task: Optional[asyncio.Task] = None
         self.memory: Optional[MemoryStore] = None
+        self.system_monitor: Optional[SystemMonitor] = None
 
     async def handle_toggle(self, what: str, value: bool):
         if not what:
@@ -176,7 +178,19 @@ class Server:
             self.cam.set_llm(self.llm)  # Camera can trigger vision analysis
             self.cam.start()
             logger.info("Camera -> LLM connection established")
-            
+
+            self.system_monitor = SystemMonitor(self.bridge)
+            await self.system_monitor.start()
+            info = self.system_monitor.device_info
+            await self.bridge.post(
+                msg_event(
+                    f"compute backend → {info.backend} ({info.name})"
+                )
+            )
+            logger.info(
+                "System monitor initialized (%s - %s)", info.backend, info.reason
+            )
+
             await self.bridge.post(msg_status("idle", "Ready"))
             logger.info("All workers started successfully")
 
@@ -219,7 +233,16 @@ class Server:
                 await self._autonomous_task
             except asyncio.CancelledError:
                 pass
-        
+
+        try:
+            if self.system_monitor:
+                await self.system_monitor.stop()
+                logger.info("System monitor stopped")
+        except Exception as e:
+            logger.error(f"Error stopping system monitor: {e}")
+        finally:
+            self.system_monitor = None
+
         try:
             if self.cam:
                 self.cam.stop()
