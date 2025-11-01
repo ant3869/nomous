@@ -85,29 +85,29 @@ class SystemMonitor:
         self.device_info = detect_compute_device()
         self._task: Optional[asyncio.Task] = None
         self._running = False
-        self._nvml_initialised = False
+        self._nvml_initialized = False
         self._nvml_device_index = 0
         self._gpu_name_override: Optional[str] = None
 
-        # Prime CPU utilisation so subsequent reads are meaningful
+        # Prime CPU utilization so subsequent reads are meaningful
         psutil.cpu_percent(interval=None)
-        self._initialise_nvml()
+        self._initialize_nvml()
 
-    def _initialise_nvml(self) -> None:
+    def _initialize_nvml(self) -> None:
         should_attempt = self.device_info.is_gpu or shutil.which("nvidia-smi")
         if not should_attempt:
             return
 
         try:
             nvmlInit()
-            self._nvml_initialised = True
+            self._nvml_initialized = True
             count = nvmlDeviceGetCount()
             if count:
                 self._nvml_device_index = 0
                 handle = nvmlDeviceGetHandleByIndex(self._nvml_device_index)
                 self._gpu_name_override = nvmlDeviceGetName(handle).decode("utf-8")
         except NVMLError as exc:
-            self._nvml_initialised = False
+            self._nvml_initialized = False
             self.device_info.reason = f"NVML unavailable: {exc}"
 
     async def start(self) -> None:
@@ -126,12 +126,12 @@ class SystemMonitor:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        if self._nvml_initialised:
+        if self._nvml_initialized:
             try:
                 nvmlShutdown()
             except NVMLError:  # pragma: no cover - shutdown errors are non-fatal
                 pass
-            self._nvml_initialised = False
+            self._nvml_initialized = False
 
     async def _run(self) -> None:
         try:
@@ -192,7 +192,7 @@ class SystemMonitor:
         }
 
     def _gpu_metrics(self) -> Optional[Dict[str, Any]]:
-        if self._nvml_initialised:
+        if self._nvml_initialized:
             try:
                 handle = nvmlDeviceGetHandleByIndex(self._nvml_device_index)
                 util = nvmlDeviceGetUtilizationRates(handle)
