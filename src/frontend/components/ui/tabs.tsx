@@ -47,10 +47,12 @@ export const Tabs = ({
 
   const setValue = useCallback(
     (next: string) => {
-      setUncontrolledValue(next);
+      if (controlledValue === undefined) {
+        setUncontrolledValue(next);
+      }
       onValueChange?.(next);
     },
-    [onValueChange]
+    [controlledValue, onValueChange]
   );
 
   const contextValue = useMemo<TabsContextValue>(
