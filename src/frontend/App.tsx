@@ -10,7 +10,7 @@ import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Separator } from "./components/ui/separator";
-import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock } from "lucide-react";
+import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Scan } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode } from "./types/memory";
 import { buildMemoryNodeDetail, computeMemoryInsights } from "./utils/memory";
@@ -483,6 +483,43 @@ function Meter({ value, label }: { value: number; label: string }) {
     <div className="space-y-1">
       <div className="flex justify-between text-xs text-zinc-300"><span>{label}</span><span>{Math.round(value*100)}%</span></div>
       <Progress value={value*100} />
+    </div>
+  );
+}
+
+function QuickStatCard({
+  icon: Icon,
+  label,
+  value,
+  helper,
+  status,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  helper?: string;
+  status?: "positive" | "negative" | "neutral";
+}) {
+  const accent =
+    status === "positive"
+      ? "text-emerald-300"
+      : status === "negative"
+        ? "text-red-300"
+        : "text-zinc-300";
+
+  return (
+    <div className="relative overflow-hidden rounded-2xl border border-zinc-800/60 bg-zinc-950/70 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition hover:border-emerald-500/40">
+      <div className="absolute -right-6 top-6 h-24 w-24 rounded-full bg-emerald-500/10 blur-3xl" aria-hidden />
+      <div className="flex items-center gap-3 text-sm text-zinc-300">
+        <div className="grid h-10 w-10 place-items-center rounded-xl border border-zinc-800/80 bg-zinc-900/70">
+          <Icon className="h-5 w-5 text-emerald-300" />
+        </div>
+        <div className="space-y-1">
+          <div className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">{label}</div>
+          <div className={`text-lg font-semibold ${accent}`}>{value}</div>
+          {helper ? <div className="text-[11px] text-zinc-500">{helper}</div> : null}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1414,50 +1451,141 @@ export default function App(){
     return buildMemoryNodeDetail(selectedMemoryNode, state.memory.edges, memoryInsights.connectionIndex, memoryInsights.nodeById);
   }, [selectedMemoryNode, state.memory.edges, memoryInsights]);
 
+  const avgInTokens = state.tokenWindow.reduce((acc, point) => acc + point.inTok, 0) / Math.max(1, state.tokenWindow.length);
+  const avgOutTokens = state.tokenWindow.reduce((acc, point) => acc + point.outTok, 0) / Math.max(1, state.tokenWindow.length);
+  const tokenThroughput = Math.max(0, Math.round((avgInTokens + avgOutTokens) * 2));
+  const rewardTotal = state.behavior.rewardTotal;
+  const micSensitivity = state.settings.micSensitivity;
+  const micStatusLabel = state.micOn ? "Capturing" : state.settings.microphoneEnabled ? "Armed" : "Muted";
+  const micStatus: "positive" | "negative" | "neutral" = state.micOn
+    ? "positive"
+    : state.settings.microphoneEnabled
+      ? "neutral"
+      : "negative";
+  const visionActive = state.settings.cameraEnabled && state.visionEnabled;
+
   return (
     <TooltipProvider>
-      <div className="min-h-screen bg-gradient-to-br from-black via-zinc-950 to-zinc-900 text-zinc-50 p-4 md:p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className={`w-3.5 h-3.5 rounded-full ${st.color} shadow-[0_0_20px_rgba(255,255,255,.15)]`} />
-            <div>
-              <div className="text-xs uppercase tracking-wide text-zinc-400/90">Status</div>
-              <div className="font-semibold text-zinc-100">
-                {st.label}{state.statusDetail ? (<><span> â€” </span><span className="text-zinc-300">{state.statusDetail}</span></>) : null}
+      <div className="relative min-h-screen overflow-hidden bg-[#040406] text-zinc-50">
+        <div className="pointer-events-none absolute inset-0 -z-20 bg-[radial-gradient(circle_at_top,_rgba(124,58,237,0.22),_transparent_65%)]" aria-hidden />
+        <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden>
+          <div className="absolute -top-24 right-10 h-72 w-72 rounded-full bg-emerald-500/15 blur-3xl" />
+          <div className="absolute bottom-[-6rem] left-1/3 h-96 w-96 -translate-x-1/2 rounded-full bg-cyan-500/10 blur-[140px]" />
+        </div>
+        <div className="pointer-events-none absolute inset-0 -z-[15] bg-[linear-gradient(0deg,rgba(39,39,42,0.35)_1px,transparent_1px),linear-gradient(90deg,rgba(39,39,42,0.35)_1px,transparent_1px)] bg-[size:48px_48px] opacity-60" aria-hidden />
+
+        <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 pb-12 pt-10 md:px-8">
+          <header className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-6">
+              <div className="flex items-center gap-4">
+                <div className="relative">
+                  <div className="grid h-14 w-14 place-items-center rounded-2xl border border-zinc-800/70 bg-zinc-950/80 shadow-[0_25px_60px_rgba(10,10,15,0.65)]">
+                    <Brain className="h-7 w-7 text-emerald-300" />
+                  </div>
+                  <div className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full border border-zinc-800/70 bg-zinc-950/90">
+                    <Sparkles className="h-3 w-3 text-emerald-300" />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs uppercase tracking-[0.5em] text-zinc-500">Nomous Autonomy</p>
+                  <h1 className="text-3xl font-semibold text-zinc-100 md:text-[2.1rem]">Immersive Control Deck</h1>
+                  <p className="max-w-xl text-sm text-zinc-400">
+                    Visualize cognition, steer devices, and orchestrate every runtime decision with a purpose-built dark interface.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="hidden md:flex max-w-xs items-center gap-2 truncate rounded-full border border-zinc-800/70 bg-zinc-950/70 px-3 py-1.5 text-xs text-zinc-400">
+                  {state.connected ? <Wifi className="h-4 w-4 text-emerald-300" /> : <WifiOff className="h-4 w-4 text-red-400" />}
+                  <span className="truncate">{state.url}</span>
+                </div>
+                <Button
+                  variant="secondary"
+                  onClick={() => setControlCenterOpen(true)}
+                  className="hidden sm:inline-flex items-center gap-2 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-4 py-2 text-sm text-zinc-100 hover:bg-zinc-800/80"
+                >
+                  <Cog className="h-4 w-4" /> Control Center
+                </Button>
+                {!state.connected ? (
+                  <Button onClick={connect} className="flex items-center gap-2 rounded-full bg-emerald-600/90 px-4 py-2 text-sm text-white shadow-lg transition hover:bg-emerald-500/90">
+                    <Play className="h-4 w-4" /> Connect
+                  </Button>
+                ) : (
+                  <Button
+                    variant="danger"
+                    onClick={disconnect}
+                    className="flex items-center gap-2 rounded-full bg-red-600/90 px-4 py-2 text-sm text-white shadow-lg transition hover:bg-red-500/90"
+                  >
+                    <Square className="h-4 w-4" /> Disconnect
+                  </Button>
+                )}
               </div>
             </div>
-            <Badge className="ml-2 bg-zinc-800/80 text-zinc-100">Tokens: {tokenTotal}</Badge>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="hidden md:flex items-center gap-1 text-xs text-zinc-400 mr-2">
-              {state.connected ? <Wifi className="w-4 h-4"/> : <WifiOff className="w-4 h-4"/>}
-              <span>{state.url}</span>
+
+            <div className="flex flex-col gap-4 rounded-2xl border border-zinc-800/70 bg-zinc-950/70 px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] md:flex-row md:items-center md:justify-between">
+              <div className="flex items-center gap-3">
+                <div className={`h-3 w-3 rounded-full ${st.color} shadow-[0_0_20px_rgba(34,197,94,0.35)]`} />
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Runtime Status</div>
+                  <div className="text-lg font-semibold text-zinc-100">
+                    {st.label}
+                    {state.statusDetail ? <span className="ml-2 text-sm text-zinc-300">{state.statusDetail}</span> : null}
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
+                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Tokens window • {tokenTotal}</Badge>
+                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Mic {state.micOn ? "Active" : "Muted"}</Badge>
+                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Vision {state.visionEnabled ? "Online" : "Paused"}</Badge>
+              </div>
             </div>
-            <Button variant="secondary" onClick={()=>setControlCenterOpen(true)} className="hidden sm:inline-flex bg-zinc-900/80 hover:bg-zinc-800/80 text-zinc-100 border border-zinc-700/60">
-              <Cog className="w-4 h-4 mr-2"/> Control Center
-            </Button>
-            {!state.connected ? (
-              <Button onClick={connect} className="px-3 py-1 text-sm bg-emerald-600/90 hover:bg-emerald-500/90 text-white"><Play className="w-4 h-4 mr-1"/> Connect</Button>
-            ) : (
-              <Button variant="danger" onClick={disconnect} className="bg-red-600/90 text-white hover:bg-red-500/90"><Square className="w-4 h-4 mr-1"/> Disconnect</Button>
-            )}
+          </header>
+
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <QuickStatCard
+              icon={Gauge}
+              label="Token Throughput"
+              value={`${tokenThroughput} tok/s`}
+              helper="Inbound + outbound stream"
+            />
+            <QuickStatCard
+              icon={Sparkles}
+              label="Reward Signal"
+              value={rewardTotal.toFixed(1)}
+              helper="Cumulative reinforcement"
+              status={rewardTotal >= 0 ? "positive" : "negative"}
+            />
+            <QuickStatCard
+              icon={Mic}
+              label="Audio Capture"
+              value={micStatusLabel}
+              helper={`Sensitivity ${micSensitivity}%`}
+              status={micStatus}
+            />
+            <QuickStatCard
+              icon={Scan}
+              label="Vision Pipeline"
+              value={visionActive ? "Streaming" : "Standby"}
+              helper={state.settings.cameraResolution}
+              status={visionActive ? "positive" : "neutral"}
+            />
           </div>
-        </div>
 
-        <Card className="bg-zinc-900/60 backdrop-blur-sm border-zinc-800/70">
-          <CardContent className="p-4">
-            <div className="w-full">
-              <Tabs defaultValue="overview">
-              <TabsList className="flex flex-wrap gap-2 bg-zinc-950/60 border border-zinc-800/60">
-                <TabsTrigger value="overview">Overview</TabsTrigger>
-                <TabsTrigger value="console">Console</TabsTrigger>
-                <TabsTrigger value="behavior">Behavior</TabsTrigger>
-                <TabsTrigger value="tokens">Tokens</TabsTrigger>
-                <TabsTrigger value="memory">Memory</TabsTrigger>
-                <TabsTrigger value="thoughts">Thoughts</TabsTrigger>
-              </TabsList>
+          <Card className="border-zinc-800/70 bg-zinc-950/70 backdrop-blur">
+            <CardContent className="p-5">
+              <div className="w-full">
+                <Tabs defaultValue="overview">
+                  <TabsList>
+                    <TabsTrigger value="overview">Overview</TabsTrigger>
+                    <TabsTrigger value="console">Console</TabsTrigger>
+                    <TabsTrigger value="behavior">Behavior</TabsTrigger>
+                    <TabsTrigger value="tokens">Tokens</TabsTrigger>
+                    <TabsTrigger value="memory">Memory</TabsTrigger>
+                    <TabsTrigger value="thoughts">Thoughts</TabsTrigger>
+                  </TabsList>
 
-              <TabsContent value="overview" className="pt-4">
+                  <TabsContent value="overview" className="pt-4">
                 <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                   <div className="xl:col-span-2 space-y-4">
                     <Card className="bg-zinc-900/70 border-zinc-800/60">
@@ -1734,6 +1862,7 @@ export default function App(){
           </div>
         )}
       </div>
-    </TooltipProvider>
+    </div>
+  </TooltipProvider>
   );
 }
