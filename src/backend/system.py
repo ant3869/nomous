@@ -89,7 +89,7 @@ class SystemMonitor:
         self._nvml_device_index = 0
         self._gpu_name_override: Optional[str] = None
 
-        # Prime CPU utilisation so subsequent reads are meaningful
+        # Prime CPU utilization so subsequent reads are meaningful
         psutil.cpu_percent(interval=None)
         self._initialize_nvml()
 
