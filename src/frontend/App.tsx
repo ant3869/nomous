@@ -316,13 +316,6 @@ function useNomousBridge() {
     sendChatMessage(chatInput);
   }, [chatInput, sendChatMessage]);
 
-  const handleChatKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      sendChatMessage(chatInput);
-    }
-  }, [chatInput, sendChatMessage]);
-
   const handleMessage = useCallback((ev: MessageEvent) => {
     try {
       const msg = JSON.parse(typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data));
