@@ -25,9 +25,17 @@ from src.backend.memory import MemoryStore
 from src.backend.tts import PiperTTS
 
 # Set up logging
+log_dir = Path(project_root) / "logs"
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / "nomous.log"
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_file, encoding='utf-8')
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -153,7 +161,7 @@ class Server:
             self.tts = PiperTTS(CFG, self.bridge)
             logger.info("TTS initialized")
 
-            self.llm = LocalLLM(CFG, self.bridge, self.tts, self.memory)
+            self.llm = await LocalLLM.create(CFG, self.bridge, self.tts, self.memory, loop)
             logger.info("LLM initialized")
 
             self.stt = AudioSTT(CFG, self.bridge)
