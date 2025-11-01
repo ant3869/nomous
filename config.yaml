@@ -1,0 +1,70 @@
+audio:
+  chunk_ms: 250
+  device: default
+  sample_rate: 16000
+  vad_aggressiveness: 2
+autonomous:
+  enabled: true
+  min_engagement: 0.4
+  proactive_questions: true
+  thought_cooldown: 30
+  vision_cooldown: 15
+camera:
+  backend: dshow
+  height: 720
+  index: 0
+  width: 1280
+llm:
+  enable: true
+  n_ctx: 2048
+  n_gpu_layers: 0
+  n_threads: 4
+  temperature: 0.7
+  top_p: 0.95
+memory:
+  db_path: ./data/memory/nomous.sqlite
+  enable: true
+  keep_important: true
+  prune_days: 30
+paths:
+  embed_gguf_path: modules/models/embed/bge-small-en-v1.5-f16.gguf
+  gguf_path: E:/Models/DavidAU/Reka-Flash-3-21B-Reasoning-Uncensored-MAX-NEO-Imatrix-GGUF/Reka-Flash-3-21B-Reasoning-MAX-NEO-D_AU-IQ4_NL-imat.gguf
+  piper_exe: modules/piper/piper.exe
+  piper_out_dir: modules/piper/piper_out
+  piper_voice: modules/piper/voices/en_GB-jenny_dioco-medium.onnx
+  vosk_model_dir: modules/models/vosk-model-small-en-us-0.15
+personality:
+  assertiveness: 0.6
+  chattiness: 0.6
+  curiosity: 0.8
+  formality: 0.3
+  humor: 0.5
+piper:
+  auto_play: true
+  rate: 22050
+rag:
+  db_path: ./data/rag/corpus.sqlite
+  enable: true
+ui:
+  gesture_cooldown: 3
+  gesture_enabled: false
+  motion_sensitivity: 30
+  snapshot_debounce: 4
+  tts_enabled: true
+  vision_enabled: true
+vision:
+  enabled: true
+  interesting_keywords:
+  - person
+  - people
+  - face
+  - hand
+  - gesture
+  - movement
+  - wave
+  motion_sensitivity: 30
+  scene_change_threshold: 0.15
+  snapshot_debounce: 4
+ws:
+  host: 127.0.0.1
+  port: 8765

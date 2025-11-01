@@ -9,7 +9,7 @@ import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Separator } from "./components/ui/separator";
-import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Scan, Send } from "lucide-react";
+import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Scan, Send, Wrench } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
@@ -83,7 +83,6 @@ interface LoadingOverlay {
   label: string;
   progress: number;
   detail?: string;
-  speechLines: string[]; systemLines: string[]; toolActivity: ToolResult[]; settings: ControlSettings;
 }
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -314,6 +313,13 @@ function useNomousBridge() {
       event.preventDefault();
     }
     sendChatMessage(chatInput);
+  }, [chatInput, sendChatMessage]);
+
+  const handleChatKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendChatMessage(chatInput);
+    }
   }, [chatInput, sendChatMessage]);
 
   const handleMessage = useCallback((ev: MessageEvent) => {
