@@ -25,6 +25,12 @@ const clampPercent = (value: number | undefined | null): number => {
   return Math.max(0, Math.min(100, Number(value)));
 };
 
+const getDeviceBadgeStyle = (deviceType: string): string => {
+  return deviceType.toUpperCase() === "GPU"
+    ? "bg-emerald-600/80"
+    : "bg-amber-500/30 text-amber-100";
+};
+
 interface SystemUsageCardProps {
   metrics: SystemMetricsPayload | null;
 }
@@ -43,7 +49,7 @@ export const SystemUsageCard: React.FC<SystemUsageCardProps> = ({ metrics }) => 
             <span className="text-sm font-semibold">System Resources</span>
             <span className="text-xs text-zinc-400">{reason}</span>
           </div>
-          <Badge className={`px-3 py-1 text-xs ${deviceType.toUpperCase() === "GPU" ? "bg-emerald-600/80" : "bg-amber-500/30 text-amber-100"}`}>
+          <Badge className={`px-3 py-1 text-xs ${getDeviceBadgeStyle(deviceType)}`}>
             {deviceType.toUpperCase()}
           </Badge>
         </div>
