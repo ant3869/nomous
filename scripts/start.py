@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 import time
@@ -78,6 +79,56 @@ def run_command(command, cwd=None, shell=True):
     except subprocess.CalledProcessError as e:
         return False, e.stderr
 
+def detect_system_cuda_version() -> str:
+    """Detect system CUDA toolkit version using nvidia-smi.
+    
+    Returns:
+        CUDA version string like 'cu121', 'cu118', 'cu124', or 'cu121' as default
+    """
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=driver_version', '--format=csv,noheader'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            # Try to get CUDA version from nvidia-smi
+            result = subprocess.run(
+                ['nvidia-smi'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                output = result.stdout
+                # Look for CUDA Version in nvidia-smi output
+                match = re.search(r'CUDA Version:\s+(\d+)\.(\d+)', output)
+                if match:
+                    major, minor = match.groups()
+                    # Map to PyTorch wheel naming convention
+                    version_map = {
+                        ('11', '8'): 'cu118',
+                        ('12', '1'): 'cu121',
+                        ('12', '4'): 'cu124',
+                    }
+                    cuda_key = (major, minor)
+                    if cuda_key in version_map:
+                        return version_map[cuda_key]
+                    # For other versions, try to construct a reasonable default
+                    if major == '11':
+                        return 'cu118'
+                    elif major == '12':
+                        if int(minor) >= 4:
+                            return 'cu124'
+                        else:
+                            return 'cu121'
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        pass
+    
+    # Default to CUDA 12.1 if detection fails
+    return 'cu121'
+
 def check_compute_backend() -> "ComputeDeviceInfo":
     """Check CUDA availability and provide a compute device summary."""
     from src.backend.system import detect_compute_device
@@ -110,9 +161,13 @@ def ensure_gpu_support(pip_cmd: str, info: "ComputeDeviceInfo") -> "ComputeDevic
         style="bold yellow",
     )
 
+    # Detect system CUDA version dynamically
+    cuda_version = detect_system_cuda_version()
+    print_status(f"Detected CUDA version: {cuda_version}", style="bold cyan")
+
     gpu_installs = [
         (
-            f"{pip_cmd} install --upgrade torch --index-url https://download.pytorch.org/whl/cu121",
+            f"{pip_cmd} install --upgrade torch --index-url https://download.pytorch.org/whl/{cuda_version}",
             "PyTorch CUDA build",
         ),
         (
