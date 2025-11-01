@@ -1,18 +1,27 @@
-websockets==12.0
-opencv-python>=4.8
-Pillow>=10.0.0
-pyyaml>=6.0
-numpy<2.3,>=2.0
-llama-cpp-python>=0.3.16
-sounddevice>=0.5.3
-requests>=2.31.0
-diskcache>=5.6.1
-Jinja2>=3.1.4
-webrtcvad==2.0.10
-vosk>=0.3.45
-soundfile>=0.12.1
-setuptools
-psutil>=5.9.5
-rich>=13.7.1
-torch>=2.1.0
-pynvml>=11.5.0
+# core
+websockets
+numpy
+opencv-contrib-python     # or swap to opencv-python if you don't need contrib
+Pillow
+PyYAML
+requests
+diskcache
+Jinja2
+psutil
+rich
+torch
+pynvml
+
+# audio / vad / asr
+sounddevice
+soundfile
+webrtcvad
+vosk
+
+# llm
+llama-cpp-python
+sentencepiece
+
+# optional viz / extras (keep if you use them)
+matplotlib
+mediapipe
