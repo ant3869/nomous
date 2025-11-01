@@ -163,6 +163,10 @@ def ensure_python_environment() -> Optional[PythonEnvironment]:
             print_error(f"Failed to create virtual environment: {exc}")
             return None
 
+        if not python_path.exists():
+            print_error(f"Virtual environment created but Python executable not found at {python_path}")
+            logger.error("Python executable missing after venv.create at %s", python_path)
+            return None
         success, output = run_command(f"{pip_cmd} install --upgrade pip")
         if success:
             print_success("Virtual environment created")
