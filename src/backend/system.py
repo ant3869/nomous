@@ -77,7 +77,7 @@ def detect_compute_device() -> ComputeDeviceInfo:
 
 
 class SystemMonitor:
-    """Stream CPU, memory, and GPU utilisation metrics to the UI."""
+    """Stream CPU, memory, and GPU utilization metrics to the UI."""
 
     def __init__(self, bridge, interval: float = 2.0):
         self.bridge = bridge
