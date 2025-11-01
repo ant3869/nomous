@@ -387,10 +387,15 @@ async def main():
             # readiness checks detect the service immediately (see start.py).
             try:
                 await s.start_workers()
-            except Exception:
+            except Exception as e:
                 # Ensure partial startup is unwound before re-raising so the
                 # caller can log the original failure.
-                await s.stop_workers()
+                logger.error("Error during start_workers", exc_info=True)
+                try:
+                    await s.stop_workers()
+                except Exception as stop_exc:
+                    logger.error("Error during stop_workers while unwinding startup failure", exc_info=True)
+                    raise stop_exc from e
                 raise
 
             try:
