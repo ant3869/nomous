@@ -19,27 +19,17 @@ logger = logging.getLogger(__name__)
 
 
 class LocalLLM:
-    def __init__(self, cfg, bridge, tts, memory: Optional[MemoryStore] = None):
+    def __init__(self, cfg, bridge, tts, memory: Optional[MemoryStore] = None, loop: asyncio.AbstractEventLoop | None = None):
         self.bridge = bridge
         self.tts = tts
         self.memory = memory
         self._cfg = cfg
-        p = cfg["paths"]
+        self._loop = loop or asyncio.get_event_loop()
+        self._last_progress_sent = -1
+        self._last_progress_detail: str | None = None
 
-        logger.info(f"Loading LLM from {p['gguf_path']}")
-
-        n_gpu_layers = int(cfg["llm"].get("n_gpu_layers", 0))
-        if n_gpu_layers > 0:
-            logger.info(f"GPU acceleration enabled: {n_gpu_layers} layers on GPU")
-        
-        self.model_path = p["gguf_path"]
-        self.model = Llama(
-            model_path=self.model_path,
-            n_ctx=cfg["llm"]["n_ctx"],
-            n_threads=cfg["llm"]["n_threads"],
-            n_gpu_layers=n_gpu_layers,
-            verbose=False
-        )
+        self.model_path = cfg["paths"]["gguf_path"]
+        self.model: Optional[Llama] = None
 
         self.temperature = float(cfg["llm"]["temperature"])
         self.top_p = float(cfg["llm"]["top_p"])
@@ -52,11 +42,11 @@ class LocalLLM:
         self.vision_cooldown = 15  # seconds between autonomous vision checks
         self.last_thought = 0
         self.thought_cooldown = 30  # seconds between unprompted thoughts
-        
+
         # Context memory
         self.recent_context = []
         self.max_context_items = 5
-        
+
         # Processing lock
         self._processing = False
         self._lock = asyncio.Lock()
@@ -66,7 +56,79 @@ class LocalLLM:
         self.tools_enabled = cfg["llm"].get("tools_enabled", True)
         logger.info(f"Tool system initialized with {len(self.tools.tools)} tools")
 
+    @classmethod
+    async def create(cls, cfg, bridge, tts, memory: Optional[MemoryStore], loop: asyncio.AbstractEventLoop | None = None):
+        instance = cls(cfg, bridge, tts, memory, loop)
+        await instance._load_model_async(instance.model_path, announce=True)
         logger.info("LLM initialized successfully")
+        return instance
+
+    def _emit_load_progress(self, progress: int, detail: str | None = None):
+        if not self.bridge:
+            return
+
+        if progress == self._last_progress_sent and detail == self._last_progress_detail:
+            return
+
+        self._last_progress_sent = progress
+        self._last_progress_detail = detail
+
+        payload = {
+            "type": "load_progress",
+            "target": "llm",
+            "label": "Loading offline language model",
+            "progress": max(0, min(100, int(progress)))
+        }
+        if detail:
+            payload["detail"] = detail
+
+        try:
+            asyncio.run_coroutine_threadsafe(self.bridge.post(payload), self._loop)
+        except RuntimeError:
+            # Event loop not running (shutdown), ignore
+            pass
+
+    def _create_model(self, model_path: str) -> Llama:
+            detail = f"{percent}% loaded" if total > 0 else "Initializing..."
+            self._emit_load_progress(percent, detail)
+        if n_gpu_layers > 0:
+            logger.info(f"GPU acceleration enabled: {n_gpu_layers} layers on GPU")
+
+        def _progress(current: int, total: int) -> bool:
+            percent = int((current / total) * 100) if total else 0
+            self._emit_load_progress(percent, f"{percent}% loaded")
+            return True
+
+        return Llama(
+            model_path=model_path,
+            n_ctx=self._cfg["llm"]["n_ctx"],
+            n_threads=self._cfg["llm"]["n_threads"],
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
+            progress_callback=_progress
+        )
+
+    async def _load_model_async(self, model_path: str, announce: bool = False):
+        model_path = str(model_path)
+        logger.info(f"Loading LLM from {model_path}")
+
+        model_name = Path(model_path).name
+
+        if announce:
+            await self.bridge.post(msg_event(f"Loading language model: {model_name}"))
+
+        self._last_progress_sent = -1
+        self._last_progress_detail = None
+        self._emit_load_progress(0, "Initializing…")
+
+        model = await asyncio.to_thread(self._create_model, model_path)
+        self.model = model
+        self.model_path = model_path
+
+        self._emit_load_progress(100, "Model ready")
+
+        if announce:
+            await self.bridge.post(msg_event(f"LLM model → {model_name}"))
 
     def _sanitize_response(self, text: str) -> str:
         """Remove stage directions/emotes and keep output brief."""
@@ -118,22 +180,7 @@ class LocalLLM:
             if self._processing:
                 raise RuntimeError("Cannot reload LLM while processing")
 
-            logger.info(f"Reloading LLM from {model_path}")
-            await self.bridge.post(msg_event("Reloading LLM model..."))
-
-            def _load():
-                return Llama(
-                    model_path=model_path,
-                    n_ctx=self._cfg["llm"]["n_ctx"],
-                    n_threads=self._cfg["llm"]["n_threads"],
-                    n_gpu_layers=int(self._cfg["llm"].get("n_gpu_layers", 0)),
-                    verbose=False,
-                )
-
-            new_model = await asyncio.to_thread(_load)
-            self.model = new_model
-            self.model_path = model_path
-            await self.bridge.post(msg_event(f"LLM model → {Path(model_path).name}"))
+            await self._load_model_async(model_path, announce=True)
             logger.info("LLM model reloaded successfully")
 
     async def reinforce(self, delta: float):
@@ -210,6 +257,9 @@ You (reply naturally):"""
 
     async def _generate(self, prompt: str, max_tokens: int | None = None, min_tokens: int = 10) -> str:
         """Generate response from model with token streaming."""
+        if self.model is None:
+            raise RuntimeError("LLM model not loaded")
+
         try:
             await self.bridge.post(msg_status("thinking", "Processing..."))
 
