@@ -551,7 +551,7 @@ def main():
 if __name__ == "__main__":
     try:
         exit_code = main()
-    except Exception as exc:  # pylint: disable=broad-except
+    except Exception as exc:
         logger.exception("Unhandled exception during startup")
         print_error(f"Unhandled exception: {exc}")
         exit_code = 1
