@@ -1,5 +1,17 @@
 # Changelog - Bug Fixes & Optimizations
 
+## v2.1 - Telemetry & Documentation Refresh
+
+### ✨ Features & Design Updates
+- Added real-time system telemetry publisher with GPU/CPU metrics and UI system usage card integration.【F:src/backend/system.py†L1-L152】【F:src/frontend/components/SystemUsageCard.tsx†L1-L83】
+- Expanded documentation with feature status tracking and configuration highlights in both the main README and runtime guide.【F:README.md†L1-L164】【F:docs/README.md†L1-L98】
+- Surfaced tool execution history and stats directly in the dashboard to accompany the existing tool system.【F:src/frontend/components/ToolActivity.tsx†L6-L213】
+- Clarified optional components such as GPU acceleration, Piper playback, and gesture recognition across docs.【F:README.md†L166-L213】
+
+### ⚠️ Known Limitations
+- Piper auto playback remains Windows-specific; cross-platform playback remains on the roadmap.【F:src/backend/tts.py†L87-L123】
+- GPU telemetry and system tests depend on `torch`, `pynvml`, and `psutil`; missing packages disable metrics and fail tests.【F:src/backend/system.py†L1-L152】【F:tests/test_system.py†L1-L120】
+
 ## v2.0 - Performance & Quality Update
 
 ### 🚀 Performance Optimizations
