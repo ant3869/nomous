@@ -839,7 +839,7 @@ function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
     return (
       <Card className="h-full bg-zinc-900/70 border-dashed border-zinc-800/60">
         <CardContent className="flex h-full items-center justify-center p-4 text-center text-sm text-zinc-400">
-          Select a memory node from the graph or insight lists to inspect its learned behaviour, context, and related connections.
+          Select a memory node from the graph or insight lists to inspect its learned behavior, context, and related connections.
         </CardContent>
       </Card>
     );
