@@ -13,6 +13,7 @@ from llama_cpp import Llama
 
 from .memory import MemoryStore
 from .utils import msg_event, msg_token, msg_speak, msg_status
+from .tools import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,11 @@ class LocalLLM:
         # Processing lock
         self._processing = False
         self._lock = asyncio.Lock()
+        
+        # Tool executor for function calling
+        self.tools = ToolExecutor(self)
+        self.tools_enabled = cfg["llm"].get("tools_enabled", True)
+        logger.info(f"Tool system initialized with {len(self.tools.tools)} tools")
 
         logger.info("LLM initialized successfully")
 
@@ -146,37 +152,58 @@ class LocalLLM:
         if len(self.recent_context) > self.max_context_items:
             self.recent_context.pop(0)
 
-    def _build_prompt(self, user_input: str, context_type: str = "text") -> str:
-        """Build prompt with context."""
+    def _build_prompt(self, user_input: str, context_type: str = "text", include_tools: bool = True) -> str:
+        """Build prompt with context and tool instructions."""
         # Add recent context
         context_str = ""
         if self.recent_context:
             for ctx in self.recent_context[-2:]:
                 context_str += f"{ctx['type']}: {ctx['content'][:80]}\n"
         
+        # Tool instructions if enabled
+        tools_instructions = ""
+        if include_tools and self.tools_enabled:
+            tools_instructions = f"""
+
+AVAILABLE TOOLS:
+You can use tools to enhance your capabilities. Available tools:
+- search_memory: Search past interactions and memories
+- recall_recent_context: Get recent conversation history
+- record_observation: Save important observations
+- evaluate_interaction: Self-evaluate your responses
+- identify_pattern: Record patterns you notice
+- analyze_sentiment: Understand emotional tone
+- check_appropriate_response: Verify response appropriateness
+- track_milestone: Record achievements
+- get_current_capabilities: Review your abilities
+
+To use a tool, include: TOOL_CALL: {{"tool": "tool_name", "args": {{"param": "value"}}}}
+Use tools when they help you be more helpful, remember better, or improve yourself.
+"""
+        
         if context_type == "vision":
             prompt = f"""You're an AI that can see and speak. You notice: {user_input}
 
 Previous: {context_str if context_str else 'Just started observing'}
-
+{tools_instructions}
 Comment naturally in 1 sentence (be casual, like a friend):"""
         elif context_type == "audio":
             prompt = f"""Previous: {context_str if context_str else 'Just started'}
 
 Person: "{user_input}"
-
+{tools_instructions}
 You (reply naturally, 1-2 sentences):"""
         elif context_type == "autonomous":
             prompt = f"""You're observing your environment silently.
 
 Recent: {context_str if context_str else 'Quiet so far'}
-
-Think out loud briefly (1 short sentence, casual):"""
+{tools_instructions}
+Think out loud briefly (1 short sentence, casual) or use a tool if helpful:"""
         else:
             prompt = f"""Previous: {context_str if context_str else 'New conversation'}
 
 Person: {user_input}
-
+{tools_instructions}
 You (reply naturally):"""
         
         return prompt
@@ -224,6 +251,37 @@ You (reply naturally):"""
 
             # Remove any role-play artifacts
             response = response.replace("You:", "").replace("Person:", "").strip()
+
+            # Process tool calls if enabled
+            if self.tools_enabled and "TOOL_CALL:" in response:
+                tool_calls = self.tools.parse_tool_calls(response)
+                if tool_calls:
+                    logger.info(f"Found {len(tool_calls)} tool call(s) in response")
+                    await self.bridge.post({"type": "thought", "text": f"Executing {len(tool_calls)} tool(s)..."})
+                    
+                    tool_results = []
+                    for call in tool_calls:
+                        tool_name = call.get("tool")
+                        args = call.get("args", {})
+                        result = await self.tools.execute_tool(tool_name, args)
+                        tool_results.append({
+                            "tool": tool_name,
+                            "result": result
+                        })
+                        
+                        # Send tool result to UI
+                        await self.bridge.post({
+                            "type": "tool_result",
+                            "tool": tool_name,
+                            "result": result
+                        })
+                    
+                    # Remove tool calls from response for speaking
+                    response_lines = []
+                    for line in response.split('\n'):
+                        if 'TOOL_CALL:' not in line:
+                            response_lines.append(line)
+                    response = '\n'.join(response_lines).strip()
 
             sanitized = self._sanitize_response(response)
             if sanitized:
