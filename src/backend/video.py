@@ -50,6 +50,7 @@ class CameraLoop:
         self._stop = threading.Event()
         self._running = False
         self._command_queue = SimpleQueue()
+        self._brightness_scale = 1.0
 
         # Vision analysis
         self.llm = None
@@ -293,7 +294,7 @@ class CameraLoop:
             # Initialize camera
             backend_id = cv2.CAP_DSHOW if self.backend == 'dshow' else cv2.CAP_ANY
             cap = cv2.VideoCapture(self.index, backend_id)
-            
+
             if not cap.isOpened():
                 logger.error(f"Failed to open camera at index {self.index}")
                 self._post_event(f"Camera {self.index} failed to open")
@@ -304,7 +305,23 @@ class CameraLoop:
             cap.set(cv2.CAP_PROP_FPS, 30)
             
             logger.info(f"Camera opened: {self.capture_width}x{self.capture_height}, backend={self.backend}")
-            
+
+            # Determine native brightness scaling so slider percentages map correctly
+            try:
+                native_brightness = cap.get(cv2.CAP_PROP_BRIGHTNESS)
+                if self.backend == 'dshow' or (native_brightness is not None and native_brightness > 1.0):
+                    # DirectShow and similar backends typically use a 0-255 range
+                    self._brightness_scale = 255.0
+                else:
+                    self._brightness_scale = 1.0
+                logger.info(
+                    f"Camera brightness scale set to {self._brightness_scale:.2f} "
+                    f"(backend={self.backend}, native={native_brightness})"
+                )
+            except Exception as e:
+                logger.debug(f"Unable to determine brightness scale: {e}")
+                self._brightness_scale = 1.0
+
             # Read first frame
             ok, prev = cap.read()
             if not ok:
@@ -339,9 +356,13 @@ class CameraLoop:
                             logger.info(f"Camera exposure set to {exposure:.2f}")
                         elif cmd == "brightness":
                             (percent,) = args
-                            brightness = percent / 100.0
+                            scale = self._brightness_scale if self._brightness_scale > 0 else 1.0
+                            brightness = (percent / 100.0) * scale
                             cap.set(cv2.CAP_PROP_BRIGHTNESS, brightness)
-                            logger.info(f"Camera brightness set to {brightness:.2f}")
+                            logger.info(
+                                f"Camera brightness set to {brightness:.2f} "
+                                f"(percent={percent}, scale={scale:.2f})"
+                            )
                     except Exception as e:
                         logger.error(f"Failed to apply camera command {cmd}: {e}")
 
