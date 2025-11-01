@@ -192,7 +192,7 @@ class SystemMonitor:
         }
 
     def _gpu_metrics(self) -> Optional[Dict[str, Any]]:
-        if self._nvml_initialised:
+        if self._nvml_initialized:
             try:
                 handle = nvmlDeviceGetHandleByIndex(self._nvml_device_index)
                 util = nvmlDeviceGetUtilizationRates(handle)
