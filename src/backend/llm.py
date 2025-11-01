@@ -89,7 +89,8 @@ class LocalLLM:
             pass
 
     def _create_model(self, model_path: str) -> Llama:
-        n_gpu_layers = int(self._cfg["llm"].get("n_gpu_layers", 0))
+            detail = f"{percent}% loaded" if total > 0 else "Initializing..."
+            self._emit_load_progress(percent, detail)
         if n_gpu_layers > 0:
             logger.info(f"GPU acceleration enabled: {n_gpu_layers} layers on GPU")
 
