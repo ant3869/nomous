@@ -188,7 +188,7 @@ class Server:
                 )
             )
             logger.info(
-                "System monitor initialised (%s - %s)", info.backend, info.reason
+                "System monitor initialized (%s - %s)", info.backend, info.reason
             )
 
             await self.bridge.post(msg_status("idle", "Ready"))
