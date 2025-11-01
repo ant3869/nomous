@@ -19,7 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 class LocalLLM:
-    def __init__(self, cfg, bridge, tts, memory: Optional[MemoryStore] = None, loop: asyncio.AbstractEventLoop | None = None):
+    def __init__(
+        self,
+        cfg,
+        bridge,
+        tts,
+        memory: Optional[MemoryStore] = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        *,
+        load_immediately: bool = True,
+    ):
         self.bridge = bridge
         self.tts = tts
         self.memory = memory
@@ -56,12 +65,25 @@ class LocalLLM:
         self.tools_enabled = cfg["llm"].get("tools_enabled", True)
         logger.info(f"Tool system initialized with {len(self.tools.tools)} tools")
 
+        if load_immediately:
+            self._load_model_sync(self.model_path)
+
     @classmethod
     async def create(cls, cfg, bridge, tts, memory: Optional[MemoryStore], loop: asyncio.AbstractEventLoop | None = None):
-        instance = cls(cfg, bridge, tts, memory, loop)
+        instance = cls(cfg, bridge, tts, memory, loop, load_immediately=False)
         await instance._load_model_async(instance.model_path, announce=True)
         logger.info("LLM initialized successfully")
         return instance
+
+    def _schedule_bridge_post(self, payload):
+        if not self.bridge:
+            return
+
+        try:
+            asyncio.run_coroutine_threadsafe(self.bridge.post(payload), self._loop)
+        except RuntimeError:
+            # Event loop not running (shutdown), ignore
+            pass
 
     def _emit_load_progress(self, progress: int, detail: str | None = None):
         if not self.bridge:
@@ -82,27 +104,53 @@ class LocalLLM:
         if detail:
             payload["detail"] = detail
 
-        try:
-            asyncio.run_coroutine_threadsafe(self.bridge.post(payload), self._loop)
-        except RuntimeError:
-            # Event loop not running (shutdown), ignore
-            pass
+        self._schedule_bridge_post(payload)
+
+    def _load_model_sync(self, model_path: str, announce: bool = False):
+        model_path = str(model_path)
+        logger.info(f"Loading LLM from {model_path} (sync)")
+
+        model_name = Path(model_path).name
+
+        if announce:
+            self._schedule_bridge_post(msg_event(f"Loading language model: {model_name}"))
+
+        self._last_progress_sent = -1
+        self._last_progress_detail = None
+        self._emit_load_progress(0, "Initializing…")
+
+        model = self._create_model(model_path)
+        self.model = model
+        self.model_path = model_path
+
+        self._emit_load_progress(100, "Model ready")
+
+        if announce:
+            self._schedule_bridge_post(msg_event(f"LLM model → {model_name}"))
 
     def _create_model(self, model_path: str) -> Llama:
-            detail = f"{percent}% loaded" if total > 0 else "Initializing..."
-            self._emit_load_progress(percent, detail)
+        llm_cfg = self._cfg.get("llm", {})
+        n_gpu_layers_cfg = llm_cfg.get("n_gpu_layers", 0)
+
+        try:
+            n_gpu_layers = int(n_gpu_layers_cfg)
+        except (TypeError, ValueError):
+            logger.warning("Invalid n_gpu_layers value %r; defaulting to CPU", n_gpu_layers_cfg)
+            n_gpu_layers = 0
+
         if n_gpu_layers > 0:
             logger.info(f"GPU acceleration enabled: {n_gpu_layers} layers on GPU")
 
         def _progress(current: int, total: int) -> bool:
             percent = int((current / total) * 100) if total else 0
-            self._emit_load_progress(percent, f"{percent}% loaded")
+            detail = f"{percent}% loaded" if total else "Initializing..."
+            self._emit_load_progress(percent, detail)
             return True
 
         return Llama(
             model_path=model_path,
-            n_ctx=self._cfg["llm"]["n_ctx"],
-            n_threads=self._cfg["llm"]["n_threads"],
+            n_ctx=llm_cfg["n_ctx"],
+            n_threads=llm_cfg["n_threads"],
             n_gpu_layers=n_gpu_layers,
             verbose=False,
             progress_callback=_progress
