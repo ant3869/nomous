@@ -10,7 +10,7 @@ import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Separator } from "./components/ui/separator";
-import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Scan } from "lucide-react";
+import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Scan, Send } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
@@ -62,6 +62,13 @@ interface ToolResult {
   result: any;
   timestamp: number;
 }
+
+interface ChatMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  timestamp: number;
+}
 type ModelPathKey = "llmModelPath" | "visionModelPath" | "audioModelPath" | "sttModelPath";
 type PresetStrategy = Exclude<ControlSettings["modelStrategy"], "custom">;
 
@@ -69,7 +76,7 @@ interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
-  speechLines: string[]; systemLines: string[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
+  speechLines: string[]; systemLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
   settings: ControlSettings; loadingOverlay: LoadingOverlay | null;
 }
 
@@ -211,7 +218,7 @@ function useNomousBridge() {
     memory: { nodes: [{ id: "self", label: "Nomous", strength: 1, kind: "self" }], edges: [] },
     audioEnabled: true, visionEnabled: true, connected: false,
     url: typeof window !== "undefined" ? (localStorage.getItem("nomous.ws") || "ws://localhost:8765") : "ws://localhost:8765",
-    micOn: false, vu: 0, consoleLines: [], thoughtLines: [], speechLines: [], systemLines: [],
+    micOn: false, vu: 0, consoleLines: [], thoughtLines: [], speechLines: [], systemLines: [], chatMessages: [],
     toolActivity: [],
     systemMetrics: null,
     settings: defaultSettings,
@@ -221,6 +228,8 @@ function useNomousBridge() {
   const micRef = useRef<MicChain | null>(null);
   const hbRef = useRef<number | null>(null);
   const tCounter = useRef(0);
+  const [chatInput, setChatInput] = useState("");
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -240,6 +249,13 @@ function useNomousBridge() {
       // ignore invalid settings payloads
     }
   }, []);
+
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [state.chatMessages]);
 
   const log = useCallback((line: string) => {
     // Filter out spam/duplicates
@@ -267,6 +283,45 @@ function useNomousBridge() {
     const ws = wsRef.current; if (!ws || ws.readyState !== 1) return;
     ws.send(JSON.stringify(obj));
   }, []);
+
+  const sendChatMessage = useCallback((input: string) => {
+    const trimmed = input.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== 1) {
+      setState(p => ({
+        ...p,
+        chatMessages: [...p.chatMessages, createChatMessage("system", "Unable to send message: not connected to runtime.")].slice(-200),
+      }));
+      log("chat send failed: not connected");
+      return;
+    }
+
+    const message = createChatMessage("user", trimmed);
+    setState(p => ({
+      ...p,
+      chatMessages: [...p.chatMessages, message].slice(-200),
+    }));
+    push({ type: "text", value: trimmed });
+    setChatInput("");
+  }, [log, push]);
+
+  const handleChatSubmit = useCallback((event?: React.FormEvent<HTMLFormElement>) => {
+    if (event) {
+      event.preventDefault();
+    }
+    sendChatMessage(chatInput);
+  }, [chatInput, sendChatMessage]);
+
+  const handleChatKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendChatMessage(chatInput);
+    }
+  }, [chatInput, sendChatMessage]);
 
   const handleMessage = useCallback((ev: MessageEvent) => {
     try {
@@ -297,11 +352,13 @@ function useNomousBridge() {
         case "speak": {
           const stamp = `[${new Date().toLocaleTimeString()}]`;
           log(`speak â†’ ${msg.text}`);
+          const assistantMessage = msg.text ? createChatMessage("assistant", msg.text) : null;
           setState(p => ({
             ...p,
             status: "speaking",
             statusDetail: msg.text,
             speechLines: msg.text ? [`${stamp} ${msg.text}`, ...p.speechLines.slice(0, 200)] : p.speechLines,
+            chatMessages: assistantMessage ? [...p.chatMessages, assistantMessage].slice(-200) : p.chatMessages,
           }));
           break;
         }
@@ -834,6 +891,16 @@ function formatTimestamp(value?: string) {
   return date.toLocaleString();
 }
 
+function createChatMessage(role: ChatMessage["role"], text: string): ChatMessage {
+  const ts = Date.now();
+  return {
+    id: `${role}-${ts}-${Math.random().toString(36).slice(2, 8)}`,
+    role,
+    text,
+    timestamp: ts,
+  };
+}
+
 function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
   if (!detail) {
     return (
@@ -920,6 +987,29 @@ function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function ChatBubble({ message }: { message: ChatMessage }) {
+  const isUser = message.role === "user";
+  const isAssistant = message.role === "assistant";
+  const alignment = isUser ? "items-end" : "items-start";
+  const label = isUser ? "You" : isAssistant ? "Nomous" : "System";
+  const bubbleClass = isUser
+    ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-100"
+    : isAssistant
+      ? "bg-zinc-800/70 border-zinc-700/60 text-zinc-100"
+      : "bg-amber-500/10 border-amber-400/40 text-amber-100";
+
+  return (
+    <div className={`flex flex-col ${alignment} gap-1`}>
+      <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">
+        {label} • {new Date(message.timestamp).toLocaleTimeString()}
+      </div>
+      <div className={`max-w-[85%] rounded-2xl border px-3 py-2 text-sm leading-relaxed shadow-sm ${bubbleClass}`}>
+        {message.text}
+      </div>
+    </div>
   );
 }
 
@@ -1646,6 +1736,7 @@ export default function App(){
               <TabsList className="flex flex-wrap gap-2 bg-zinc-950/60 border border-zinc-800/60">
                 <TabsTrigger value="overview">Overview</TabsTrigger>
                 <TabsTrigger value="console">Console</TabsTrigger>
+                <TabsTrigger value="chat">Chat</TabsTrigger>
                 <TabsTrigger value="behavior">Behavior</TabsTrigger>
                 <TabsTrigger value="tokens">Tokens</TabsTrigger>
                 <TabsTrigger value="memory">Memory</TabsTrigger>
@@ -1736,6 +1827,59 @@ export default function App(){
                     </Card>
                   </div>
                 </div>
+              </TabsContent>
+
+              <TabsContent value="chat" className="pt-4">
+                <Card className="bg-zinc-900/70 border-zinc-800/60">
+                  <CardContent className="flex h-[26rem] flex-col gap-4 p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-zinc-200">
+                        <MessageSquare className="h-4 w-4" />
+                        <span className="font-semibold">Manual Chat</span>
+                      </div>
+                      <Badge className={`border ${state.connected ? "bg-emerald-500/20 text-emerald-100 border-emerald-500/40" : "bg-red-500/20 text-red-200 border-red-500/40"}`}>
+                        {state.connected ? "Connected" : "Offline"}
+                      </Badge>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto rounded-lg border border-zinc-800/60 bg-black/50 p-4" ref={chatScrollRef}>
+                      <div className="flex flex-col gap-3">
+                        {state.chatMessages.length === 0 ? (
+                          <div className="text-sm text-zinc-400">
+                            Type a message below to talk to the model without relying on the microphone or camera. Conversations stay in this session only.
+                          </div>
+                        ) : (
+                          state.chatMessages.map(message => (
+                            <ChatBubble key={message.id} message={message} />
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <form onSubmit={handleChatSubmit} className="space-y-2">
+                      <label className="text-xs uppercase tracking-[0.3em] text-zinc-500">Message</label>
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <textarea
+                          value={chatInput}
+                          onChange={event => setChatInput(event.target.value)}
+                          onKeyDown={handleChatKeyDown}
+                          rows={2}
+                          placeholder="Type your instruction or question..."
+                          className="min-h-[64px] flex-1 rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
+                        />
+                        <Button
+                          type="submit"
+                          disabled={!chatInput.trim()}
+                          className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500/90 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                        >
+                          <Send className="h-4 w-4" />
+                          Send
+                        </Button>
+                      </div>
+                      <div className="text-[11px] text-zinc-500">Press Enter to send. Use Shift + Enter for a new line.</div>
+                    </form>
+                  </CardContent>
+                </Card>
               </TabsContent>
 
               <TabsContent value="console" className="pt-4">
