@@ -15,6 +15,7 @@ import type { MemoryEdge, MemoryNode } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
 import { buildMemoryNodeDetail, computeMemoryInsights } from "./utils/memory";
 import type { MemoryNodeDetail, MemoryInsightEntry } from "./utils/memory";
+import { normaliseVoiceFilename, readJson, writeJson } from "./utils/storage";
 import { ToolActivity, ToolStats } from "./components/ToolActivity";
 import { SystemUsageCard } from "./components/SystemUsageCard";
 
@@ -87,6 +88,175 @@ interface LoadingOverlay {
 
 const TARGET_SAMPLE_RATE = 16000;
 const MAX_CHAT_HISTORY = 200;
+const STORAGE_SETTINGS_KEY = "nomous.settings";
+const STORAGE_WS_KEY = "nomous.ws";
+
+const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
+  cameraEnabled: true,
+  microphoneEnabled: false,
+  ttsEnabled: true,
+  speakerEnabled: true,
+  sttEnabled: true,
+  ttsVoice: "en_US-libritts-high.onnx",
+  micSensitivity: 60,
+  masterVolume: 70,
+  cameraResolution: "1280x720",
+  cameraExposure: 45,
+  cameraBrightness: 55,
+  llmModelPath: "/models/llm/main.gguf",
+  visionModelPath: "/models/vision/runtime.bin",
+  audioModelPath: "/models/audio/piper.onnx",
+  sttModelPath: "/models/stt/whisper-small",
+  llmTemperature: 0.8,
+  llmMaxTokens: 4096,
+  modelStrategy: "balanced",
+};
+
+const MODEL_STRATEGIES: ControlSettings["modelStrategy"][] = [
+  "speed",
+  "balanced",
+  "accuracy",
+  "custom",
+];
+
+function coerceBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function coerceNumber(value: unknown, fallback: number, options?: { min?: number; max?: number }): number {
+  let numeric: number | undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    numeric = value;
+  } else if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      numeric = parsed;
+    }
+  }
+  if (numeric === undefined) {
+    numeric = fallback;
+  }
+  if (options?.min !== undefined) {
+    numeric = Math.max(options.min, numeric);
+  }
+  if (options?.max !== undefined) {
+    numeric = Math.min(options.max, numeric);
+  }
+  return numeric;
+}
+
+function coerceString(value: unknown, fallback: string, allowEmpty = true): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  if (!allowEmpty && trimmed.length === 0) {
+    return fallback;
+  }
+  return allowEmpty ? trimmed : trimmed || fallback;
+}
+
+function coerceStrategy(value: unknown, fallback: ControlSettings["modelStrategy"]): ControlSettings["modelStrategy"] {
+  if (typeof value === "string" && MODEL_STRATEGIES.includes(value as ControlSettings["modelStrategy"])) {
+    return value as ControlSettings["modelStrategy"];
+  }
+  return fallback;
+}
+
+function mergeSettings(base: ControlSettings, patch: Partial<ControlSettings>): ControlSettings {
+  const next = { ...base };
+
+  if ("cameraEnabled" in patch) next.cameraEnabled = coerceBoolean(patch.cameraEnabled, next.cameraEnabled);
+  if ("microphoneEnabled" in patch) next.microphoneEnabled = coerceBoolean(patch.microphoneEnabled, next.microphoneEnabled);
+  if ("ttsEnabled" in patch) next.ttsEnabled = coerceBoolean(patch.ttsEnabled, next.ttsEnabled);
+  if ("speakerEnabled" in patch) next.speakerEnabled = coerceBoolean(patch.speakerEnabled, next.speakerEnabled);
+  if ("sttEnabled" in patch) next.sttEnabled = coerceBoolean(patch.sttEnabled, next.sttEnabled);
+  if ("ttsVoice" in patch && patch.ttsVoice !== undefined) {
+    const voice = coerceString(patch.ttsVoice, next.ttsVoice, false);
+    next.ttsVoice = normaliseVoiceFilename(voice);
+  }
+  if ("micSensitivity" in patch) {
+    next.micSensitivity = coerceNumber(patch.micSensitivity, next.micSensitivity, { min: 0, max: 100 });
+  }
+  if ("masterVolume" in patch) {
+    next.masterVolume = coerceNumber(patch.masterVolume, next.masterVolume, { min: 0, max: 100 });
+  }
+  if ("cameraResolution" in patch && patch.cameraResolution !== undefined) {
+    next.cameraResolution = coerceString(patch.cameraResolution, next.cameraResolution);
+  }
+  if ("cameraExposure" in patch) {
+    next.cameraExposure = coerceNumber(patch.cameraExposure, next.cameraExposure, { min: 0, max: 100 });
+  }
+  if ("cameraBrightness" in patch) {
+    next.cameraBrightness = coerceNumber(patch.cameraBrightness, next.cameraBrightness, { min: 0, max: 100 });
+  }
+  if ("llmModelPath" in patch && patch.llmModelPath !== undefined) {
+    next.llmModelPath = coerceString(patch.llmModelPath, next.llmModelPath);
+  }
+  if ("visionModelPath" in patch && patch.visionModelPath !== undefined) {
+    next.visionModelPath = coerceString(patch.visionModelPath, next.visionModelPath);
+  }
+  if ("audioModelPath" in patch && patch.audioModelPath !== undefined) {
+    next.audioModelPath = coerceString(patch.audioModelPath, next.audioModelPath);
+  }
+  if ("sttModelPath" in patch && patch.sttModelPath !== undefined) {
+    next.sttModelPath = coerceString(patch.sttModelPath, next.sttModelPath);
+  }
+  if ("llmTemperature" in patch) {
+    next.llmTemperature = coerceNumber(patch.llmTemperature, next.llmTemperature, { min: 0.0, max: 2.0 });
+  }
+  if ("llmMaxTokens" in patch) {
+    next.llmMaxTokens = Math.round(coerceNumber(patch.llmMaxTokens, next.llmMaxTokens, { min: 64 }));
+  }
+  if ("modelStrategy" in patch) {
+    next.modelStrategy = coerceStrategy(patch.modelStrategy, next.modelStrategy);
+  }
+
+  return next;
+}
+
+function resolveStoredSettings(): ControlSettings {
+  const stored = readJson<Partial<ControlSettings>>(STORAGE_SETTINGS_KEY);
+  if (!stored || typeof stored !== "object") {
+    return { ...DEFAULT_CONTROL_SETTINGS };
+  }
+  return mergeSettings({ ...DEFAULT_CONTROL_SETTINGS }, stored);
+}
+
+function resolveInitialUrl(): string {
+  if (typeof window === "undefined") {
+    return "ws://localhost:8765";
+  }
+  const stored = window.localStorage.getItem(STORAGE_WS_KEY);
+  return stored && stored.trim().length > 0 ? stored : "ws://localhost:8765";
+}
+
+function createInitialState(): DashboardState {
+  const settings = resolveStoredSettings();
+  return {
+    status: "idle",
+    statusDetail: "Disconnected",
+    tokenWindow: Array.from({ length: 30 }, (_, i) => ({ t: i, inTok: 0, outTok: 0 })),
+    behavior: { onTopic: 0, brevity: 0, responsiveness: 0, nonsenseRate: 0, rewardTotal: 0 },
+    memory: { nodes: [{ id: "self", label: "Nomous", strength: 1, kind: "self" }], edges: [] },
+    audioEnabled: settings.ttsEnabled,
+    visionEnabled: settings.cameraEnabled,
+    connected: false,
+    url: resolveInitialUrl(),
+    micOn: settings.microphoneEnabled,
+    vu: 0,
+    preview: undefined,
+    consoleLines: [],
+    thoughtLines: [],
+    speechLines: [],
+    systemLines: [],
+    chatMessages: [],
+    toolActivity: [],
+    systemMetrics: null,
+    settings,
+    loadingOverlay: null,
+  };
+}
 
 interface MicChain {
   ctx: AudioContext;
@@ -189,40 +359,7 @@ function encodeAudioChunk(chain: MicChain, chunk: Float32Array, sampleRate: numb
 }
 
 function useNomousBridge() {
-  const defaultSettings: ControlSettings = {
-    cameraEnabled: true,
-    microphoneEnabled: false,
-    ttsEnabled: true,
-    speakerEnabled: true,
-    sttEnabled: true,
-    ttsVoice: "en_US-libritts-high.onnx",
-    micSensitivity: 60,
-    masterVolume: 70,
-    cameraResolution: "1280x720",
-    cameraExposure: 45,
-    cameraBrightness: 55,
-    llmModelPath: "/models/llm/main.gguf",
-    visionModelPath: "/models/vision/runtime.bin",
-    audioModelPath: "/models/audio/piper.onnx",
-    sttModelPath: "/models/stt/whisper-small",
-    llmTemperature: 0.8,
-    llmMaxTokens: 4096,
-    modelStrategy: "balanced",
-  };
-
-  const [state, setState] = useState<DashboardState>({
-    status: "idle", statusDetail: "Disconnected",
-    tokenWindow: Array.from({ length: 30 }, (_, i) => ({ t: i, inTok: 0, outTok: 0 })),
-    behavior: { onTopic: 0, brevity: 0, responsiveness: 0, nonsenseRate: 0, rewardTotal: 0 },
-    memory: { nodes: [{ id: "self", label: "Nomous", strength: 1, kind: "self" }], edges: [] },
-    audioEnabled: true, visionEnabled: true, connected: false,
-    url: typeof window !== "undefined" ? (localStorage.getItem("nomous.ws") || "ws://localhost:8765") : "ws://localhost:8765",
-    micOn: false, vu: 0, consoleLines: [], thoughtLines: [], speechLines: [], systemLines: [], chatMessages: [],
-    toolActivity: [],
-    systemMetrics: null,
-    settings: defaultSettings,
-    loadingOverlay: null,
-  });
+  const [state, setState] = useState<DashboardState>(() => createInitialState());
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicChain | null>(null);
   const hbRef = useRef<number | null>(null);
@@ -231,30 +368,15 @@ function useNomousBridge() {
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const raw = localStorage.getItem("nomous.settings");
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.ttsVoice === "string") {
-        const stored = parsed.ttsVoice;
-        if (!stored.endsWith(".onnx")) {
-          const voiceName = stored.split("/").pop() ?? stored;
-          parsed.ttsVoice = voiceName.endsWith(".onnx") ? voiceName : `${voiceName}.onnx`;
-        }
-      }
-      setState(p => ({ ...p, settings: { ...defaultSettings, ...parsed } }));
-    } catch {
-      // ignore invalid settings payloads
-    }
-  }, []);
-
-  useEffect(() => {
     const el = chatScrollRef.current;
     if (el) {
       el.scrollTop = el.scrollHeight;
     }
   }, [state.chatMessages]);
+
+  useEffect(() => {
+    writeJson(STORAGE_SETTINGS_KEY, state.settings);
+  }, [state.settings]);
 
   const log = useCallback((line: string) => {
     // Filter out spam/duplicates
@@ -431,7 +553,9 @@ function useNomousBridge() {
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
-        localStorage.setItem("nomous.ws", state.url);
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(STORAGE_WS_KEY, state.url);
+        }
         setState(p => ({ ...p, connected: true, statusDetail: "Connected" }));
         log(`connected â†’ ${state.url}`);
         hbRef.current = window.setInterval(() => push({ type: "ping" }), 10000);
@@ -564,7 +688,7 @@ function useNomousBridge() {
         ctx.close().catch(() => {});
       }
       micRef.current = null;
-      setState(p => ({ ...p, micOn: false, settings: { ...p.settings, microphoneEnabled: false }, vu: 0 }));
+      setState(p => ({ ...p, micOn: false, settings: mergeSettings(p.settings, { microphoneEnabled: false }), vu: 0 }));
       log(`mic error: ${e?.message ?? e}`);
     }
   }, [log, push, setState, stopMic]);
@@ -576,11 +700,14 @@ function useNomousBridge() {
 
   const updateSettings = useCallback((patch: Partial<ControlSettings>) => {
     setState(prev => {
-      const nextSettings = { ...prev.settings, ...patch };
-      if (typeof window !== "undefined") {
-        localStorage.setItem("nomous.settings", JSON.stringify(nextSettings));
-      }
-      return { ...prev, settings: nextSettings };
+      const nextSettings = mergeSettings(prev.settings, patch);
+      return {
+        ...prev,
+        settings: nextSettings,
+        audioEnabled: "ttsEnabled" in patch ? nextSettings.ttsEnabled : prev.audioEnabled,
+        visionEnabled: "cameraEnabled" in patch ? nextSettings.cameraEnabled : prev.visionEnabled,
+        micOn: "microphoneEnabled" in patch ? nextSettings.microphoneEnabled : prev.micOn,
+      };
     });
   }, []);
 
