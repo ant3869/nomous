@@ -29,7 +29,7 @@ export function writeJson<T>(key: string, value: T): void {
 
 export function normaliseVoiceFilename(value: string): string {
   if (!value) {
-    return value;
+    return "";
   }
   const parts = value.split("/");
   const name = parts[parts.length - 1] ?? value;
