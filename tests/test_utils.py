@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import List
 
+import pytest
+
 from src.backend.utils import Bridge, msg_event, msg_status
 
 
@@ -24,39 +26,35 @@ class FailingSocket:
         raise RuntimeError("boom")
 
 
-def test_bridge_broadcasts_messages() -> None:
-    async def _run() -> None:
-        bridge = Bridge()
-        client_a = RecordingSocket()
-        client_b = RecordingSocket()
-        bridge.register_ws(client_a)
-        bridge.register_ws(client_b)
+@pytest.mark.asyncio
+async def test_bridge_broadcasts_messages() -> None:
+    bridge = Bridge()
+    client_a = RecordingSocket()
+    client_b = RecordingSocket()
+    await bridge.register_ws(client_a)
+    await bridge.register_ws(client_b)
 
-        await bridge.post(msg_status("ready", "booted"))
-        await bridge.post(msg_event("started"))
+    await bridge.post(msg_status("ready", "booted"))
+    await bridge.post(msg_event("started"))
 
-        assert len(client_a.messages) == 2
-        assert len(client_b.messages) == 2
-        assert "\"ready\"" in client_a.messages[0]
-        assert "started" in client_b.messages[1]
-
-    asyncio.run(_run())
+    assert len(client_a.messages) == 2
+    assert len(client_b.messages) == 2
+    assert "\"ready\"" in client_a.messages[0]
+    assert "started" in client_b.messages[1]
 
 
-def test_bridge_deregisters_failing_clients() -> None:
-    async def _run() -> None:
-        bridge = Bridge()
-        ok_client = RecordingSocket()
-        bad_client = FailingSocket()
-        bridge.register_ws(ok_client)
-        bridge.register_ws(bad_client)
+@pytest.mark.asyncio
+async def test_bridge_deregisters_failing_clients() -> None:
+    bridge = Bridge()
+    ok_client = RecordingSocket()
+    bad_client = FailingSocket()
+    await bridge.register_ws(ok_client)
+    await bridge.register_ws(bad_client)
 
-        await bridge.post(msg_event("message"))
-        assert len(ok_client.messages) == 1
+    await bridge.post(msg_event("message"))
+    assert len(ok_client.messages) == 1
 
-        # Second post should only hit the healthy client.
-        await bridge.post(msg_event("again"))
-        assert len(ok_client.messages) == 2
-        assert bad_client.calls == 1
-
-    asyncio.run(_run())
+    # Second post should only hit the healthy client.
+    await bridge.post(msg_event("again"))
+    assert len(ok_client.messages) == 2
+    assert bad_client.calls == 1
