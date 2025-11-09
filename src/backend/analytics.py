@@ -115,7 +115,7 @@ class ResponseSample:
 
 
 def _tokenise(text: str) -> List[str]:
-    return re.findall(r"[a-zA-Z']+", text.lower())
+    return re.findall(r"[\w']+", text.lower(), flags=re.UNICODE)
 
 
 def _keywords(text: str) -> Counter:
