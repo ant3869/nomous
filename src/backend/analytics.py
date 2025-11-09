@@ -178,7 +178,12 @@ def _coherence_score(text: str) -> float:
         vowels = sum(ch in "aeiou" for ch in w)
         return vowels == 0 or len(w) > 12
     noise_ratio = sum(1 for w in words if is_noise(w)) / len(words)
-    punctuation_penalty = min(0.4, text.count("??") * 0.05 + text.count("!!") * 0.05)
+    # Penalize all sequences of two or more consecutive "!" or "?" characters
+    repeated_punct = re.findall(r'([!?])\1{1,}', text)
+    # Find all sequences and sum their lengths
+    matches = re.finditer(r'([!?])\1{1,}', text)
+    total_excess = sum(len(m.group(0)) for m in matches)
+    punctuation_penalty = min(0.4, total_excess * 0.05)
     return _clamp(1.0 - noise_ratio - punctuation_penalty)
 
 
