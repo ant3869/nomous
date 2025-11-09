@@ -615,13 +615,12 @@ function useNomousBridge() {
         case "speak": {
           const stamp = `[${new Date().toLocaleTimeString()}]`;
           log(`speak â†’ ${msg.text}`);
-          const assistantMessage = msg.text ? createChatMessage("assistant", msg.text) : null;
           setState(p => ({
             ...p,
             status: "speaking",
             statusDetail: msg.text,
-            speechLines: msg.text ? [`${stamp} ${msg.text}`, ...p.speechLines.slice(0, MAX_CHAT_HISTORY)] : p.speechLines,
-            chatMessages: assistantMessage ? [...p.chatMessages, assistantMessage].slice(-MAX_CHAT_HISTORY) : p.chatMessages,
+            speechLines: msg.text ? mergeSpeechLines(p.speechLines, stamp, msg.text) : p.speechLines,
+            chatMessages: msg.text ? mergeAssistantChatMessages(p.chatMessages, msg.text) : p.chatMessages,
           }));
           break;
         }
@@ -1186,6 +1185,72 @@ function createChatMessage(role: ChatMessage["role"], text: string): ChatMessage
     text,
     timestamp: ts,
   };
+}
+
+function mergeAssistantChatMessages(messages: ChatMessage[], nextText: string): ChatMessage[] {
+  if (!nextText) {
+    return messages;
+  }
+
+  if (messages.length > 0) {
+    const lastIndex = messages.length - 1;
+    const lastMessage = messages[lastIndex];
+    if (lastMessage.role === "assistant") {
+      if (lastMessage.text === nextText) {
+        return messages;
+      }
+
+      if (nextText.startsWith(lastMessage.text) || lastMessage.text.startsWith(nextText)) {
+        const updated = { ...lastMessage, text: nextText, timestamp: Date.now() };
+        const nextMessages = messages.slice();
+        nextMessages[lastIndex] = updated;
+        return nextMessages;
+      }
+    }
+  }
+
+  const appended = [...messages, createChatMessage("assistant", nextText)];
+  if (appended.length > MAX_CHAT_HISTORY) {
+    return appended.slice(appended.length - MAX_CHAT_HISTORY);
+  }
+  return appended;
+}
+
+function extractSpeechLineText(line: string): string {
+  const separatorIndex = line.indexOf("] ");
+  if (separatorIndex === -1) {
+    return line;
+  }
+  return line.slice(separatorIndex + 2);
+}
+
+function mergeSpeechLines(lines: string[], stamp: string, nextText: string): string[] {
+  if (!nextText) {
+    return lines;
+  }
+
+  const newEntry = `${stamp} ${nextText}`;
+  if (lines.length === 0) {
+    return [newEntry];
+  }
+
+  const [first, ...rest] = lines;
+  const limitedRest = rest.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1));
+  const firstText = extractSpeechLineText(first);
+
+  if (firstText === nextText) {
+    if (first === newEntry) {
+      return lines;
+    }
+    return [newEntry, ...limitedRest];
+  }
+
+  if (nextText.startsWith(firstText) || firstText.startsWith(nextText)) {
+    return [newEntry, ...limitedRest];
+  }
+
+  const trimmedRest = lines.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1));
+  return [newEntry, ...trimmedRest];
 }
 
 function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
