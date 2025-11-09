@@ -25,3 +25,6 @@ sentencepiece
 # optional viz / extras (keep if you use them)
 matplotlib
 mediapipe
+
+# testing
+pytest-asyncio

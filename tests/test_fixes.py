@@ -8,7 +8,10 @@ import asyncio
 import websockets
 import json
 import time
+import pytest
 
+
+@pytest.mark.asyncio
 async def test_fixes():
     print("=" * 60)
     print("  Testing Bug Fixes")
