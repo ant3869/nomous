@@ -119,9 +119,9 @@ function mergeBehaviorStats(prev: BehaviorStats, payload: any): BehaviorStats {
   const next: BehaviorStats = {
     summary: { ...prev.summary },
     signals: { ...prev.signals },
-    history: prev.history,
+    history: [...prev.history],
     rewardTotal: prev.rewardTotal,
-    anomalies: prev.anomalies,
+    anomalies: [...prev.anomalies],
     lastSample: prev.lastSample,
   };
 
