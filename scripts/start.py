@@ -185,7 +185,7 @@ def ensure_command_available(
     version = parse_semver(output or "")
     if version is None:
         print_warning(
-            f"Could not parse {friendly_name} version from '{output.strip()}'."
+            f"Could not parse {friendly_name} version from '{(output or '').strip()}'."
         )
         if install_hint:
             print_warning(install_hint)
