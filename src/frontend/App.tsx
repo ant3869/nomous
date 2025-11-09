@@ -153,7 +153,7 @@ function coerceString(value: unknown, fallback: string, allowEmpty = true): stri
   if (!allowEmpty && trimmed.length === 0) {
     return fallback;
   }
-  return allowEmpty ? trimmed : trimmed || fallback;
+  return trimmed;
 }
 
 function coerceStrategy(value: unknown, fallback: ControlSettings["modelStrategy"]): ControlSettings["modelStrategy"] {
