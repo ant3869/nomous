@@ -15,8 +15,33 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from rich.console import Console
-from rich.panel import Panel
+try:  # pragma: no cover - import guard for pristine environments
+    from rich.console import Console
+    from rich.panel import Panel
+except ModuleNotFoundError:  # pragma: no cover - rich is installed later
+    class Console:  # type: ignore[override]
+        """Minimal fallback console when rich is unavailable."""
+
+        def print(self, message):  # noqa: D401 - simple passthrough
+            print(message)
+
+    class _PanelStub:
+        """Fallback Panel implementation that behaves like a string."""
+
+        def __init__(self, renderable, border_style=None):
+            self.renderable = renderable
+            self.border_style = border_style
+
+        def __str__(self):
+            prefix = "[" + self.border_style + "]" if self.border_style else ""
+            suffix = "[/]" if self.border_style else ""
+            return f"{prefix}{self.renderable}{suffix}"
+
+        @classmethod
+        def fit(cls, renderable, border_style=None):
+            return cls(renderable, border_style)
+
+    Panel = _PanelStub  # type: ignore
 
 console = Console()
 
@@ -37,13 +62,18 @@ if not logger.handlers:
 logger.propagate = False
 
 ASCII_BANNER = """
- _   _                      _                 
-| \\ | |                    | |                
+ _   _                      _
+| \\ | |                    | |
 |  \\| | ___  _ __ ___   ___| |_ ___  _   _ ___
 | . ` |/ _ \\| '_ ` _ \\ / _ \\ __/ _ \\| | | / __|
 | |\\  | (_) | | | | | |  __/ || (_) | |_| \\__ \\
 |_| \\_|\\___/|_| |_| |_|\\___|\\__\\___/ \\__,_|___/
 """
+
+
+MIN_PYTHON_VERSION = (3, 10)
+MIN_NODE_VERSION = (18, 0, 0)
+MIN_NPM_VERSION = (9, 0, 0)
 
 
 def get_runtime_version() -> str:
@@ -92,6 +122,87 @@ def emit_start_banner():
             border_style="blue",
         )
     )
+
+
+def parse_semver(raw: str) -> Optional[Tuple[int, int, int]]:
+    """Extract the first semantic version tuple from arbitrary text."""
+
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", raw)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def is_version_supported(found: Tuple[int, int, int], minimum: Tuple[int, int, int]) -> bool:
+    """Return True when the detected version meets the minimum requirement."""
+
+    return found >= minimum
+
+
+def check_python_version() -> bool:
+    """Ensure the active interpreter matches the supported version."""
+
+    if sys.version_info < MIN_PYTHON_VERSION:
+        required = ".".join(str(x) for x in MIN_PYTHON_VERSION)
+        detected = sys.version.split()[0]
+        print_error(
+            "Unsupported Python version detected."
+            f" Nomous requires Python {required}+ but {detected} is running."
+        )
+        print_warning(
+            "Install a newer Python release from https://www.python.org/downloads/"
+        )
+        return False
+    return True
+
+
+def ensure_command_available(
+    command: str,
+    friendly_name: str,
+    minimum_version: Optional[Tuple[int, int, int]] = None,
+    install_hint: Optional[str] = None,
+) -> bool:
+    """Verify that a CLI command exists and, optionally, meets version requirements."""
+
+    if not shutil.which(command):
+        print_error(f"{friendly_name} was not found on PATH.")
+        if install_hint:
+            print_warning(install_hint)
+        return False
+
+    if minimum_version is None:
+        return True
+
+    success, output = run_command(f"{command} --version")
+    if not success:
+        print_warning(
+            f"Unable to determine {friendly_name} version; continuing but behaviour may vary."
+        )
+        if install_hint:
+            print_warning(install_hint)
+        return True
+
+    version = parse_semver(output or "")
+    if version is None:
+        print_warning(
+            f"Could not parse {friendly_name} version from '{(output or '').strip()}'."
+        )
+        if install_hint:
+            print_warning(install_hint)
+        return True
+
+    if not is_version_supported(version, minimum_version):
+        required = ".".join(str(x) for x in minimum_version)
+        detected = ".".join(str(x) for x in version)
+        print_error(
+            f"{friendly_name} {detected} is too old. Version {required}+ is required."
+        )
+        if install_hint:
+            print_warning(install_hint)
+        return False
+
+    print_success(f"Detected {friendly_name} {'.'.join(str(x) for x in version)}")
+    return True
 
 
 def _emit(message: str, level: int, icon: str, style: str) -> None:
@@ -341,7 +452,13 @@ def check_and_install_dependencies() -> Tuple[bool, Optional[PythonEnvironment]]
         if success:
             print_success("Node.js dependencies installed")
         else:
-            print_error(f"Failed to install Node.js dependencies: {output}")
+            print_error("Failed to install Node.js dependencies.")
+            trimmed = (output or "").strip() if isinstance(output, str) else ""
+            if trimmed:
+                print_warning(trimmed)
+            print_warning(
+                "Try running 'npm install' manually after ensuring Node.js 18+ is installed."
+            )
             return False, env_info
     else:
         print_success("Node.js dependencies already installed")
@@ -360,7 +477,14 @@ def check_and_install_dependencies() -> Tuple[bool, Optional[PythonEnvironment]]
                 print_warning(f"Could not update dependency marker: {exc}")
             print_success("Python dependencies installed")
         else:
-            print_error(f"Failed to install Python dependencies: {output}")
+            print_error("Failed to install Python dependencies.")
+            trimmed = (output or "").strip() if isinstance(output, str) else ""
+            if trimmed:
+                print_warning(trimmed)
+            print_warning(
+                "Activate the virtual environment and rerun "
+                f"'{pip_cmd} install -r requirements.txt' to inspect the issue."
+            )
             return False, env_info
     else:
         print_success("Python dependencies already installed")
@@ -431,6 +555,25 @@ def cleanup_processes(processes):
 
 def main():
     emit_start_banner()
+
+    if not check_python_version():
+        return 1
+
+    if not ensure_command_available(
+        "node",
+        "Node.js",
+        MIN_NODE_VERSION,
+        "Install Node.js 18+ from https://nodejs.org/en/download to continue.",
+    ):
+        return 1
+
+    if not ensure_command_available(
+        "npm",
+        "npm",
+        MIN_NPM_VERSION,
+        "Install Node.js 18+ (which bundles npm) from https://nodejs.org/en/download.",
+    ):
+        return 1
 
     # Change to project root directory
     os.chdir(Path(__file__).parent.parent)
