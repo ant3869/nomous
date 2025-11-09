@@ -44,6 +44,20 @@ Nomous is an offline-first WebSocket bridge that connects a TypeScript React das
 - Cross-platform audio playback backend for Piper-generated speech so Linux/macOS users receive spoken feedback without external tools【F:src/backend/tts.py†L87-L123】
 
 ## Quick Start
+
+### One-command bootstrap
+Run the launcher to automatically create a virtual environment, install Python
+and Node dependencies, validate required tooling, and start both the backend and
+frontend services:
+
+```bash
+python run_nomous.py
+```
+
+If any prerequisite is missing or a step fails, the launcher prints a detailed
+message explaining what happened and how to resolve it.
+
+### Manual setup
 1. Clone the repository
 ```bash
 git clone https://github.com/ant3869/nomous.git
