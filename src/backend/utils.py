@@ -67,10 +67,7 @@ class Bridge:
                     self._clients.discard(client)
 
     async def _send_safe(self, ws: WebSocketLike, payload: str) -> None:
-        try:
-            await asyncio.wait_for(ws.send(payload), timeout=2)
-        except asyncio.TimeoutError:
-            raise
+        await asyncio.wait_for(ws.send(payload), timeout=2)
 
 
 def msg_status(value: str, detail: str = "") -> Dict[str, Any]:
