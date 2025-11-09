@@ -43,7 +43,7 @@ const metricLabels: Record<string, string> = {
 
 function formatPercent(value: number, digits = 0): string {
   const safe = Number.isFinite(value) ? value : 0;
-  return `${Math.round(safe * 100).toFixed(digits)}%`;
+  return `${(safe * 100).toFixed(digits)}%`;
 }
 
 function toRadarDataset(summary: BehaviorStats["summary"]) {
