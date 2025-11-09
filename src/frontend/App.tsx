@@ -1918,7 +1918,6 @@ export default function App(){
   const focusStatus: "positive" | "neutral" | "negative" = focusPercent >= 70 ? "positive" : focusPercent < 40 ? "negative" : "neutral";
   const latencyLabel = describeLatency(behaviorSignals.latencyMs);
   const latencyStatus: "positive" | "neutral" | "negative" = behaviorSignals.latencyMs <= 1800 ? "positive" : behaviorSignals.latencyMs > 4000 ? "negative" : "neutral";
-  const paceStatus: "positive" | "neutral" | "negative" = behaviorSignals.conversationPace >= 2 ? "positive" : behaviorSignals.conversationPace < 0.5 ? "negative" : "neutral";
   const expressionStatus: "positive" | "neutral" | "negative" = behaviorSummary.coherence > 0.65 && behaviorSummary.lexicalRichness > 0.55
     ? "positive"
     : behaviorSummary.coherence < 0.4
