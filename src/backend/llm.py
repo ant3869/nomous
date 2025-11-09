@@ -18,6 +18,19 @@ from .tools import ToolExecutor
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are Nomous, an autonomous multimodal AI orchestrator. Support the "
+    "operator with concise, confident guidance, coordinate sensors and tools, "
+    "and narrate decisions with a collaborative tone."
+)
+
+DEFAULT_THINKING_PROMPT = (
+    "Think in small, verifiable steps. Reference available tools and memories, "
+    "note uncertainties, and decide on an action plan before committing to a "
+    "response. Keep thoughts structured and actionable."
+)
+
+
 class LocalLLM:
     def __init__(
         self,
@@ -39,6 +52,10 @@ class LocalLLM:
 
         self.model_path = cfg["paths"]["gguf_path"]
         self.model: Optional[Llama] = None
+
+        llm_cfg = cfg.get("llm", {})
+        self.system_prompt = str(llm_cfg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT).strip()
+        self.thinking_prompt = str(llm_cfg.get("thinking_prompt") or DEFAULT_THINKING_PROMPT).strip()
 
         self.temperature = float(cfg["llm"]["temperature"])
         self.top_p = float(cfg["llm"]["top_p"])
@@ -247,61 +264,100 @@ class LocalLLM:
         if len(self.recent_context) > self.max_context_items:
             self.recent_context.pop(0)
 
+    async def set_system_prompt(self, prompt: str) -> None:
+        self.system_prompt = str(prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
+        await self.bridge.post(
+            {
+                "type": "prompt_state",
+                "system_prompt": self.system_prompt,
+                "thinking_prompt": self.thinking_prompt,
+            }
+        )
+        await self.bridge.post(
+            msg_event("system prompt updated – reload the language model to bake in new instructions")
+        )
+
+    async def set_thinking_prompt(self, prompt: str) -> None:
+        self.thinking_prompt = str(prompt or "").strip() or DEFAULT_THINKING_PROMPT
+        await self.bridge.post(
+            {
+                "type": "prompt_state",
+                "system_prompt": self.system_prompt,
+                "thinking_prompt": self.thinking_prompt,
+            }
+        )
+        await self.bridge.post(
+            msg_event("thinking prompt updated – reload the language model to apply internal guidance")
+        )
+
+    def get_prompts(self) -> dict[str, str]:
+        return {
+            "system_prompt": self.system_prompt,
+            "thinking_prompt": self.thinking_prompt,
+        }
+
     def _build_prompt(self, user_input: str, context_type: str = "text", include_tools: bool = True) -> str:
-        """Build prompt with context and tool instructions."""
-        # Add recent context
-        context_str = ""
+        """Build prompt with context, system persona, and tool instructions."""
+
+        context_lines = []
         if self.recent_context:
             for ctx in self.recent_context[-2:]:
-                context_str += f"{ctx['type']}: {ctx['content'][:80]}\n"
-        
-        # Tool instructions if enabled
+                context_lines.append(f"{ctx['type']}: {ctx['content'][:80]}")
+        context_summary = "\n".join(context_lines) if context_lines else "No recent context recorded."
+
         tools_instructions = ""
         if include_tools and self.tools_enabled:
-            tools_instructions = f"""
+            tools_instructions = (
+                "AVAILABLE TOOLS:\n"
+                "You can use tools to enhance your capabilities. Available tools:\n"
+                "- search_memory: Search past interactions and memories\n"
+                "- recall_recent_context: Get recent conversation history\n"
+                "- record_observation: Save important observations\n"
+                "- evaluate_interaction: Self-evaluate your responses\n"
+                "- identify_pattern: Record patterns you notice\n"
+                "- analyze_sentiment: Understand emotional tone\n"
+                "- check_appropriate_response: Verify response appropriateness\n"
+                "- track_milestone: Record achievements\n"
+                "- get_current_capabilities: Review your abilities\n\n"
+                "To use a tool, include: TOOL_CALL:{\"tool\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n"
+                "Use tools when they help you be more helpful, remember better, or improve yourself."
+            )
 
-AVAILABLE TOOLS:
-You can use tools to enhance your capabilities. Available tools:
-- search_memory: Search past interactions and memories
-- recall_recent_context: Get recent conversation history
-- record_observation: Save important observations
-- evaluate_interaction: Self-evaluate your responses
-- identify_pattern: Record patterns you notice
-- analyze_sentiment: Understand emotional tone
-- check_appropriate_response: Verify response appropriateness
-- track_milestone: Record achievements
-- get_current_capabilities: Review your abilities
-
-To use a tool, include: TOOL_CALL: {{"tool": "tool_name", "args": {{"param": "value"}}}}
-Use tools when they help you be more helpful, remember better, or improve yourself.
-"""
-        
         if context_type == "vision":
-            prompt = f"""You're an AI that can see and speak. You notice: {user_input}
-
-Previous: {context_str if context_str else 'Just started observing'}
-{tools_instructions}
-Comment naturally in 1 sentence (be casual, like a friend):"""
+            scenario = (
+                f"Recent context:\n{context_summary}\n\n"
+                f"Visual observation:\n{user_input}\n\n"
+                "Respond with a single natural sentence describing what you notice."
+            )
         elif context_type == "audio":
-            prompt = f"""Previous: {context_str if context_str else 'Just started'}
-
-Person: "{user_input}"
-{tools_instructions}
-You (reply naturally, 1-2 sentences):"""
+            scenario = (
+                f"Recent context:\n{context_summary}\n\n"
+                f"Transcript:\n{user_input}\n\n"
+                "Reply in one or two warm, collaborative sentences."
+            )
         elif context_type == "autonomous":
-            prompt = f"""You're observing your environment silently.
-
-Recent: {context_str if context_str else 'Quiet so far'}
-{tools_instructions}
-Think out loud briefly (1 short sentence, casual) or use a tool if helpful:"""
+            scenario = (
+                f"Recent context:\n{context_summary}\n\n"
+                "Produce a short internal reflection or tool call that keeps momentum going."
+            )
         else:
-            prompt = f"""Previous: {context_str if context_str else 'New conversation'}
+            scenario = (
+                f"Recent context:\n{context_summary}\n\n"
+                f"User message:\n{user_input}\n\n"
+                "Respond as an empathetic collaborator with concise, high-signal language."
+            )
 
-Person: {user_input}
-{tools_instructions}
-You (reply naturally):"""
-        
-        return prompt
+        if tools_instructions:
+            scenario = f"{scenario}\n\n{tools_instructions}"
+
+        sections = []
+        if self.system_prompt:
+            sections.append(self.system_prompt)
+        if self.thinking_prompt:
+            sections.append(f"THOUGHT PROCESS GUIDANCE:\n{self.thinking_prompt}")
+        sections.append(scenario)
+
+        return "\n\n".join(part.strip() for part in sections if part and part.strip())
 
     async def _generate(self, prompt: str, max_tokens: int | None = None, min_tokens: int = 10) -> str:
         """Generate response from model with token streaming."""
