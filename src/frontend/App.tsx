@@ -9,19 +9,21 @@ import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Separator } from "./components/ui/separator";
-import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Scan, Send, Wrench } from "lucide-react";
+import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
+import type { BehaviorStats } from "./types/behavior";
+import { EMPTY_BEHAVIOR_STATS } from "./types/behavior";
+import { BehaviorInsights } from "./components/BehaviorInsights";
 import { buildMemoryNodeDetail, computeMemoryInsights } from "./utils/memory";
 import type { MemoryNodeDetail, MemoryInsightEntry } from "./utils/memory";
 import { normaliseVoiceFilename, readJson, writeJson } from "./utils/storage";
 import { ToolActivity, ToolStats } from "./components/ToolActivity";
 import { SystemUsageCard } from "./components/SystemUsageCard";
 
-/** Nomous â€" Autonomy Dashboard (fixed) */
+/** Nomous – Autonomy Dashboard (fixed) */
 export type NomousStatus = "idle" | "thinking" | "speaking" | "noticing" | "learning" | "error";
-interface BehaviorStats { onTopic: number; brevity: number; responsiveness: number; nonsenseRate: number; rewardTotal: number; }
 interface TokenPoint { t: number; inTok: number; outTok: number }
 interface WSMessage {
   type: string;
@@ -90,6 +92,146 @@ const TARGET_SAMPLE_RATE = 16000;
 const MAX_CHAT_HISTORY = 200;
 const STORAGE_SETTINGS_KEY = "nomous.settings";
 const STORAGE_WS_KEY = "nomous.ws";
+
+function clamp01(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, value));
+}
+
+function createEmptyBehaviorStats(): BehaviorStats {
+  return {
+    summary: { ...EMPTY_BEHAVIOR_STATS.summary },
+    signals: { ...EMPTY_BEHAVIOR_STATS.signals },
+    history: [],
+    rewardTotal: 0,
+    anomalies: [],
+    lastSample: undefined,
+  };
+}
+
+function mergeBehaviorStats(prev: BehaviorStats, payload: any): BehaviorStats {
+  if (!payload || typeof payload !== "object") {
+    return prev;
+  }
+
+  const next: BehaviorStats = {
+    summary: { ...prev.summary },
+    signals: { ...prev.signals },
+    history: [...prev.history],
+    rewardTotal: prev.rewardTotal,
+    anomalies: [...prev.anomalies],
+    lastSample: prev.lastSample,
+  };
+
+  const summarySource = payload.summary ?? payload;
+  if (summarySource && typeof summarySource === "object") {
+    if ("onTopic" in summarySource || "on_topic" in summarySource) {
+      next.summary.onTopic = clamp01(summarySource.onTopic ?? summarySource.on_topic);
+    }
+    if ("responsiveness" in summarySource) {
+      next.summary.responsiveness = clamp01(summarySource.responsiveness);
+    }
+    if ("brevity" in summarySource) {
+      next.summary.brevity = clamp01(summarySource.brevity);
+    }
+    if ("coherence" in summarySource) {
+      next.summary.coherence = clamp01(summarySource.coherence);
+    }
+    if ("sentiment" in summarySource) {
+      next.summary.sentiment = clamp01(summarySource.sentiment);
+    }
+    if ("lexicalRichness" in summarySource || "lexical" in summarySource) {
+      next.summary.lexicalRichness = clamp01(summarySource.lexicalRichness ?? summarySource.lexical);
+    }
+    if ("safety" in summarySource) {
+      next.summary.safety = clamp01(summarySource.safety);
+    }
+    if ("stability" in summarySource) {
+      next.summary.stability = clamp01(summarySource.stability);
+    }
+  }
+
+  const signalsSource = payload.signals ?? payload;
+  if (signalsSource && typeof signalsSource === "object") {
+    if (typeof signalsSource.latencyMs === "number") {
+      next.signals.latencyMs = signalsSource.latencyMs;
+    }
+    if (typeof signalsSource.tokensIn === "number") {
+      next.signals.tokensIn = signalsSource.tokensIn;
+    }
+    if (typeof signalsSource.tokensOut === "number") {
+      next.signals.tokensOut = signalsSource.tokensOut;
+    }
+    if (typeof signalsSource.conversationPace === "number") {
+      next.signals.conversationPace = signalsSource.conversationPace;
+    }
+    if (typeof signalsSource.avgResponseLength === "number") {
+      next.signals.avgResponseLength = signalsSource.avgResponseLength;
+    }
+  }
+
+  if (Array.isArray(payload.history)) {
+    next.history = payload.history
+      .map((point: any) => ({
+        timestamp: typeof point.timestamp === "number" ? point.timestamp : Date.now(),
+        onTopic: clamp01(point.onTopic ?? point.on_topic),
+        sentiment: clamp01(point.sentiment ?? 0.5),
+        coherence: clamp01(point.coherence ?? 0),
+        safety: clamp01(point.safety ?? 1),
+      }))
+      .slice(-120);
+  }
+
+  if (typeof payload.rewardTotal === "number" && Number.isFinite(payload.rewardTotal)) {
+    next.rewardTotal = payload.rewardTotal;
+  }
+
+  if (Array.isArray(payload.anomalies)) {
+    next.anomalies = payload.anomalies
+      .map((item: any) => ({
+        label: String(item.label ?? ""),
+        severity: (item.severity ?? "info") as any,
+        detail: String(item.detail ?? ""),
+      }))
+      .filter((item: any) => item.label.length > 0)
+      .slice(-12);
+  }
+
+  if (payload.lastSample && typeof payload.lastSample === "object") {
+    const last = payload.lastSample;
+    next.lastSample = {
+      userText: typeof last.userText === "string" ? last.userText : prev.lastSample?.userText,
+      assistantText: typeof last.assistantText === "string" ? last.assistantText : prev.lastSample?.assistantText,
+      latencyMs: typeof last.latencyMs === "number" ? last.latencyMs : prev.lastSample?.latencyMs ?? 0,
+      tokensIn: typeof last.tokensIn === "number" ? last.tokensIn : prev.lastSample?.tokensIn ?? 0,
+      tokensOut: typeof last.tokensOut === "number" ? last.tokensOut : prev.lastSample?.tokensOut ?? 0,
+      scores: {
+        onTopic: clamp01(last.scores?.onTopic),
+        responsiveness: clamp01(last.scores?.responsiveness),
+        brevity: clamp01(last.scores?.brevity),
+        coherence: clamp01(last.scores?.coherence),
+        sentiment: clamp01(last.scores?.sentiment ?? 0.5),
+        lexicalRichness: clamp01(last.scores?.lexicalRichness),
+        safety: clamp01(last.scores?.safety ?? 1),
+        toxicity: clamp01(last.scores?.toxicity ?? 0),
+      },
+    };
+  }
+
+  return next;
+}
+
+function describeLatency(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return "<100 ms";
+  }
+  if (ms >= 1000) {
+    return `${(ms / 1000).toFixed(1)} s`;
+  }
+  return `${Math.round(ms)} ms`;
+}
 
 const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   cameraEnabled: true,
@@ -237,7 +379,7 @@ function createInitialState(): DashboardState {
     status: "idle",
     statusDetail: "Disconnected",
     tokenWindow: Array.from({ length: 30 }, (_, i) => ({ t: i, inTok: 0, outTok: 0 })),
-    behavior: { onTopic: 0, brevity: 0, responsiveness: 0, nonsenseRate: 0, rewardTotal: 0 },
+    behavior: createEmptyBehaviorStats(),
     memory: { nodes: [{ id: "self", label: "Nomous", strength: 1, kind: "self" }], edges: [] },
     audioEnabled: settings.ttsEnabled,
     visionEnabled: settings.cameraEnabled,
@@ -487,13 +629,12 @@ function useNomousBridge() {
           setState(p => ({ ...p, thoughtLines: [`[${new Date().toLocaleTimeString()}] ${msg.text}`, ...p.thoughtLines.slice(0, MAX_CHAT_HISTORY)] })); 
           break;
         case "image": setState(p => ({ ...p, preview: msg.dataUrl })); break;
-        case "metrics": setState(p => ({ ...p, behavior: {
-          onTopic: msg.payload.onTopic ?? p.behavior.onTopic,
-          brevity: msg.payload.brevity ?? p.behavior.brevity,
-          responsiveness: msg.payload.responsiveness ?? p.behavior.responsiveness,
-          nonsenseRate: msg.payload.nonsenseRate ?? p.behavior.nonsenseRate,
-          rewardTotal: msg.payload.rewardTotal ?? p.behavior.rewardTotal,
-        } })); break;
+        case "metrics":
+          setState(p => ({
+            ...p,
+            behavior: mergeBehaviorStats(p.behavior, msg.payload ?? {}),
+          }));
+          break;
         case "system_metrics": {
           if (msg.payload) {
             const payload = msg.payload as SystemMetricsPayload;
@@ -736,15 +877,6 @@ const statusMap: Record<NomousStatus, { color: string; label: string }> = {
   learning: { color: "bg-cyan-500", label: "Learning" },
   error: { color: "bg-red-600", label: "Error" },
 };
-
-function Meter({ value, label }: { value: number; label: string }) {
-  return (
-    <div className="space-y-1">
-      <div className="flex justify-between text-xs text-zinc-300"><span>{label}</span><span>{Math.round(value*100)}%</span></div>
-      <Progress value={value*100} />
-    </div>
-  );
-}
 
 function QuickStatCard({
   icon: Icon,
@@ -1779,8 +1911,21 @@ export default function App(){
 
   const avgInTokens = state.tokenWindow.reduce((acc, point) => acc + point.inTok, 0) / Math.max(1, state.tokenWindow.length);
   const avgOutTokens = state.tokenWindow.reduce((acc, point) => acc + point.outTok, 0) / Math.max(1, state.tokenWindow.length);
-  const tokenThroughput = Math.max(0, Math.round((avgInTokens + avgOutTokens) * 2));
+  const behaviorSummary = state.behavior.summary;
+  const behaviorSignals = state.behavior.signals;
   const rewardTotal = state.behavior.rewardTotal;
+  const focusPercent = Math.round(behaviorSummary.onTopic * 100);
+  const focusStatus: "positive" | "neutral" | "negative" = focusPercent >= 70 ? "positive" : focusPercent < 40 ? "negative" : "neutral";
+  const latencyLabel = describeLatency(behaviorSignals.latencyMs);
+  const latencyStatus: "positive" | "neutral" | "negative" = behaviorSignals.latencyMs <= 1800 ? "positive" : behaviorSignals.latencyMs > 4000 ? "negative" : "neutral";
+  const expressionStatus: "positive" | "neutral" | "negative" = behaviorSummary.coherence > 0.65 && behaviorSummary.lexicalRichness > 0.55
+    ? "positive"
+    : behaviorSummary.coherence < 0.4
+      ? "negative"
+      : "neutral";
+  const focusAccent = focusStatus === "positive" ? "text-emerald-300" : focusStatus === "negative" ? "text-red-300" : "text-zinc-200";
+  const safetyAccent = behaviorSummary.safety > 0.8 ? "text-emerald-300" : behaviorSummary.safety < 0.55 ? "text-red-300" : "text-zinc-200";
+  const coherenceAccent = behaviorSummary.coherence > 0.65 ? "text-emerald-300" : behaviorSummary.coherence < 0.4 ? "text-red-300" : "text-zinc-200";
   const micSensitivity = state.settings.micSensitivity;
   const micStatusLabel = state.micOn ? "Capturing" : state.settings.microphoneEnabled ? "Armed" : "Muted";
   const micStatus: "positive" | "negative" | "neutral" = state.micOn
@@ -1870,31 +2015,32 @@ export default function App(){
 
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <QuickStatCard
+              icon={Brain}
+              label="Cognitive Focus"
+              value={`${focusPercent}%`}
+              helper="Topical alignment (rolling window)"
+              status={focusStatus}
+            />
+            <QuickStatCard
               icon={Gauge}
-              label="Token Throughput"
-              value={`${tokenThroughput} tok/s`}
-              helper="Inbound + outbound stream"
+              label="Response Latency"
+              value={latencyLabel}
+              helper={`In ${Math.round(avgInTokens)} • Out ${Math.round(behaviorSignals.avgResponseLength)} tokens`}
+              status={latencyStatus}
             />
             <QuickStatCard
               icon={Sparkles}
+              label="Expression Quality"
+              value={`${Math.round(behaviorSummary.coherence * 100)}% / ${Math.round(behaviorSummary.lexicalRichness * 100)}%`}
+              helper="Coherence • Lexical richness"
+              status={expressionStatus}
+            />
+            <QuickStatCard
+              icon={Flag}
               label="Reward Signal"
               value={rewardTotal.toFixed(1)}
-              helper="Cumulative reinforcement"
+              helper={`Pace ${behaviorSignals.conversationPace.toFixed(2)}/min`}
               status={rewardTotal >= 0 ? "positive" : "negative"}
-            />
-            <QuickStatCard
-              icon={Mic}
-              label="Audio Capture"
-              value={micStatusLabel}
-              helper={`Sensitivity ${micSensitivity}%`}
-              status={micStatus}
-            />
-            <QuickStatCard
-              icon={Scan}
-              label="Vision Pipeline"
-              value={visionActive ? "Streaming" : "Standby"}
-              helper={state.settings.cameraResolution}
-              status={visionActive ? "positive" : "neutral"}
             />
           </div>
 
@@ -1955,12 +2101,24 @@ export default function App(){
                     </Card>
 
                     <Card className="bg-zinc-900/70 border-zinc-800/60">
-                      <CardContent className="p-4 space-y-3">
-                        <div className="flex items-center gap-2 mb-1 text-zinc-200"><Brain className="w-4 h-4"/><span className="font-semibold">Behavior Snapshot</span></div>
-                        <Meter value={state.behavior.onTopic} label="On-topic"/>
-                        <Meter value={state.behavior.brevity} label="Brevity"/>
-                        <Meter value={state.behavior.responsiveness} label="Responsiveness"/>
-                        <Meter value={1 - state.behavior.nonsenseRate} label="Coherence"/>
+                      <CardContent className="p-4 space-y-4">
+                        <div className="flex items-center gap-2 text-zinc-200 font-semibold"><Brain className="w-4 h-4"/> Cognitive Telemetry</div>
+                        <div className="space-y-3 text-xs text-zinc-300">
+                          <div>
+                            <div className="flex items-center justify-between"><span>Focus</span><span className={focusAccent}>{focusPercent}%</span></div>
+                            <Progress value={behaviorSummary.onTopic * 100} />
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between"><span>Safety</span><span className={safetyAccent}>{Math.round(behaviorSummary.safety * 100)}%</span></div>
+                            <Progress value={behaviorSummary.safety * 100} />
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between"><span>Coherence</span><span className={coherenceAccent}>{Math.round(behaviorSummary.coherence * 100)}%</span></div>
+                            <Progress value={behaviorSummary.coherence * 100} />
+                          </div>
+                          <div className="flex items-center justify-between"><span>Latency</span><span className="text-zinc-200">{latencyLabel}</span></div>
+                        </div>
+                        <div className="text-xs text-zinc-400">Reward total <span className={rewardTotal>=0?"text-emerald-300":"text-red-300"}>{rewardTotal.toFixed(1)}</span></div>
                       </CardContent>
                     </Card>
                   </div>
@@ -2064,27 +2222,25 @@ export default function App(){
                 </Card>
               </TabsContent>
 
-              <TabsContent value="behavior" className="pt-4">
-                <div className="grid sm:grid-cols-2 gap-4">
+              <TabsContent value="behavior" className="pt-4 space-y-4">
+                <BehaviorInsights stats={state.behavior} />
+                <div className="grid gap-4 lg:grid-cols-2">
                   <Card className="bg-zinc-900/70 border-zinc-800/60">
-                    <CardContent className="p-4 space-y-3 text-zinc-200">
-                      <div className="flex items-center gap-2 mb-1"><Brain className="w-4 h-4"/><span className="font-semibold">Behavior Metrics</span></div>
-                      <Meter value={state.behavior.onTopic} label="On-topic"/>
-                      <Meter value={state.behavior.brevity} label="Brevity"/>
-                      <Meter value={state.behavior.responsiveness} label="Responsiveness"/>
-                      <Meter value={1 - state.behavior.nonsenseRate} label="Coherence"/>
-                      <Separator className="my-1"/>
-                      <div className="text-sm">Reward total: <span className={state.behavior.rewardTotal>=0?"text-emerald-400":"text-red-400"}>{state.behavior.rewardTotal.toFixed(1)}</span></div>
-                      <div className="grid grid-cols-2 gap-2 pt-1">
-                        <Button variant="secondary" className="px-3 py-1 text-sm bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700/80" onClick={()=>push({ type: "reinforce", delta: +1 })}>Reward +1</Button>
-                        <Button variant="secondary" className="px-3 py-1 text-sm bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700/80" onClick={()=>push({ type: "reinforce", delta: -1 })}>Penalty -1</Button>
+                    <CardContent className="p-4 space-y-4 text-zinc-200">
+                      <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.3em] text-zinc-400"><Brain className="w-4 h-4"/> Manual Steering</div>
+                      <div className="text-sm text-zinc-300">Reward balance <span className={rewardTotal>=0?"text-emerald-300":"text-red-300"}>{rewardTotal.toFixed(1)}</span> • Latest sentiment {Math.round(behaviorSummary.sentiment * 100)}%</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button variant="secondary" className="px-3 py-2 text-sm bg-emerald-600/80 hover:bg-emerald-500/80 text-white" onClick={()=>push({ type: "reinforce", delta: +1 })}>Reward +1</Button>
+                        <Button variant="secondary" className="px-3 py-2 text-sm bg-red-600/70 hover:bg-red-500/70 text-white" onClick={()=>push({ type: "reinforce", delta: -1 })}>Penalty -1</Button>
                       </div>
+                      <div className="text-xs text-zinc-400">Latency {latencyLabel} • Pace {behaviorSignals.conversationPace.toFixed(2)}/min • Safety {Math.round(behaviorSummary.safety * 100)}%</div>
                     </CardContent>
                   </Card>
                   <Card className="bg-zinc-900/70 border-zinc-800/60">
-                    <CardContent className="p-4 text-zinc-200">
-                      <div className="font-semibold mb-2">Guidance</div>
-                      <p className="text-sm text-zinc-300">Use reward/penalty to nudge style: concise, on-topic, timely. This UI mirrors reinforcement numbers from the runtime.</p>
+                    <CardContent className="p-4 text-zinc-200 space-y-3">
+                      <div className="font-semibold uppercase tracking-[0.3em] text-xs text-zinc-400">How to interpret</div>
+                      <p className="text-sm text-zinc-300">Focus gauges topical alignment; safety tracks toxicity risk; expression blends coherence with lexical variety. Use reinforcement to encourage behaviors you want to see amplified.</p>
+                      <p className="text-xs text-zinc-400">These scores are computed from the last {state.behavior.history.length} exchanges and refresh in real time as the model speaks.</p>
                     </CardContent>
                   </Card>
                 </div>
