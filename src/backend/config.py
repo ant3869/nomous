@@ -90,10 +90,10 @@ def _load_yaml(path: Path) -> Mapping[str, Any]:
                     f"Configuration file {path} must contain a mapping at the root level."
                 )
             return content
+    except OSError as exc:
+        raise ConfigError(f"Unable to read configuration file {path}: {exc}") from exc
     except yaml.YAMLError as exc:  # pragma: no cover - yaml reports are descriptive
         raise ConfigError(f"Unable to parse YAML configuration: {exc}") from exc
-
-
 def _normalise_paths(paths: Mapping[str, Any]) -> Dict[str, str]:
     resolved: Dict[str, str] = {}
     for key, value in paths.items():
