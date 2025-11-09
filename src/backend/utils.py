@@ -42,11 +42,13 @@ class Bridge:
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
 
-    def register_ws(self, ws: WebSocketLike) -> None:
-        self._clients.add(ws)
+    async def register_ws(self, ws: WebSocketLike) -> None:
+        async with self._lock:
+            self._clients.add(ws)
 
-    def unregister_ws(self, ws: WebSocketLike) -> None:
-        self._clients.discard(ws)
+    async def unregister_ws(self, ws: WebSocketLike) -> None:
+        async with self._lock:
+            self._clients.discard(ws)
 
     async def post(self, obj: BridgeMessage) -> None:
         payload = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
