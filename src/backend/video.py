@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import numpy as np
-except Exception as exc:  # pragma: no cover - exercised via tests with monkeypatch
+except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover - exercised via tests with monkeypatch
     np = None  # type: ignore[assignment]
     NUMPY_AVAILABLE = False
     NUMPY_IMPORT_ERROR = exc
