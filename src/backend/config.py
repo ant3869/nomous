@@ -37,6 +37,16 @@ DEFAULT: Dict[str, Any] = {
         "temperature": 0.6,
         "top_p": 0.95,
         "tools_enabled": True,
+        "system_prompt": (
+            "You are Nomous, an autonomous multimodal AI orchestrator. "
+            "Support the operator with concise, confident guidance, coordinate "
+            "sensors and tools, and narrate decisions with a collaborative tone."
+        ),
+        "thinking_prompt": (
+            "Think in small, verifiable steps. Reference available tools and "
+            "memories, note uncertainties, and decide on an action plan before "
+            "committing to a response. Keep thoughts structured and actionable."
+        ),
     },
     "audio": {
         "sample_rate": 16000,

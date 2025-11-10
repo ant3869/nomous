@@ -29,8 +29,8 @@ def test_bridge_broadcasts_messages() -> None:
         bridge = Bridge()
         client_a = RecordingSocket()
         client_b = RecordingSocket()
-        bridge.register_ws(client_a)
-        bridge.register_ws(client_b)
+        await bridge.register_ws(client_a)
+        await bridge.register_ws(client_b)
 
         await bridge.post(msg_status("ready", "booted"))
         await bridge.post(msg_event("started"))
@@ -48,8 +48,8 @@ def test_bridge_deregisters_failing_clients() -> None:
         bridge = Bridge()
         ok_client = RecordingSocket()
         bad_client = FailingSocket()
-        bridge.register_ws(ok_client)
-        bridge.register_ws(bad_client)
+        await bridge.register_ws(ok_client)
+        await bridge.register_ws(bad_client)
 
         await bridge.post(msg_event("message"))
         assert len(ok_client.messages) == 1
