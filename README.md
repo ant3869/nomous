@@ -52,6 +52,8 @@ frontend services:
 
 ```bash
 python run_nomous.py
+# Legacy invocation supported for convenience
+python start.py
 ```
 
 If any prerequisite is missing or a step fails, the launcher prints a detailed
