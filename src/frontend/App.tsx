@@ -9,7 +9,7 @@ import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Separator } from "./components/ui/separator";
-import { Activity, Brain, Camera, Cog, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
+import { Activity, AlertTriangle, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode, MemoryNodeKind } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
@@ -21,6 +21,40 @@ import type { MemoryNodeDetail, MemoryInsightEntry } from "./utils/memory";
 import { normaliseVoiceFilename, readJson, writeJson } from "./utils/storage";
 import { ToolActivity, ToolStats } from "./components/ToolActivity";
 import { SystemUsageCard } from "./components/SystemUsageCard";
+
+const DEFAULT_SYSTEM_PROMPT =
+  "You are Nomous, an autonomous multimodal AI orchestrator. Support the operator with concise, confident guidance, coordinate sensors and tools, and narrate decisions with a collaborative tone.";
+
+const DEFAULT_THINKING_PROMPT =
+  "Think in small, verifiable steps. Reference available tools and memories, note uncertainties, and decide on an action plan before committing to a response. Keep thoughts structured and actionable.";
+
+type ModelCatalogType = "conversation" | "vision" | "coder" | "reasoning" | "audio" | "other";
+
+interface ModelCatalogEntry {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  sizeLabel: string;
+  type: ModelCatalogType;
+}
+
+const MODEL_TYPE_STYLES: Record<ModelCatalogType, string> = {
+  conversation: "bg-emerald-500/10 text-emerald-200 border border-emerald-500/30",
+  vision: "bg-cyan-500/10 text-cyan-200 border border-cyan-500/30",
+  coder: "bg-sky-500/10 text-sky-200 border border-sky-500/30",
+  reasoning: "bg-purple-500/10 text-purple-200 border border-purple-500/30",
+  audio: "bg-amber-500/10 text-amber-200 border border-amber-500/30",
+  other: "bg-zinc-800/60 text-zinc-200 border border-zinc-700/60",
+};
+
+const MODEL_TYPE_LABEL: Record<ModelCatalogType, string> = {
+  conversation: "Conversation",
+  vision: "Vision",
+  coder: "Coder",
+  reasoning: "Reasoning",
+  audio: "Audio",
+  other: "General",
+};
 
 /** Nomous – Autonomy Dashboard (fixed) */
 export type NomousStatus = "idle" | "thinking" | "speaking" | "noticing" | "learning" | "error";
@@ -37,6 +71,11 @@ interface WSMessage {
   progress?: number;
   label?: string;
   target?: string;
+  models?: any[];
+  directory?: string;
+  error?: string | null;
+  system_prompt?: string;
+  thinking_prompt?: string;
 }
 interface ControlSettings {
   cameraEnabled: boolean;
@@ -57,6 +96,9 @@ interface ControlSettings {
   llmTemperature: number;
   llmMaxTokens: number;
   modelStrategy: "speed" | "balanced" | "accuracy" | "custom";
+  systemPrompt: string;
+  thinkingPrompt: string;
+  modelDirectory: string;
 }
 
 interface ToolResult {
@@ -79,7 +121,8 @@ interface DashboardState {
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
   speechLines: string[]; systemLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
-  settings: ControlSettings; loadingOverlay: LoadingOverlay | null;
+  settings: ControlSettings; loadingOverlay: LoadingOverlay | null; modelCatalog: ModelCatalogEntry[]; modelCatalogError: string | null;
+  promptReloadRequired: boolean;
 }
 
 interface LoadingOverlay {
@@ -252,6 +295,9 @@ const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   llmTemperature: 0.8,
   llmMaxTokens: 4096,
   modelStrategy: "balanced",
+  systemPrompt: DEFAULT_SYSTEM_PROMPT,
+  thinkingPrompt: DEFAULT_THINKING_PROMPT,
+  modelDirectory: "",
 };
 
 const MODEL_STRATEGIES: ControlSettings["modelStrategy"][] = [
@@ -305,6 +351,43 @@ function coerceStrategy(value: unknown, fallback: ControlSettings["modelStrategy
   return fallback;
 }
 
+function normaliseModelType(value: unknown): ModelCatalogType {
+  if (typeof value === "string") {
+    const lowered = value.toLowerCase();
+    if (lowered.includes("vision") || lowered === "vl") return "vision";
+    if (lowered.includes("coder") || lowered.includes("code")) return "coder";
+    if (lowered.includes("reason") || lowered.includes("think")) return "reasoning";
+    if (lowered.includes("audio") || lowered.includes("voice") || lowered.includes("speech")) return "audio";
+    if (lowered.includes("chat") || lowered.includes("assistant") || lowered.includes("conversation")) return "conversation";
+  }
+  return "other";
+}
+
+function formatBytesCompact(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = size;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function extractModelName(path: string): string {
+  if (typeof path !== "string" || path.trim().length === 0) {
+    return "Unknown";
+  }
+  const segments = path.split(/[/\\]/).filter(Boolean);
+  if (segments.length === 0) {
+    return path.trim();
+  }
+  return segments[segments.length - 1];
+}
+
 function mergeSettings(base: ControlSettings, patch: Partial<ControlSettings>): ControlSettings {
   const next = { ...base };
 
@@ -343,6 +426,15 @@ function mergeSettings(base: ControlSettings, patch: Partial<ControlSettings>): 
   }
   if ("sttModelPath" in patch && patch.sttModelPath !== undefined) {
     next.sttModelPath = coerceString(patch.sttModelPath, next.sttModelPath);
+  }
+  if ("systemPrompt" in patch && patch.systemPrompt !== undefined) {
+    next.systemPrompt = coerceString(patch.systemPrompt, next.systemPrompt);
+  }
+  if ("thinkingPrompt" in patch && patch.thinkingPrompt !== undefined) {
+    next.thinkingPrompt = coerceString(patch.thinkingPrompt, next.thinkingPrompt);
+  }
+  if ("modelDirectory" in patch && patch.modelDirectory !== undefined) {
+    next.modelDirectory = coerceString(patch.modelDirectory, next.modelDirectory);
   }
   if ("llmTemperature" in patch) {
     next.llmTemperature = coerceNumber(patch.llmTemperature, next.llmTemperature, { min: 0.0, max: 2.0 });
@@ -397,6 +489,9 @@ function createInitialState(): DashboardState {
     systemMetrics: null,
     settings,
     loadingOverlay: null,
+    modelCatalog: [],
+    modelCatalogError: null,
+    promptReloadRequired: false,
   };
 }
 
@@ -689,10 +784,46 @@ function useNomousBridge() {
           const stamp = `[${new Date().toLocaleTimeString()}]`;
           const payload = msg.message;
           log(payload || "event");
+          const clearsPromptWarning = typeof payload === "string" && /LLM model/i.test(payload || "");
           setState(p => ({
             ...p,
             lastEvent: payload,
+            promptReloadRequired: clearsPromptWarning ? false : p.promptReloadRequired,
             systemLines: payload ? [`${stamp} EVENT → ${payload}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)] : p.systemLines,
+          }));
+          break;
+        }
+        case "prompt_state": {
+          setState(p => ({
+            ...p,
+            settings: mergeSettings(p.settings, {
+              systemPrompt: typeof msg.system_prompt === "string" ? msg.system_prompt : p.settings.systemPrompt,
+              thinkingPrompt: typeof msg.thinking_prompt === "string" ? msg.thinking_prompt : p.settings.thinkingPrompt,
+            }),
+            promptReloadRequired: false,
+          }));
+          break;
+        }
+        case "model_catalog": {
+          const rawModels = Array.isArray(msg.models) ? msg.models : [];
+          const entries: ModelCatalogEntry[] = rawModels.map((item: any) => {
+            const sizeBytes = Number(item?.size_bytes ?? item?.sizeBytes ?? 0);
+            const derivedLabel = typeof item?.size_label === "string" ? item.size_label : formatBytesCompact(sizeBytes);
+            return {
+              name: typeof item?.name === "string" ? item.name : "unknown.gguf",
+              path: typeof item?.path === "string" ? item.path : "",
+              sizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : 0,
+              sizeLabel: derivedLabel,
+              type: normaliseModelType(item?.type),
+            };
+          });
+          const directory = typeof msg.directory === "string" ? msg.directory : undefined;
+          const error = typeof msg.error === "string" ? msg.error : null;
+          setState(p => ({
+            ...p,
+            settings: directory ? mergeSettings(p.settings, { modelDirectory: directory }) : p.settings,
+            modelCatalog: entries,
+            modelCatalogError: error,
           }));
           break;
         }
@@ -871,12 +1002,16 @@ function useNomousBridge() {
   const updateSettings = useCallback((patch: Partial<ControlSettings>) => {
     setState(prev => {
       const nextSettings = mergeSettings(prev.settings, patch);
+      const promptChanged =
+        ("systemPrompt" in patch && patch.systemPrompt !== undefined && patch.systemPrompt !== prev.settings.systemPrompt) ||
+        ("thinkingPrompt" in patch && patch.thinkingPrompt !== undefined && patch.thinkingPrompt !== prev.settings.thinkingPrompt);
       return {
         ...prev,
         settings: nextSettings,
         audioEnabled: "ttsEnabled" in patch ? nextSettings.ttsEnabled : prev.audioEnabled,
         visionEnabled: "cameraEnabled" in patch ? nextSettings.cameraEnabled : prev.visionEnabled,
         micOn: "microphoneEnabled" in patch ? nextSettings.microphoneEnabled : prev.micOn,
+        promptReloadRequired: promptChanged ? true : prev.promptReloadRequired,
       };
     });
   }, []);
@@ -1686,7 +1821,28 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
     { value: "en_US-ryan-high.onnx", label: "Ryan · en-US (High)" }
   ], []);
 
-  const { llmModelPath, visionModelPath, audioModelPath, sttModelPath, modelStrategy } = state.settings;
+  const {
+    llmModelPath,
+    visionModelPath,
+    audioModelPath,
+    sttModelPath,
+    modelStrategy,
+    systemPrompt,
+    thinkingPrompt,
+    modelDirectory,
+  } = state.settings;
+
+  const [modelScanPending, setModelScanPending] = useState(false);
+  const [modelScanError, setModelScanError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (state.modelCatalogError) {
+      setModelScanError(state.modelCatalogError);
+    } else {
+      setModelScanError(null);
+    }
+    setModelScanPending(false);
+  }, [state.modelCatalog, state.modelCatalogError]);
 
   const performancePresets = useMemo<Array<{
     id: PresetStrategy;
@@ -1805,6 +1961,63 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
     [audioModelPath, beginModelSwitch, llmModelPath, modelStrategy, push, sttModelPath, updateSettings, visionModelPath]
   );
 
+  const handleModelDirectoryCommit = useCallback(
+    (raw: string) => {
+      const trimmed = raw.trim();
+      updateSettings({ modelDirectory: trimmed });
+      if (!trimmed) {
+        setModelScanPending(false);
+        setModelScanError(null);
+        setState(prev => ({ ...prev, modelCatalog: [] }));
+        return;
+      }
+      setModelScanPending(true);
+      setModelScanError(null);
+      push({ type: "scan_models", directory: trimmed });
+    },
+    [push, setState, updateSettings]
+  );
+
+  const handleModelRescan = useCallback(() => {
+    const trimmed = modelDirectory.trim();
+    if (!trimmed) {
+      setModelScanError("Select a model directory first.");
+      return;
+    }
+    setModelScanPending(true);
+    setModelScanError(null);
+    push({ type: "scan_models", directory: trimmed });
+  }, [modelDirectory, push]);
+
+  const handleModelSelect = useCallback(
+    (entry: ModelCatalogEntry) => {
+      const base = modelDirectory.trim();
+      const resolved = entry.path && entry.path.length > 0
+        ? entry.path
+        : base
+          ? `${base.replace(/[\\/]+$/, "")}/${entry.name}`
+          : entry.name;
+      if (!resolved) {
+        setModelScanError("Unable to resolve model path. Update the directory path first.");
+        return;
+      }
+      updateSettings({ llmModelPath: resolved, modelStrategy: "custom" });
+      beginModelSwitch(`Loading ${entry.name}`);
+      push({ type: "param", key: "llm_model_path", value: resolved });
+    },
+    [beginModelSwitch, modelDirectory, push, updateSettings]
+  );
+
+  const handlePromptCommit = useCallback(
+    (key: "system_prompt" | "thinking_prompt", value: string) => {
+      push({ type: "param", key, value: value.trim() });
+    },
+    [push]
+  );
+
+  const catalogEntries = state.modelCatalog;
+  const selectedModelPath = state.settings.llmModelPath;
+
   if (!open) return null;
 
   const handleToggle = (key: keyof ControlSettings, value: boolean, action?: () => void) => {
@@ -1853,6 +2066,47 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
                 </CardContent>
               </Card>
             </div>
+          </section>
+
+          <Separator className="bg-zinc-800/60" />
+
+          <section>
+            <Card className="bg-zinc-900/60 border-zinc-800/60">
+              <CardContent className="space-y-4 p-4">
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-zinc-100">System Prompts</h3>
+                    <p className="text-xs text-zinc-400">Define the persona and internal reasoning guidance used by the language model.</p>
+                  </div>
+                  <div className="text-[11px] uppercase tracking-[0.3em] text-emerald-300/80">Live runtime sync</div>
+                </div>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">System Persona Prompt</span>
+                    <textarea
+                      value={systemPrompt}
+                      onChange={event => updateSettings({ systemPrompt: event.target.value })}
+                      onBlur={event => handlePromptCommit("system_prompt", event.target.value)}
+                      placeholder="Set the global behavior for Nomous..."
+                      className="min-h-[140px] w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-wide text-zinc-400">Thinking Prompt</span>
+                    <textarea
+                      value={thinkingPrompt}
+                      onChange={event => updateSettings({ thinkingPrompt: event.target.value })}
+                      onBlur={event => handlePromptCommit("thinking_prompt", event.target.value)}
+                      placeholder="Guide internal reasoning, tool usage, and reflection..."
+                      className="min-h-[140px] w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
+                    />
+                  </label>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  Updates are saved locally and streamed to the runtime. Reload the active language model to bake the new prompts into its context.
+                </p>
+              </CardContent>
+            </Card>
           </section>
 
           <Separator className="bg-zinc-800/60" />
@@ -2048,6 +2302,79 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
                     )}
                   </div>
                   <div className="space-y-3">
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-3">
+                      <span className="flex-1 text-xs uppercase tracking-wide text-zinc-400">Model Directory</span>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={handleModelRescan}
+                          disabled={modelScanPending || !modelDirectory.trim()}
+                          className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-60"
+                        >
+                          {modelScanPending ? "Scanning…" : "Rescan"}
+                        </Button>
+                      </div>
+                    </div>
+                    <FilePathInput
+                      value={modelDirectory}
+                      onChange={val => updateSettings({ modelDirectory: val })}
+                      onCommit={handleModelDirectoryCommit}
+                      allowDirectories
+                      placeholder="/models/llm"
+                    />
+                    {modelScanError ? (
+                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                        {modelScanError}
+                      </div>
+                    ) : null}
+                    <div className="space-y-2">
+                      {modelScanPending ? (
+                        <div className="text-xs text-zinc-400">Scanning directory for .gguf models…</div>
+                      ) : catalogEntries.length === 0 ? (
+                        <div className="rounded-lg border border-zinc-800/60 bg-zinc-950/60 px-3 py-3 text-xs text-zinc-500">
+                          No .gguf models discovered yet. Select a directory and rescan to populate the catalog.
+                        </div>
+                      ) : (
+                        catalogEntries.map(entry => {
+                          const base = modelDirectory.trim();
+                          const resolved = entry.path && entry.path.length > 0
+                            ? entry.path
+                            : base
+                              ? `${base.replace(/[\\/]+$/, "")}/${entry.name}`
+                              : entry.name;
+                          const normalizedResolved = resolved.replace(/\\+/g, "/");
+                          const normalizedSelected = (selectedModelPath || "").replace(/\\+/g, "/");
+                          const isSelected = normalizedResolved === normalizedSelected;
+                          const buttonClass = isSelected
+                            ? "border-emerald-500/60 bg-emerald-500/10"
+                            : "border-zinc-800/70 bg-zinc-950/40 hover:border-emerald-500/30";
+                          return (
+                            <button
+                              key={entry.path || entry.name}
+                              type="button"
+                              onClick={() => handleModelSelect(entry)}
+                              className={`w-full rounded-xl border px-3 py-3 text-left text-sm transition ${buttonClass}`}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="space-y-1">
+                                  <div className="text-sm font-semibold text-zinc-100 truncate">{entry.name}</div>
+                                  <div className="max-w-[240px] truncate text-[11px] text-zinc-500">{entry.path || resolved}</div>
+                                </div>
+                                <div className="space-y-1 text-right">
+                                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${MODEL_TYPE_STYLES[entry.type]}`}>
+                                    {MODEL_TYPE_LABEL[entry.type]}
+                                  </span>
+                                  <div className="text-[11px] text-zinc-400">{entry.sizeLabel}</div>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                  <div className="space-y-3">
                     <label className="flex flex-col gap-2">
                       <span className="text-xs uppercase tracking-wide text-zinc-400">Conversation Model</span>
                       <FilePathInput
@@ -2207,6 +2534,7 @@ export default function App(){
   const [modelSwitching, setModelSwitching] = useState<{ label: string; progress: number } | null>(null);
   const modelSwitchStartRef = useRef<number>(0);
   const hideModelSwitchRef = useRef<number | null>(null);
+  const activeModelName = extractModelName(state.settings.llmModelPath);
 
   const beginModelSwitch = useCallback((label: string) => {
     modelSwitchStartRef.current = Date.now();
@@ -2399,7 +2727,21 @@ export default function App(){
               </div>
             </div>
 
-            <div className="flex flex-col gap-4 rounded-2xl border border-zinc-800/70 bg-zinc-950/70 px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] md:flex-row md:items-center md:justify-between">
+            {state.promptReloadRequired ? (
+              <div className="flex items-start gap-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-amber-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                <div className="mt-1 shrink-0">
+                  <AlertTriangle className="h-5 w-5" />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-sm font-semibold tracking-wide">Prompts updated — reload required</div>
+                  <p className="text-xs text-amber-100/80">
+                    The system or thinking prompt changed. Reload the active language model to apply the new guidance.
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="grid gap-4 rounded-2xl border border-zinc-800/70 bg-zinc-950/70 px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] md:grid-cols-[1.1fr_auto]">
               <div className="flex items-center gap-3">
                 <div className={`h-3 w-3 rounded-full ${st.color} shadow-[0_0_20px_rgba(34,197,94,0.35)]`} />
                 <div>
@@ -2410,10 +2752,24 @@ export default function App(){
                   </div>
                 </div>
               </div>
-              <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
-                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Tokens window • {tokenTotal}</Badge>
-                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Mic {state.micOn ? "Active" : "Muted"}</Badge>
-                <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Vision {state.visionEnabled ? "Online" : "Paused"}</Badge>
+              <div className="flex flex-col items-start gap-3 text-xs text-zinc-400 md:items-end">
+                <div className="flex items-center gap-3 rounded-xl border border-zinc-800/70 bg-zinc-950/80 px-3 py-2 text-left text-zinc-100 md:text-right">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-500/40 bg-emerald-500/10">
+                    <Cpu className="h-5 w-5 text-emerald-300" />
+                  </div>
+                  <div className="space-y-0.5 md:items-end">
+                    <div className="text-[11px] uppercase tracking-[0.3em] text-emerald-300/90 md:text-right">Active Model</div>
+                    <div className="max-w-[220px] truncate text-sm font-semibold text-zinc-100 md:text-right">{activeModelName}</div>
+                    <div className="max-w-[220px] truncate text-[11px] text-zinc-500 md:text-right">
+                      {state.settings.modelDirectory ? state.settings.modelDirectory : "Directory not set"}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 md:justify-end">
+                  <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Tokens window • {tokenTotal}</Badge>
+                  <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Mic {state.micOn ? "Active" : "Muted"}</Badge>
+                  <Badge className="bg-zinc-900/80 text-zinc-200 border border-zinc-700/60">Vision {state.visionEnabled ? "Online" : "Paused"}</Badge>
+                </div>
               </div>
             </div>
           </header>

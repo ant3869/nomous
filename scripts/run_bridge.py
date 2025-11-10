@@ -55,6 +55,30 @@ class Server:
         self.memory: Optional[MemoryStore] = None
         self.system_monitor: Optional[SystemMonitor] = None
 
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        value = float(size_bytes)
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if value < 1024.0 or unit == "TB":
+                return f"{value:.1f} {unit}"
+            value /= 1024.0
+        return f"{value:.1f} TB"
+
+    @staticmethod
+    def _infer_model_type(name: str) -> str:
+        lowered = name.lower()
+        if any(keyword in lowered for keyword in ("vision", "vl", "llava", "clip", "see")):
+            return "vision"
+        if any(keyword in lowered for keyword in ("coder", "code", "codellama", "program")):
+            return "coder"
+        if any(keyword in lowered for keyword in ("reason", "think", "deepseek", "logic")):
+            return "reasoning"
+        if any(keyword in lowered for keyword in ("audio", "voice", "speech")):
+            return "audio"
+        if any(keyword in lowered for keyword in ("chat", "talk", "assistant", "conversation", "dialog")):
+            return "conversation"
+        return "other"
+
     async def handle_toggle(self, what: str, value: bool):
         if not what:
             logger.warning("Toggle without target")
@@ -131,6 +155,12 @@ class Server:
         if key == "llm_model_path" and self.llm:
             await self.llm.reload_model(str(value))
             return
+        if key == "system_prompt" and self.llm:
+            await self.llm.set_system_prompt(str(value))
+            return
+        if key == "thinking_prompt" and self.llm:
+            await self.llm.set_thinking_prompt(str(value))
+            return
         if key == "snapshot_debounce" and self.cam:
             self.cam.debounce_sec = float(value)
             return
@@ -166,9 +196,18 @@ class Server:
             self.llm = await LocalLLM.create(CFG, self.bridge, self.tts, self.memory, loop)
             logger.info("LLM initialized")
 
+            prompts = self.llm.get_prompts()
+            await self.bridge.post(
+                {
+                    "type": "prompt_state",
+                    "system_prompt": prompts.get("system_prompt", ""),
+                    "thinking_prompt": prompts.get("thinking_prompt", ""),
+                }
+            )
+
             self.stt = AudioSTT(CFG, self.bridge)
             logger.info("STT initialized")
-            
+
             # Wire up cross-references for autonomous behavior
             self.stt.set_llm(self.llm)  # STT can trigger LLM
             logger.info("STT -> LLM connection established")
@@ -281,6 +320,57 @@ class Server:
             self.memory = None
 
         logger.info("All workers stopped")
+
+    async def handle_scan_models(self, directory: str):
+        directory = str(directory or "").strip()
+        if not directory:
+            await self.bridge.post(
+                {"type": "model_catalog", "directory": "", "models": [], "error": "missing_directory"}
+            )
+            await self.bridge.post(msg_event("model scan failed: directory not provided"))
+            return
+
+        path = Path(directory).expanduser()
+        if not path.exists() or not path.is_dir():
+            await self.bridge.post(
+                {
+                    "type": "model_catalog",
+                    "directory": str(path),
+                    "models": [],
+                    "error": "not_found",
+                }
+            )
+            await self.bridge.post(msg_event(f"model directory not found: {path}"))
+            return
+
+        models = []
+        for candidate in sorted(path.glob("*.gguf")):
+            try:
+                stat = candidate.stat()
+            except OSError as exc:
+                logger.warning(f"Unable to stat model {candidate}: {exc}")
+                continue
+
+            size_bytes = int(stat.st_size)
+            models.append(
+                {
+                    "name": candidate.name,
+                    "path": str(candidate),
+                    "size_bytes": size_bytes,
+                    "size_label": self._format_size(size_bytes),
+                    "type": self._infer_model_type(candidate.name),
+                }
+            )
+
+        await self.bridge.post(
+            {
+                "type": "model_catalog",
+                "directory": str(path),
+                "models": models,
+                "error": None,
+            }
+        )
+        await self.bridge.post(msg_event(f"model directory scanned: {len(models)} .gguf found"))
 
     async def handle(self, ws: WebSocketServerProtocol):
         """Handle WebSocket client connection and messages."""
@@ -404,11 +494,15 @@ class Server:
                         success = await self.memory.delete_edge(str(edge_id))
                         if success:
                             await self.bridge.post(msg_event(f"memory link removed → {edge_id}"))
+                    elif msg_type == "scan_models":
+                        directory = msg.get("directory", "")
+                        logger.info(f"Scanning model directory: {directory}")
+                        await self.handle_scan_models(directory)
 
                     else:
                         logger.warning(f"Unknown message type from {client_id}: {msg_type}")
                         await self.bridge.post(msg_event(f"unknown message: {msg_type}"))
-                
+
                 except Exception as e:
                     logger.error(f"Error handling message type '{msg_type}' from {client_id}: {e}", exc_info=True)
                     await self.bridge.post(msg_event(f"error processing {msg_type}: {str(e)}"))
