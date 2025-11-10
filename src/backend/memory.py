@@ -132,6 +132,10 @@ class MemoryStore:
 
     @staticmethod
     def _table_columns(cur: sqlite3.Cursor, table: str) -> Set[str]:
+        # Only allow known table names to prevent SQL injection
+        allowed_tables = {"memory_nodes", "memory_edges"}
+        if table not in allowed_tables:
+            raise ValueError(f"Invalid table name: {table}")
         cur.execute(f"PRAGMA table_info({table})")
         return {str(row[1]) for row in cur.fetchall()}
 
