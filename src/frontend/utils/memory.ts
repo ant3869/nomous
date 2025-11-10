@@ -10,6 +10,9 @@ export interface MemoryInsightEntry {
   milestone: boolean;
   source?: string;
   timestamp?: string;
+  category?: string;
+  importance?: number;
+  meaning?: string;
 }
 
 export interface MemorySummary {
@@ -19,7 +22,9 @@ export interface MemorySummary {
   stimulusCount: number;
   eventCount: number;
   selfCount: number;
+  behaviorCount: number;
   averageStrength: number;
+  averageImportance: number;
   density: number;
 }
 
@@ -53,6 +58,9 @@ function toInsightEntry(node: MemoryNode, connectionCount: number): MemoryInsigh
     milestone: Boolean(node.milestone || node.kind === "event"),
     source: node.source,
     timestamp: node.timestamp,
+    category: node.category,
+    importance: typeof node.importance === "number" ? node.importance : undefined,
+    meaning: node.meaning,
   };
 }
 
@@ -64,6 +72,10 @@ export function computeMemoryInsights(nodes: MemoryNode[], edges: MemoryEdge[]):
     ? nodes.reduce((sum, node) => sum + node.strength, 0) / nodes.length
     : 0;
 
+  const baselineImportance = nodes.length
+    ? nodes.reduce((sum, node) => sum + (node.importance ?? 0), 0) / nodes.length
+    : 0;
+
   const summary: MemorySummary = {
     totalNodes: nodes.length,
     totalEdges: edges.length,
@@ -71,7 +83,9 @@ export function computeMemoryInsights(nodes: MemoryNode[], edges: MemoryEdge[]):
     stimulusCount: nodes.filter(node => node.kind === "stimulus").length,
     eventCount: nodes.filter(node => node.kind === "event").length,
     selfCount: nodes.filter(node => node.kind === "self").length,
+    behaviorCount: nodes.filter(node => node.kind === "behavior").length,
     averageStrength: baselineStrength,
+    averageImportance: baselineImportance,
     density: nodes.length > 1 ? edges.length / (nodes.length * (nodes.length - 1)) : 0,
   };
 
@@ -107,7 +121,23 @@ export interface MemoryNodeDetail {
   connections: number;
   confidence?: number;
   timestamp?: string;
-  related: Array<{ id: string; label: string; strength: number; direction: "inbound" | "outbound"; weight: number }>;
+  milestone?: boolean;
+  meaning?: string;
+  category?: string;
+  importance?: number;
+  valence?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  lastAccessed?: string;
+  metadata?: Record<string, unknown> | null;
+  related: Array<{
+    id: string;
+    label: string;
+    strength: number;
+    direction: "inbound" | "outbound";
+    weight: number;
+    relationship?: string;
+  }>;
 }
 
 export function buildMemoryNodeDetail(
@@ -127,6 +157,7 @@ export function buildMemoryNodeDetail(
         strength: relatedNode?.strength ?? 0,
         direction: edge.from === node.id ? "outbound" : "inbound",
         weight: edge.weight,
+        relationship: edge.relationship,
       };
     })
     .sort((a, b) => b.weight - a.weight || b.strength - a.strength);
@@ -142,6 +173,15 @@ export function buildMemoryNodeDetail(
     connections: connectionIndex.get(node.id) ?? related.length,
     confidence: node.confidence,
     timestamp: node.timestamp,
+    milestone: Boolean(node.milestone),
+    meaning: node.meaning,
+    category: node.category,
+    importance: node.importance,
+    valence: node.valence,
+    createdAt: node.createdAt,
+    updatedAt: node.updatedAt,
+    lastAccessed: node.lastAccessed,
+    metadata: node.metadata ?? null,
     related,
   };
 }

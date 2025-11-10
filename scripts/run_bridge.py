@@ -378,7 +378,7 @@ class Server:
         logger.info(f"Client connected: {client_id}")
         
         self.clients.add(ws)
-        self.bridge.register_ws(ws)
+        await self.bridge.register_ws(ws)
         
         try:
             await self.bridge.post(msg_event("connected"))
@@ -437,6 +437,63 @@ class Server:
                         else:
                             logger.warning("LLM not initialized, ignoring reinforce")
 
+                    elif msg_type == "memory_update":
+                        if not self.memory:
+                            logger.warning("Memory not initialized, ignoring memory_update")
+                            continue
+                        node_id = msg.get("id") or msg.get("nodeId")
+                        patch = msg.get("patch") or {}
+                        if not node_id or not isinstance(patch, dict):
+                            logger.warning("Invalid memory_update payload: %s", msg)
+                            continue
+                        success = await self.memory.update_node(str(node_id), patch)
+                        if success:
+                            await self.bridge.post(msg_event(f"memory node updated → {node_id}"))
+                        else:
+                            await self.bridge.post(msg_event(f"memory update failed → {node_id}"))
+
+                    elif msg_type == "memory_delete":
+                        if not self.memory:
+                            logger.warning("Memory not initialized, ignoring memory_delete")
+                            continue
+                        node_id = msg.get("id") or msg.get("nodeId")
+                        if not node_id:
+                            continue
+                        success = await self.memory.delete_node(str(node_id))
+                        if success:
+                            await self.bridge.post(msg_event(f"memory node removed → {node_id}"))
+
+                    elif msg_type == "memory_link":
+                        if not self.memory:
+                            logger.warning("Memory not initialized, ignoring memory_link")
+                            continue
+                        from_id = msg.get("from") or msg.get("fromId")
+                        to_id = msg.get("to") or msg.get("toId")
+                        if not from_id or not to_id:
+                            continue
+                        weight = float(msg.get("weight", 1.0))
+                        relationship = msg.get("relationship")
+                        context = msg.get("context") if isinstance(msg.get("context"), dict) else None
+                        success = await self.memory.create_edge(
+                            str(from_id),
+                            str(to_id),
+                            weight=weight,
+                            relationship=relationship,
+                            context=context,
+                        )
+                        if success:
+                            await self.bridge.post(msg_event(f"memory link {from_id} → {to_id}"))
+
+                    elif msg_type == "memory_unlink":
+                        if not self.memory:
+                            logger.warning("Memory not initialized, ignoring memory_unlink")
+                            continue
+                        edge_id = msg.get("id") or msg.get("edgeId")
+                        if not edge_id:
+                            continue
+                        success = await self.memory.delete_edge(str(edge_id))
+                        if success:
+                            await self.bridge.post(msg_event(f"memory link removed → {edge_id}"))
                     elif msg_type == "scan_models":
                         directory = msg.get("directory", "")
                         logger.info(f"Scanning model directory: {directory}")
@@ -456,7 +513,7 @@ class Server:
             logger.error(f"Error in client handler for {client_id}: {e}", exc_info=True)
         finally:
             self.clients.discard(ws)
-            self.bridge.unregister_ws(ws)
+            await self.bridge.unregister_ws(ws)
             try:
                 await self.bridge.post(msg_event("disconnected"))
             except Exception as e:

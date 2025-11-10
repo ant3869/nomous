@@ -11,7 +11,7 @@ import { TooltipProvider } from "./components/ui/tooltip";
 import { Separator } from "./components/ui/separator";
 import { Activity, AlertTriangle, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
-import type { MemoryEdge, MemoryNode } from "./types/memory";
+import type { MemoryEdge, MemoryNode, MemoryNodeKind } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
 import type { BehaviorStats } from "./types/behavior";
 import { EMPTY_BEHAVIOR_STATS } from "./types/behavior";
@@ -642,6 +642,36 @@ function useNomousBridge() {
     ws.send(JSON.stringify(obj));
   }, []);
 
+  const updateMemoryNode = useCallback((id: string, patch: Record<string, unknown>) => {
+    if (!id || !patch || typeof patch !== "object") return;
+    push({ type: "memory_update", id, patch });
+  }, [push]);
+
+  const deleteMemoryNode = useCallback((id: string) => {
+    if (!id) return;
+    push({ type: "memory_delete", id });
+  }, [push]);
+
+  const createMemoryLink = useCallback(
+    (fromId: string, toId: string, options?: { weight?: number; relationship?: string; context?: Record<string, unknown> }) => {
+      if (!fromId || !toId) return;
+      push({
+        type: "memory_link",
+        from: fromId,
+        to: toId,
+        weight: options?.weight ?? 1,
+        relationship: options?.relationship,
+        context: options?.context,
+      });
+    },
+    [push],
+  );
+
+  const deleteMemoryEdge = useCallback((edgeId: string) => {
+    if (!edgeId) return;
+    push({ type: "memory_unlink", id: edgeId });
+  }, [push]);
+
   const sendChatMessage = useCallback((input: string) => {
     const trimmed = input.trim();
     if (!trimmed) {
@@ -986,20 +1016,24 @@ function useNomousBridge() {
     });
   }, []);
 
-  return { 
-    state, 
-    setState, 
-    connect, 
-    disconnect, 
-    setMic, 
-    push, 
-    log, 
+  return {
+    state,
+    setState,
+    connect,
+    disconnect,
+    setMic,
+    push,
+    log,
     updateSettings,
     chatInput,
     setChatInput,
     chatScrollRef,
     handleChatSubmit,
     handleChatKeyDown,
+    updateMemoryNode,
+    deleteMemoryNode,
+    createMemoryLink,
+    deleteMemoryEdge,
   };
 }
 
@@ -1060,9 +1094,21 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect }: MemoryGraphProp
   const layout = React.useMemo(() => {
     const width = 560;
     const height = 320;
-    const buckets: Record<MemoryNode["kind"], MemoryNode[]> = { stimulus: [], concept: [], event: [], self: [] };
+    const buckets: Record<MemoryNode["kind"], MemoryNode[]> = {
+      stimulus: [],
+      concept: [],
+      event: [],
+      self: [],
+      behavior: [],
+    };
     nodes.forEach(node => buckets[node.kind].push(node));
-    const xSlots: Record<MemoryNode["kind"], number> = { stimulus: 80, event: width / 2, concept: width - 80, self: width / 2 };
+    const xSlots: Record<MemoryNode["kind"], number> = {
+      stimulus: 80,
+      behavior: width / 2 - 120,
+      event: width / 2,
+      concept: width - 80,
+      self: width / 2 + 120,
+    };
     const yStep = (arr: MemoryNode[]) => (arr.length > 1 ? height / (arr.length + 1) : height / 2);
     const pos = new Map<string, { x: number; y: number }>();
     (Object.keys(buckets) as MemoryNode["kind"][]).forEach(kind => {
@@ -1158,10 +1204,13 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect }: MemoryGraphProp
             ? "fill-amber-500"
             : node.kind === "event"
             ? "fill-cyan-500"
+            : node.kind === "behavior"
+            ? "fill-teal-400"
             : "fill-purple-500";
         const isSelected = selectedNodeId === node.id;
         const isConnected = connectedNodes.has(node.id);
-        const radius = 10 + node.strength * 12 + (isSelected ? 4 : 0);
+        const importanceBoost = typeof node.importance === "number" ? node.importance * 12 : 0;
+        const radius = 10 + node.strength * 10 + importanceBoost + (isSelected ? 4 : 0);
         const stroke = isSelected ? "#34d399" : isConnected ? "#818cf8" : "#1f1f23";
         const strokeWidth = isSelected ? 3 : isConnected ? 2 : 1;
         return (
@@ -1178,7 +1227,7 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect }: MemoryGraphProp
             <text x={position.x} y={position.y - (18 + node.strength * 6)} textAnchor="middle" className="fill-zinc-50 text-xs drop-shadow">
               {node.label}
             </text>
-            <title>{node.label}</title>
+            <title>{node.meaning || node.label}</title>
           </g>
         );
       })}
@@ -1256,6 +1305,8 @@ function MemoryList({ title, icon, entries, emptyLabel, selectedId, onSelect }: 
         ) : (
           entries.map(entry => {
             const formattedTimestamp = formatTimestamp(entry.timestamp);
+            const categoryLabel = entry.category || entry.kind;
+            const importanceLabel = typeof entry.importance === "number" ? `${Math.round(entry.importance * 100)}%` : null;
             return (
               <button
                 key={entry.id}
@@ -1272,9 +1323,15 @@ function MemoryList({ title, icon, entries, emptyLabel, selectedId, onSelect }: 
                   <Badge className="bg-zinc-800/70 text-zinc-200 border border-zinc-700/60">{entry.connections} links</Badge>
                 </div>
                 <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-400">
-                  <span className="capitalize">{entry.kind}</span>
+                  <span className="capitalize">{categoryLabel}</span>
                   <span>Strength {entry.strength.toFixed(2)}</span>
                 </div>
+                {importanceLabel ? (
+                  <div className="text-[11px] text-zinc-500">Priority {importanceLabel}</div>
+                ) : null}
+                {entry.meaning ? (
+                  <div className="mt-1 text-[11px] text-zinc-400 overflow-hidden text-ellipsis whitespace-nowrap">{entry.meaning}</div>
+                ) : null}
                 {entry.source ? (
                   <div className="mt-1 text-[11px] text-emerald-300">Source: {entry.source}</div>
                 ) : null}
@@ -1388,18 +1445,124 @@ function mergeSpeechLines(lines: string[], stamp: string, nextText: string): str
   return [newEntry, ...trimmedRest];
 }
 
-function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
+interface MemoryDetailCardProps {
+  detail: MemoryNodeDetail | null;
+  onUpdate: (id: string, patch: Record<string, unknown>) => void;
+  onDelete: (id: string) => void;
+  onCreateLink: (
+    fromId: string,
+    toId: string,
+    weight: number,
+    relationship?: string,
+    context?: Record<string, unknown>,
+  ) => void;
+}
+
+function MemoryDetailCard({ detail, onUpdate, onDelete, onCreateLink }: MemoryDetailCardProps) {
+  const [form, setForm] = useState(() => ({
+    label: detail?.label ?? "",
+    description: detail?.description ?? "",
+    meaning: detail?.meaning ?? "",
+    tags: detail ? detail.tags.join(", ") : "",
+    category: detail?.category ?? "",
+    importance: detail?.importance ?? 0,
+    valence: detail?.valence ?? "",
+    milestone: Boolean(detail?.milestone),
+  }));
+  const [linkForm, setLinkForm] = useState({ target: "", weight: 1, relationship: "association", note: "" });
+
+  useEffect(() => {
+    setForm({
+      label: detail?.label ?? "",
+      description: detail?.description ?? "",
+      meaning: detail?.meaning ?? "",
+      tags: detail ? detail.tags.join(", ") : "",
+      category: detail?.category ?? "",
+      importance: detail?.importance ?? 0,
+      valence: detail?.valence ?? "",
+      milestone: Boolean(detail?.milestone),
+    });
+    setLinkForm({ target: "", weight: 1, relationship: "association", note: "" });
+  }, [detail?.id]);
+
+  const handleFormChange = useCallback((key: keyof typeof form, value: any) => {
+    setForm(prev => ({ ...prev, [key]: value }));
+  }, []);
+
+  const handleSave = useCallback(() => {
+    if (!detail) return;
+    const patch: Record<string, unknown> = {};
+    if (form.label.trim() && form.label.trim() !== detail.label) patch.label = form.label.trim();
+    if ((form.description || "").trim() !== (detail.description || "")) patch.description = form.description.trim();
+    if ((form.meaning || "").trim() !== (detail.meaning || "")) patch.meaning = form.meaning.trim();
+    const normalisedTags = form.tags
+      .split(",")
+      .map(tag => tag.trim())
+      .filter(tag => tag.length > 0);
+    if (normalisedTags.join(",") !== detail.tags.join(",")) patch.tags = normalisedTags;
+    if ((form.category || "") !== (detail.category || "")) patch.category = form.category || null;
+    const normalisedImportance = Math.max(0, Math.min(1, Number(form.importance)));
+    if (Number.isFinite(normalisedImportance) && Math.abs(normalisedImportance - (detail.importance ?? 0)) > 0.01) {
+      patch.importance = normalisedImportance;
+    }
+    if ((form.valence || "") !== (detail.valence || "")) patch.valence = form.valence || null;
+    if (form.milestone !== Boolean(detail.milestone)) patch.milestone = form.milestone;
+    if (Object.keys(patch).length === 0) {
+      return;
+    }
+    onUpdate(detail.id, patch);
+  }, [detail, form, onUpdate]);
+
+  const isDirty = useMemo(() => {
+    if (!detail) return false;
+    if (form.label.trim() !== detail.label) return true;
+    if ((form.description || "").trim() !== (detail.description || "")) return true;
+    if ((form.meaning || "").trim() !== (detail.meaning || "")) return true;
+    if (form.category !== (detail.category || "")) return true;
+    if (Math.abs((form.importance ?? 0) - (detail.importance ?? 0)) > 0.01) return true;
+    if ((form.valence || "") !== (detail.valence || "")) return true;
+    if (form.milestone !== Boolean(detail.milestone)) return true;
+    const currentTags = form.tags
+      .split(",")
+      .map(tag => tag.trim())
+      .filter(Boolean)
+      .join(",");
+    if (currentTags !== detail.tags.join(",")) return true;
+    return false;
+  }, [detail, form]);
+
+  const handleDelete = useCallback(() => {
+    if (!detail) return;
+    onDelete(detail.id);
+  }, [detail, onDelete]);
+
+  const handleLinkCreate = useCallback(() => {
+    if (!detail) return;
+    const target = linkForm.target.trim();
+    if (!target) return;
+    const context = linkForm.note ? { note: linkForm.note } : undefined;
+    onCreateLink(detail.id, target, Math.max(0.1, Math.min(5, Number(linkForm.weight) || 1)), linkForm.relationship || undefined, context);
+    setLinkForm(prev => ({ ...prev, target: "", note: "" }));
+  }, [detail, linkForm, onCreateLink]);
+
   if (!detail) {
     return (
       <Card className="h-full bg-zinc-900/70 border-dashed border-zinc-800/60">
         <CardContent className="flex h-full items-center justify-center p-4 text-center text-sm text-zinc-400">
-          Select a memory node from the graph or insight lists to inspect its learned behavior, context, and related connections.
+          Select a memory node from the graph or insight lists to inspect and edit its learned behavior and associations.
         </CardContent>
       </Card>
     );
   }
 
   const formattedTimestamp = formatTimestamp(detail.timestamp);
+  const formattedCreated = formatTimestamp(detail.createdAt);
+  const formattedUpdated = formatTimestamp(detail.updatedAt);
+  const formattedAccessed = formatTimestamp(detail.lastAccessed);
+  const metadata = (detail.metadata ?? {}) as Record<string, unknown>;
+  const cues = Array.isArray((metadata as any).cues) ? ((metadata as any).cues as string[]) : [];
+  const expectation = typeof (metadata as any).expectation === "string" ? String((metadata as any).expectation) : undefined;
+  const persona = (metadata as any).persona ? String((metadata as any).persona) : undefined;
 
   return (
     <Card className="h-full bg-zinc-900/70 border-zinc-800/60">
@@ -1408,15 +1571,16 @@ function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
           <div>
             <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Selected Memory</div>
             <h3 className="mt-1 text-xl font-semibold text-zinc-100">{detail.label}</h3>
+            {detail.meaning ? <div className="mt-1 text-xs text-zinc-400">{detail.meaning}</div> : null}
           </div>
-          <Badge className="bg-zinc-800/80 text-zinc-100 border border-zinc-700/60 capitalize">{detail.kind}</Badge>
+          <div className="flex flex-col items-end gap-2">
+            <Badge className="bg-zinc-800/80 text-zinc-100 border border-zinc-700/60 capitalize">{detail.kind}</Badge>
+            <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+              <span>Milestone</span>
+              <Switch checked={form.milestone} onCheckedChange={value => handleFormChange("milestone", value)} />
+            </div>
+          </div>
         </div>
-
-        {detail.description ? (
-          <p className="leading-relaxed text-zinc-300">{detail.description}</p>
-        ) : (
-          <p className="italic text-zinc-500">No narrative description provided by the runtime.</p>
-        )}
 
         <div className="grid grid-cols-2 gap-3 text-xs">
           <MemorySummaryStat label="Strength" value={detail.strength.toFixed(2)} helper="Association weight" />
@@ -1425,24 +1589,96 @@ function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
             <MemorySummaryStat label="Confidence" value={`${Math.round(detail.confidence * 100)}%`} helper="Runtime certainty" />
           ) : null}
           {formattedTimestamp ? (
-            <MemorySummaryStat label="Updated" value={formattedTimestamp} helper="Last reinforcement" />
+            <MemorySummaryStat label="Observed" value={formattedTimestamp} helper="Latest reinforcement" />
+          ) : null}
+          {formattedCreated ? (
+            <MemorySummaryStat label="Created" value={formattedCreated} helper="First recorded" />
+          ) : null}
+          {formattedUpdated ? (
+            <MemorySummaryStat label="Updated" value={formattedUpdated} helper="Metadata refresh" />
+          ) : null}
+          {formattedAccessed ? (
+            <MemorySummaryStat label="Accessed" value={formattedAccessed} helper="Last access" />
           ) : null}
           {detail.source ? (
             <MemorySummaryStat label="Source" value={detail.source} helper="Input channel" />
           ) : null}
         </div>
 
-        <div className="space-y-2">
-          <div className="text-xs font-semibold uppercase tracking-[0.3em] text-zinc-500">Tags</div>
-          {detail.tags.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {detail.tags.map(tag => (
-                <Badge key={tag} className="bg-purple-500/10 text-purple-200 border border-purple-500/30">{tag}</Badge>
-              ))}
-            </div>
-          ) : (
-            <div className="text-xs text-zinc-500">No tags provided.</div>
-          )}
+        <div className="space-y-3 text-xs">
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Label</span>
+            <input
+              value={form.label}
+              onChange={event => handleFormChange("label", event.target.value)}
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Description</span>
+            <textarea
+              value={form.description}
+              onChange={event => handleFormChange("description", event.target.value)}
+              rows={3}
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Meaning / Interpretation</span>
+            <textarea
+              value={form.meaning}
+              onChange={event => handleFormChange("meaning", event.target.value)}
+              rows={2}
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+            />
+          </label>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Tags</span>
+              <input
+                value={form.tags}
+                onChange={event => handleFormChange("tags", event.target.value)}
+                className="w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Category</span>
+              <input
+                value={form.category}
+                onChange={event => handleFormChange("category", event.target.value)}
+                className="w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Importance</span>
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={form.importance}
+                onChange={event => handleFormChange("importance", Number(event.target.value))}
+                className="w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Valence</span>
+              <input
+                value={form.valence}
+                onChange={event => handleFormChange("valence", event.target.value)}
+                className="w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+              />
+            </label>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Button onClick={handleSave} disabled={!isDirty} className="bg-emerald-600/90 text-white hover:bg-emerald-500/90 disabled:opacity-50">
+            Save changes
+          </Button>
+          <Button variant="secondary" onClick={handleDelete} className="bg-red-600/80 text-white hover:bg-red-500/80">
+            Delete memory
+          </Button>
         </div>
 
         <div className="space-y-2">
@@ -1459,7 +1695,9 @@ function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
                 >
                   <div className="flex items-center justify-between gap-2 text-sm text-zinc-100">
                     <span className="font-medium">{relation.label}</span>
-                    <span className="text-[11px] text-zinc-400">{relation.direction === "outbound" ? "influences" : "influenced by"}</span>
+                    <span className="text-[11px] text-zinc-400">
+                      {relation.relationship ? relation.relationship.replaceAll("_", " ") : relation.direction === "outbound" ? "influences" : "influenced by"}
+                    </span>
                   </div>
                   <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-400">
                     <span>Weight {relation.weight.toFixed(2)}</span>
@@ -1472,6 +1710,67 @@ function MemoryDetailCard({ detail }: { detail: MemoryNodeDetail | null }) {
             <div className="text-xs text-zinc-500">No related associations recorded yet.</div>
           )}
         </div>
+
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Add manual link</div>
+          <div className="grid gap-2 sm:grid-cols-4">
+            <input
+              value={linkForm.target}
+              onChange={event => setLinkForm(prev => ({ ...prev, target: event.target.value }))}
+              placeholder="Target node ID"
+              className="rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none sm:col-span-2"
+            />
+            <input
+              type="number"
+              min={0.1}
+              max={5}
+              step={0.1}
+              value={linkForm.weight}
+              onChange={event => setLinkForm(prev => ({ ...prev, weight: Number(event.target.value) }))}
+              className="rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+              placeholder="Weight"
+            />
+            <input
+              value={linkForm.relationship}
+              onChange={event => setLinkForm(prev => ({ ...prev, relationship: event.target.value }))}
+              placeholder="Relationship"
+              className="rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+            />
+          </div>
+          <textarea
+            value={linkForm.note}
+            onChange={event => setLinkForm(prev => ({ ...prev, note: event.target.value }))}
+            rows={2}
+            placeholder="Optional context / note"
+            className="w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+          />
+          <div className="flex justify-end">
+            <Button onClick={handleLinkCreate} className="bg-cyan-600/80 text-white hover:bg-cyan-500/80" disabled={!linkForm.target.trim()}>
+              Link memory
+            </Button>
+          </div>
+        </div>
+
+        {detail.metadata ? (
+          <div className="space-y-2">
+            <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Behavioral context</div>
+            {cues.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {cues.map(cue => (
+                  <Badge key={cue} className="bg-teal-500/10 text-teal-200 border border-teal-500/30">{cue}</Badge>
+                ))}
+              </div>
+            ) : null}
+            {expectation ? (
+              <div className="rounded-lg border border-zinc-800/60 bg-black/40 p-3 text-xs text-zinc-300">
+                <span className="font-semibold text-zinc-200">Expectation:</span> {expectation}
+              </div>
+            ) : null}
+            {persona ? (
+              <div className="text-xs text-zinc-400">Persona alignment: {persona}</div>
+            ) : null}
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -2179,26 +2478,59 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
 }
 
 export default function App(){
-  const { 
-    state, 
-    setState, 
-    connect, 
-    disconnect, 
-    setMic, 
-    push, 
-    log, 
+  const {
+    state,
+    setState,
+    connect,
+    disconnect,
+    setMic,
+    push,
+    log,
     updateSettings,
     chatInput,
     setChatInput,
     chatScrollRef,
     handleChatSubmit,
     handleChatKeyDown,
+    updateMemoryNode,
+    deleteMemoryNode,
+    createMemoryLink,
   } = useNomousBridge();
   const st = statusMap[state.status];
   const tokenTotal = state.tokenWindow.reduce((a, p) => a + p.inTok + p.outTok, 0);
   const [controlCenterOpen, setControlCenterOpen] = useState(false);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const memoryInsights = useMemo(() => computeMemoryInsights(state.memory.nodes, state.memory.edges), [state.memory.nodes, state.memory.edges]);
+  const [memoryKindFilter, setMemoryKindFilter] = useState<Set<MemoryNodeKind>>(() => new Set<MemoryNodeKind>(["stimulus", "concept", "event", "behavior", "self"]));
+  const memoryKindOptions = useMemo(
+    () => [
+      { kind: "stimulus" as MemoryNodeKind, label: "Stimuli", className: "border-amber-500/60 bg-amber-500/10 text-amber-200" },
+      { kind: "concept" as MemoryNodeKind, label: "Concepts", className: "border-purple-500/60 bg-purple-500/10 text-purple-200" },
+      { kind: "event" as MemoryNodeKind, label: "Events", className: "border-cyan-500/60 bg-cyan-500/10 text-cyan-200" },
+      { kind: "behavior" as MemoryNodeKind, label: "Behaviors", className: "border-teal-500/60 bg-teal-500/10 text-teal-200" },
+      { kind: "self" as MemoryNodeKind, label: "Identity", className: "border-emerald-500/60 bg-emerald-500/10 text-emerald-200" },
+    ],
+    [],
+  );
+  const toggleMemoryKind = useCallback((kind: MemoryNodeKind) => {
+    setMemoryKindFilter(prev => {
+      const next = new Set(prev);
+      if (next.has(kind)) {
+        next.delete(kind);
+      } else {
+        next.add(kind);
+      }
+      return next;
+    });
+  }, []);
+  const filteredMemoryNodes = useMemo(
+    () => state.memory.nodes.filter(node => memoryKindFilter.has(node.kind)),
+    [state.memory.nodes, memoryKindFilter],
+  );
+  const filteredMemoryEdges = useMemo(() => {
+    const allowed = new Set(filteredMemoryNodes.map(node => node.id));
+    return state.memory.edges.filter(edge => allowed.has(edge.from) && allowed.has(edge.to));
+  }, [state.memory.edges, filteredMemoryNodes]);
   const [modelSwitching, setModelSwitching] = useState<{ label: string; progress: number } | null>(null);
   const modelSwitchStartRef = useRef<number>(0);
   const hideModelSwitchRef = useRef<number | null>(null);
@@ -2279,20 +2611,28 @@ export default function App(){
   }, []);
 
   useEffect(() => {
-    if (selectedMemoryId && !memoryInsights.nodeById.has(selectedMemoryId)) {
-      setSelectedMemoryId(null);
-    }
-  }, [selectedMemoryId, memoryInsights]);
-
-  useEffect(() => {
-    if (selectedMemoryId || state.memory.nodes.length === 0) {
+    if (!selectedMemoryId) {
       return;
     }
-    const defaultSelection = memoryInsights.milestones[0]?.id ?? state.memory.nodes[0]?.id ?? null;
+    const node = memoryInsights.nodeById.get(selectedMemoryId);
+    if (!node || !memoryKindFilter.has(node.kind)) {
+      setSelectedMemoryId(null);
+    }
+  }, [selectedMemoryId, memoryInsights, memoryKindFilter]);
+
+  useEffect(() => {
+    if (selectedMemoryId || filteredMemoryNodes.length === 0) {
+      return;
+    }
+    const firstVisibleMilestone = memoryInsights.milestones.find(entry => {
+      const node = memoryInsights.nodeById.get(entry.id);
+      return node ? memoryKindFilter.has(node.kind) : false;
+    });
+    const defaultSelection = firstVisibleMilestone?.id ?? filteredMemoryNodes[0]?.id ?? null;
     if (defaultSelection) {
       setSelectedMemoryId(defaultSelection);
     }
-  }, [selectedMemoryId, memoryInsights, state.memory.nodes.length]);
+  }, [selectedMemoryId, filteredMemoryNodes, memoryInsights, memoryKindFilter]);
 
   const selectedMemoryNode = selectedMemoryId ? memoryInsights.nodeById.get(selectedMemoryId) : undefined;
   const selectedMemoryDetail = useMemo<MemoryNodeDetail | null>(() => {
@@ -2711,16 +3051,37 @@ export default function App(){
                         </Badge>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
                         <MemorySummaryStat label="Memories" value={`${memoryInsights.summary.totalNodes}`} helper="Graph nodes" />
                         <MemorySummaryStat label="Associations" value={`${memoryInsights.summary.totalEdges}`} helper="Synapses" />
+                        <MemorySummaryStat label="Behavior Rules" value={`${memoryInsights.summary.behaviorCount}`} helper="Social directives" />
                         <MemorySummaryStat label="Avg Strength" value={memoryInsights.summary.averageStrength.toFixed(2)} helper="Mean weight" />
+                        <MemorySummaryStat label="Avg Importance" value={`${(memoryInsights.summary.averageImportance * 100).toFixed(0)}%`} helper="Mean priority" />
                         <MemorySummaryStat label="Density" value={`${(memoryInsights.summary.density * 100).toFixed(1)}%`} helper="Connection coverage" />
                       </div>
 
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Filter</span>
+                        {memoryKindOptions.map(option => {
+                          const active = memoryKindFilter.has(option.kind);
+                          return (
+                            <button
+                              key={option.kind}
+                              type="button"
+                              onClick={() => toggleMemoryKind(option.kind)}
+                              className={`rounded-full border px-3 py-1 transition ${
+                                active ? option.className : "border-zinc-700 text-zinc-400 hover:border-zinc-600"
+                              }`}
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+
                       <MemoryGraph
-                        nodes={state.memory.nodes}
-                        edges={state.memory.edges}
+                        nodes={filteredMemoryNodes}
+                        edges={filteredMemoryEdges}
                         selectedNodeId={selectedMemoryId}
                         onSelect={id => setSelectedMemoryId(id)}
                       />
@@ -2746,7 +3107,17 @@ export default function App(){
                     </CardContent>
                   </Card>
 
-                  <MemoryDetailCard detail={selectedMemoryDetail} />
+                  <MemoryDetailCard
+                    detail={selectedMemoryDetail}
+                    onUpdate={(id, patch) => updateMemoryNode(id, patch)}
+                    onDelete={id => {
+                      deleteMemoryNode(id);
+                      setSelectedMemoryId(prev => (prev === id ? null : prev));
+                    }}
+                    onCreateLink={(fromId, toId, weight, relationship, context) =>
+                      createMemoryLink(fromId, toId, { weight, relationship, context })
+                    }
+                  />
                 </div>
               </TabsContent>
 
