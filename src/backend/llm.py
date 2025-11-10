@@ -319,7 +319,7 @@ class LocalLLM:
                 "- check_appropriate_response: Verify response appropriateness\n"
                 "- track_milestone: Record achievements\n"
                 "- get_current_capabilities: Review your abilities\n\n"
-                "To use a tool, include: TOOL_CALL:{\"tool\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n"
+                "To use a tool, include: TOOL_CALL: {\"tool\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n"
                 "Use tools when they help you be more helpful, remember better, or improve yourself."
             )
 
