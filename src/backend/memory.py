@@ -14,7 +14,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Iterable, Sequence
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
 from .behavior import BehaviorLearner, BehaviorDirective
