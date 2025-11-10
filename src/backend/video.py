@@ -7,12 +7,25 @@ import threading
 import time
 import asyncio
 import logging
-import numpy as np
 from pathlib import Path
 from queue import SimpleQueue, Empty
 from .utils import to_data_url, msg_event, msg_image
 
 logger = logging.getLogger(__name__)
+
+try:
+    import numpy as np
+except Exception as exc:  # pragma: no cover - exercised via tests with monkeypatch
+    np = None  # type: ignore[assignment]
+    NUMPY_AVAILABLE = False
+    NUMPY_IMPORT_ERROR = exc
+    logger.warning(
+        "NumPy import failed (%s). Vision complexity metrics will run in a degraded mode.",
+        exc,
+    )
+else:
+    NUMPY_AVAILABLE = True
+    NUMPY_IMPORT_ERROR = None
 
 try:
     import mediapipe as mp
@@ -29,7 +42,16 @@ class CameraLoop:
         self.bridge = bridge
         self.loop = loop
         self.enabled = bool(cfg["ui"]["vision_enabled"])
-        
+
+        self._numpy_available = NUMPY_AVAILABLE
+        self._numpy_error = NUMPY_IMPORT_ERROR
+        self._numpy_warning_sent = False
+        if not self._numpy_available:
+            logger.warning(
+                "CameraLoop will continue without NumPy. Gesture and motion detection remain active, "
+                "but vision descriptions may be less detailed."
+            )
+
         cam = cfg["camera"]
         self.index = int(cam["index"])
         self.backend = cam.get("backend", "dshow")
@@ -136,6 +158,18 @@ class CameraLoop:
         
         self._stop.clear()
         self._running = True
+
+        if not self._numpy_available and not self._numpy_warning_sent:
+            self._numpy_warning_sent = True
+            warning = (
+                "⚠️ Vision detail analysis is reduced because NumPy could not be loaded. "
+                "If you are running inside the NumPy source tree, leave that directory and restart Nomous."
+            )
+            if self._numpy_error is not None:
+                logger.debug("NumPy import error: %s", self._numpy_error)
+            logger.warning(warning)
+            self._post_event(warning)
+
         self._thr = threading.Thread(target=self._run, daemon=True, name="CameraLoop")
         self._thr.start()
         logger.info("CameraLoop started")
@@ -208,8 +242,8 @@ class CameraLoop:
     def _analyze_complexity(self, gray):
         """Analyze visual complexity using edge detection."""
         edges = cv2.Canny(gray, 100, 200)
-        edge_density = np.sum(edges > 0) / edges.size
-        
+        edge_density = self._compute_edge_density(edges)
+
         if edge_density > 0.3:
             return "very detailed"
         elif edge_density > 0.2:
@@ -218,6 +252,45 @@ class CameraLoop:
             return "moderately detailed"
         else:
             return "simple"
+
+    def _compute_edge_density(self, edges) -> float:
+        """Compute edge density with graceful degradation when NumPy is unavailable."""
+        total_pixels = 0
+
+        if self._numpy_available and np is not None:
+            try:
+                total_pixels = int(getattr(edges, "size", 0))
+                if total_pixels <= 0:
+                    shape = getattr(edges, "shape", None)
+                    if shape and len(shape) >= 2:
+                        total_pixels = int(shape[0] * shape[1])
+                total_pixels = max(total_pixels, 1)
+                non_zero = int(np.count_nonzero(edges))
+                return non_zero / float(total_pixels)
+            except Exception as exc:
+                logger.debug("Falling back to OpenCV edge density calculation: %s", exc)
+
+        try:
+            total_pixels = int(getattr(edges, "size", 0))
+            if total_pixels <= 0:
+                shape = getattr(edges, "shape", None)
+                if shape and len(shape) >= 2:
+                    total_pixels = int(shape[0] * shape[1])
+            total_pixels = max(total_pixels, 1)
+            non_zero = int(cv2.countNonZero(edges))
+            return non_zero / float(total_pixels)
+        except Exception as exc:
+            logger.debug("Unable to compute edge density without NumPy: %s", exc)
+
+        try:
+            buffer = memoryview(edges)
+            non_zero = sum(1 for value in buffer if value)
+            total_pixels = len(buffer) or 1
+            return non_zero / float(total_pixels)
+        except Exception:
+            logger.debug("Edge density fallbacks failed", exc_info=True)
+
+        return 0.0
 
     def _describe_frame(self, frame, motion_level: int, gesture: str = "") -> str:
         """Generate detailed description of the frame."""
