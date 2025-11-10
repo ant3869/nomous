@@ -255,28 +255,24 @@ class CameraLoop:
 
     def _compute_edge_density(self, edges) -> float:
         """Compute edge density with graceful degradation when NumPy is unavailable."""
-        total_pixels = 0
+        def _get_total_pixels(edges) -> int:
+            total_pixels = int(getattr(edges, "size", 0))
+            if total_pixels <= 0:
+                shape = getattr(edges, "shape", None)
+                if shape and len(shape) >= 2:
+                    total_pixels = int(shape[0] * shape[1])
+            return max(total_pixels, 1)
 
         if self._numpy_available and np is not None:
             try:
-                total_pixels = int(getattr(edges, "size", 0))
-                if total_pixels <= 0:
-                    shape = getattr(edges, "shape", None)
-                    if shape and len(shape) >= 2:
-                        total_pixels = int(shape[0] * shape[1])
-                total_pixels = max(total_pixels, 1)
+                total_pixels = _get_total_pixels(edges)
                 non_zero = int(np.count_nonzero(edges))
                 return non_zero / float(total_pixels)
             except Exception as exc:
                 logger.debug("Falling back to OpenCV edge density calculation: %s", exc)
 
         try:
-            total_pixels = int(getattr(edges, "size", 0))
-            if total_pixels <= 0:
-                shape = getattr(edges, "shape", None)
-                if shape and len(shape) >= 2:
-                    total_pixels = int(shape[0] * shape[1])
-            total_pixels = max(total_pixels, 1)
+            total_pixels = _get_total_pixels(edges)
             non_zero = int(cv2.countNonZero(edges))
             return non_zero / float(total_pixels)
         except Exception as exc:
