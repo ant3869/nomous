@@ -1087,12 +1087,12 @@ interface MemoryGraphProps {
   edges: MemoryEdge[];
   selectedNodeId?: string | null;
   onSelect?: (id: string) => void;
+  zoom?: number;
 }
 
-function MemoryGraph({ nodes, edges, selectedNodeId, onSelect }: MemoryGraphProps) {
+function MemoryGraph({ nodes, edges, selectedNodeId, onSelect, zoom = 1 }: MemoryGraphProps) {
   const layout = React.useMemo(() => {
-    const width = 560;
-    const height = 320;
+    const order: MemoryNode["kind"][] = ["stimulus", "event", "self", "behavior", "concept"];
     const buckets: Record<MemoryNode["kind"], MemoryNode[]> = {
       stimulus: [],
       concept: [],
@@ -1101,21 +1101,45 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect }: MemoryGraphProp
       behavior: [],
     };
     nodes.forEach(node => buckets[node.kind].push(node));
+    const maxNodes = Math.max(1, ...order.map(kind => buckets[kind].length));
+    const columnSpacing = 160;
+    const paddingX = 120;
+    const columnWidth = 140;
+    const verticalSpacing = Math.max(64, Math.min(110, Math.floor(520 / Math.max(1, Math.log2(maxNodes + 1)))));
+    const height = Math.max(360, 120 + (maxNodes - 1) * verticalSpacing);
+    const width = paddingX * 2 + columnSpacing * (order.length - 1);
     const xSlots: Record<MemoryNode["kind"], number> = {
-      stimulus: 80,
-      behavior: width / 2 - 120,
-      event: width / 2,
-      concept: width - 80,
-      self: width / 2 + 120,
+      stimulus: paddingX,
+      event: paddingX + columnSpacing,
+      self: paddingX + columnSpacing * 2,
+      behavior: paddingX + columnSpacing * 3,
+      concept: paddingX + columnSpacing * 4,
     };
-    const yStep = (arr: MemoryNode[]) => (arr.length > 1 ? height / (arr.length + 1) : height / 2);
     const pos = new Map<string, { x: number; y: number }>();
-    (Object.keys(buckets) as MemoryNode["kind"][]).forEach(kind => {
-      const arr = buckets[kind];
-      arr.forEach((node, index) => pos.set(node.id, { x: xSlots[kind], y: (index + 1) * yStep(arr) }));
+    order.forEach(kind => {
+      const arr = buckets[kind]
+        .slice()
+        .sort((a, b) => {
+          const importanceDiff = (b.importance ?? 0) - (a.importance ?? 0);
+          if (Math.abs(importanceDiff) > 0.0001) return importanceDiff;
+          return (b.strength ?? 0) - (a.strength ?? 0);
+        });
+      arr.forEach((node, index) => {
+        const y = 80 + index * verticalSpacing;
+        pos.set(node.id, { x: xSlots[kind], y });
+      });
     });
-    return { width, height, pos };
+    return { width, height, pos, order, columnWidth, buckets, xSlots };
   }, [nodes]);
+
+  const zoomTransform = React.useMemo(() => {
+    if (!zoom || Math.abs(zoom - 1) < 0.001) {
+      return undefined;
+    }
+    const cx = layout.width / 2;
+    const cy = layout.height / 2;
+    return `translate(${cx} ${cy}) scale(${zoom}) translate(-${cx} -${cy})`;
+  }, [layout.height, layout.width, zoom]);
 
   const connectedNodes = React.useMemo(() => {
     if (!selectedNodeId) {
@@ -1159,78 +1183,137 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect }: MemoryGraphProp
     [onSelect],
   );
 
+  const columnPalette: Record<MemoryNode["kind"], { background: string; border: string; label: string; text: string }> = {
+    stimulus: { background: "rgba(251, 191, 36, 0.08)", border: "rgba(251, 191, 36, 0.28)", label: "Stimuli", text: "#fbbf24" },
+    event: { background: "rgba(34, 211, 238, 0.08)", border: "rgba(34, 211, 238, 0.26)", label: "Events", text: "#22d3ee" },
+    self: { background: "rgba(16, 185, 129, 0.08)", border: "rgba(16, 185, 129, 0.32)", label: "Identity", text: "#34d399" },
+    behavior: { background: "rgba(45, 212, 191, 0.08)", border: "rgba(45, 212, 191, 0.26)", label: "Behaviors", text: "#2dd4bf" },
+    concept: { background: "rgba(167, 139, 250, 0.08)", border: "rgba(167, 139, 250, 0.26)", label: "Concepts", text: "#a78bfa" },
+  };
+
+  const nodeFillClass: Record<MemoryNode["kind"], string> = {
+    stimulus: "fill-amber-500",
+    concept: "fill-purple-500",
+    event: "fill-cyan-500",
+    self: "fill-emerald-500",
+    behavior: "fill-teal-400",
+  };
+
   return (
-    <svg
-      width="100%"
-      height="320"
-      viewBox={`0 0 ${layout.width} ${layout.height}`}
-      className="rounded-xl bg-zinc-900/60"
-      role="list"
-      aria-label="Nomous memory graph"
-    >
-      {edges.map(edge => {
-        const from = layout.pos.get(edge.from);
-        const to = layout.pos.get(edge.to);
-        if (!from || !to) {
-          return null;
-        }
-        const isActive = activeEdges.has(edge.id);
-        const strokeOpacity = isActive ? 0.45 + edge.weight * 0.45 : 0.15;
-        const strokeWidth = isActive ? 1.4 + edge.weight * 2.2 : 0.8 + edge.weight;
-        return (
-          <line
-            key={edge.id}
-            x1={from.x}
-            y1={from.y}
-            x2={to.x}
-            y2={to.y}
-            stroke="currentColor"
-            strokeOpacity={strokeOpacity}
-            strokeWidth={strokeWidth}
-            className={isActive ? "text-emerald-300" : "text-zinc-600"}
-          />
-        );
-      })}
-      {nodes.map(node => {
-        const position = layout.pos.get(node.id);
-        if (!position) {
-          return null;
-        }
-        const fill =
-          node.kind === "self"
-            ? "fill-emerald-500"
-            : node.kind === "stimulus"
-            ? "fill-amber-500"
-            : node.kind === "event"
-            ? "fill-cyan-500"
-            : node.kind === "behavior"
-            ? "fill-teal-400"
-            : "fill-purple-500";
-        const isSelected = selectedNodeId === node.id;
-        const isConnected = connectedNodes.has(node.id);
-        const importanceBoost = typeof node.importance === "number" ? node.importance * 12 : 0;
-        const radius = 10 + node.strength * 10 + importanceBoost + (isSelected ? 4 : 0);
-        const stroke = isSelected ? "#34d399" : isConnected ? "#818cf8" : "#1f1f23";
-        const strokeWidth = isSelected ? 3 : isConnected ? 2 : 1;
-        return (
-          <g
-            key={node.id}
-            tabIndex={0}
-            role="button"
-            aria-pressed={isSelected}
-            onClick={() => handleSelect(node.id)}
-            onKeyDown={event => handleKey(event, node.id)}
-            className="cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70"
-          >
-            <circle cx={position.x} cy={position.y} r={radius} className={fill} opacity={0.95} stroke={stroke} strokeWidth={strokeWidth} />
-            <text x={position.x} y={position.y - (18 + node.strength * 6)} textAnchor="middle" className="fill-zinc-50 text-xs drop-shadow">
-              {node.label}
-            </text>
-            <title>{node.meaning || node.label}</title>
+    <div className="mt-4">
+      <div className="max-h-[420px] overflow-auto rounded-xl border border-zinc-800/60 bg-zinc-950/40">
+        <svg
+          width={layout.width}
+          height={layout.height}
+          viewBox={`0 0 ${layout.width} ${layout.height}`}
+          className="block"
+          role="list"
+          aria-label="Nomous memory graph"
+          style={{ minWidth: `${layout.width}px`, minHeight: `${layout.height}px` }}
+        >
+          <g transform={zoomTransform ?? undefined}>
+            {layout.order.map(kind => {
+              const palette = columnPalette[kind];
+              const x = layout.xSlots[kind] - layout.columnWidth / 2;
+              return (
+                <g key={`column-${kind}`}>
+                  <rect
+                    x={x}
+                    y={40}
+                    width={layout.columnWidth}
+                    height={layout.height - 80}
+                    rx={28}
+                    fill={palette.background}
+                    stroke={palette.border}
+                    strokeWidth={1.5}
+                  />
+                  <text
+                    x={layout.xSlots[kind]}
+                    y={62}
+                    textAnchor="middle"
+                    fontSize={12}
+                    fill={palette.text}
+                    letterSpacing="0.25em"
+                  >
+                    {palette.label.toUpperCase()}
+                  </text>
+                </g>
+              );
+            })}
+
+            {edges.map(edge => {
+              const from = layout.pos.get(edge.from);
+              const to = layout.pos.get(edge.to);
+              if (!from || !to) {
+                return null;
+              }
+              const isActive = activeEdges.has(edge.id);
+              const strokeOpacity = isActive ? 0.45 + edge.weight * 0.35 : 0.12;
+              const strokeWidth = isActive ? 1.2 + edge.weight * 2 : 0.6 + edge.weight * 0.8;
+              return (
+                <line
+                  key={edge.id}
+                  x1={from.x}
+                  y1={from.y}
+                  x2={to.x}
+                  y2={to.y}
+                  stroke="currentColor"
+                  strokeOpacity={strokeOpacity}
+                  strokeWidth={strokeWidth}
+                  className={isActive ? "text-emerald-300" : "text-zinc-600"}
+                />
+              );
+            })}
+
+            {nodes.map(node => {
+              const position = layout.pos.get(node.id);
+              if (!position) {
+                return null;
+              }
+              const isSelected = selectedNodeId === node.id;
+              const isConnected = connectedNodes.has(node.id);
+              const importanceBoost = typeof node.importance === "number" ? node.importance * 10 : 0;
+              const baseRadius = 12 + node.strength * 9 + importanceBoost;
+              const radius = Math.min(baseRadius, 34) + (isSelected ? 4 : 0);
+              const stroke = isSelected ? "#34d399" : isConnected ? "#818cf8" : "#1f1f23";
+              const strokeWidth = isSelected ? 3.2 : isConnected ? 2.2 : 1.2;
+              const labelY = position.y - (radius + 12);
+              return (
+                <g
+                  key={node.id}
+                  tabIndex={0}
+                  role="button"
+                  aria-pressed={isSelected}
+                  onClick={() => handleSelect(node.id)}
+                  onKeyDown={event => handleKey(event, node.id)}
+                  className="cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70"
+                >
+                  <circle
+                    cx={position.x}
+                    cy={position.y}
+                    r={radius}
+                    className={nodeFillClass[node.kind]}
+                    opacity={0.95}
+                    stroke={stroke}
+                    strokeWidth={strokeWidth}
+                  />
+                  <text
+                    x={position.x}
+                    y={labelY}
+                    textAnchor="middle"
+                    className="fill-zinc-50 text-[11px] drop-shadow"
+                    fontWeight={500}
+                  >
+                    {node.label}
+                  </text>
+                  <title>{node.meaning || node.label}</title>
+                </g>
+              );
+            })}
           </g>
-        );
-      })}
-    </svg>
+        </svg>
+      </div>
+    </div>
   );
 }
 
@@ -2531,6 +2614,7 @@ export default function App(){
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const memoryInsights = useMemo(() => computeMemoryInsights(state.memory.nodes, state.memory.edges), [state.memory.nodes, state.memory.edges]);
   const [memoryKindFilter, setMemoryKindFilter] = useState<Set<MemoryNodeKind>>(() => new Set<MemoryNodeKind>(["stimulus", "concept", "event", "behavior", "self"]));
+  const [memoryZoom, setMemoryZoom] = useState(1);
   const memoryKindOptions = useMemo(
     () => [
       { kind: "stimulus" as MemoryNodeKind, label: "Stimuli", className: "border-amber-500/60 bg-amber-500/10 text-amber-200" },
@@ -2699,7 +2783,7 @@ export default function App(){
 
   return (
     <TooltipProvider>
-      <div className="relative min-h-screen overflow-hidden bg-[#040406] text-zinc-50">
+      <div className="relative min-h-screen overflow-x-hidden bg-[#040406] text-zinc-50">
         <div className="pointer-events-none absolute inset-0 -z-20 bg-[radial-gradient(circle_at_top,_rgba(124,58,237,0.22),_transparent_65%)]" aria-hidden />
         <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden>
           <div className="absolute -top-24 right-10 h-72 w-72 rounded-full bg-emerald-500/15 blur-3xl" />
@@ -3108,11 +3192,37 @@ export default function App(){
                         })}
                       </div>
 
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
+                        <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Scale</span>
+                        <span className="font-mono text-[11px] text-zinc-400">{Math.round(memoryZoom * 100)}%</span>
+                        <div className="min-w-[200px] flex-1 md:flex-none">
+                          <Slider
+                            key={`memory-zoom-${Math.round(memoryZoom * 100)}`}
+                            defaultValue={[Math.round(memoryZoom * 100)]}
+                            min={60}
+                            max={180}
+                            step={10}
+                            onValueChange={value => {
+                              const next = value[0] ?? 100;
+                              setMemoryZoom(next / 100);
+                            }}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setMemoryZoom(1)}
+                          className="rounded-full border border-zinc-800/80 px-3 py-1 text-[11px] text-zinc-400 transition hover:border-emerald-500/40 hover:text-emerald-200"
+                        >
+                          Reset
+                        </button>
+                      </div>
+
                       <MemoryGraph
                         nodes={filteredMemoryNodes}
                         edges={filteredMemoryEdges}
                         selectedNodeId={selectedMemoryId}
                         onSelect={id => setSelectedMemoryId(id)}
+                        zoom={memoryZoom}
                       />
 
                       <div className="grid gap-3 md:grid-cols-2">
