@@ -8,7 +8,6 @@ import { FilePathInput } from "./components/FilePathInput";
 import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { Separator } from "./components/ui/separator";
 import { Activity, AlertTriangle, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode, MemoryNodeKind } from "./types/memory";
@@ -1834,6 +1833,7 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
 
   const [modelScanPending, setModelScanPending] = useState(false);
   const [modelScanError, setModelScanError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<string>("runtime");
 
   useEffect(() => {
     if (state.modelCatalogError) {
@@ -2029,7 +2029,7 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4 py-6">
-      <div className="relative w-full max-w-5xl max-h-[90vh] overflow-hidden rounded-3xl border border-zinc-800/70 bg-zinc-950/95 shadow-[0_30px_120px_rgba(0,0,0,0.45)]">
+      <div className="relative w-full max-w-5xl max-h-[90vh] overflow-hidden rounded-3xl border border-zinc-800/70 bg-zinc-950/95 shadow-[0_30px_120px_rgba(0,0,0,0.45)] flex flex-col">
         <div className="flex items-start justify-between border-b border-zinc-800/60 px-6 py-4">
           <div>
             <div className="text-xs uppercase tracking-[0.3em] text-zinc-500">Control Center</div>
@@ -2038,440 +2038,469 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
           </div>
           <Button variant="secondary" className="bg-zinc-800/80 hover:bg-zinc-700/80 text-zinc-100" onClick={onClose}>Close</Button>
         </div>
-        <div className="overflow-y-auto px-6 py-6 space-y-6">
-          <section>
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h3 className="text-lg font-semibold text-zinc-100">Bridge Connection</h3>
-                <p className="text-xs text-zinc-400">Manage the WebSocket runtime bridge and endpoint.</p>
-              </div>
-              <div className="flex items-center gap-2">
-                {!state.connected ? (
-                  <Button className="bg-emerald-600/90 hover:bg-emerald-500/90 text-white" onClick={connect}><Play className="w-4 h-4 mr-1"/>Connect</Button>
-                ) : (
-                  <Button variant="danger" className="bg-red-600/90 hover:bg-red-500/90 text-white" onClick={disconnect}><Square className="w-4 h-4 mr-1"/>Disconnect</Button>
-                )}
-              </div>
-            </div>
-            <div className="grid gap-4 md:grid-cols-[2fr_1fr]">
-              <label className="flex flex-col gap-2">
-                <span className="text-xs uppercase tracking-wide text-zinc-400">Runtime URL</span>
-                <input value={state.url} onChange={(e)=>setState(p=>({ ...p, url: e.target.value }))} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm focus:border-emerald-500/80 focus:outline-none focus:ring-0 text-zinc-100"/>
-              </label>
-              <Card className="bg-zinc-900/60 border-zinc-800/60">
-                <CardContent className="p-4 text-xs text-zinc-400 space-y-1">
-                  <div className="font-semibold text-zinc-200 text-sm">Status</div>
-                  <div className="flex items-center gap-2 text-zinc-300"><span className={`w-2.5 h-2.5 rounded-full ${state.connected ? "bg-emerald-500" : "bg-red-500"}`}></span>{state.connected ? "Connected" : "Disconnected"}</div>
-                  <div className="text-zinc-500">The UI will remember this endpoint and auto-reconnect.</div>
-                </CardContent>
-              </Card>
-            </div>
-          </section>
-
-          <Separator className="bg-zinc-800/60" />
-
-          <section>
-            <Card className="bg-zinc-900/60 border-zinc-800/60">
-              <CardContent className="space-y-4 p-4">
-                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold text-zinc-100">System Prompts</h3>
-                    <p className="text-xs text-zinc-400">Define the persona and internal reasoning guidance used by the language model.</p>
-                  </div>
-                  <div className="text-[11px] uppercase tracking-[0.3em] text-emerald-300/80">Live runtime sync</div>
-                </div>
-                <div className="grid gap-4 lg:grid-cols-2">
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">System Persona Prompt</span>
-                    <textarea
-                      value={systemPrompt}
-                      onChange={event => updateSettings({ systemPrompt: event.target.value })}
-                      onBlur={event => handlePromptCommit("system_prompt", event.target.value)}
-                      placeholder="Set the global behavior for Nomous..."
-                      className="min-h-[140px] w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
-                    />
-                  </label>
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Thinking Prompt</span>
-                    <textarea
-                      value={thinkingPrompt}
-                      onChange={event => updateSettings({ thinkingPrompt: event.target.value })}
-                      onBlur={event => handlePromptCommit("thinking_prompt", event.target.value)}
-                      placeholder="Guide internal reasoning, tool usage, and reflection..."
-                      className="min-h-[140px] w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
-                    />
-                  </label>
-                </div>
-                <p className="text-xs text-zinc-500">
-                  Updates are saved locally and streamed to the runtime. Reload the active language model to bake the new prompts into its context.
-                </p>
-              </CardContent>
-            </Card>
-          </section>
-
-          <Separator className="bg-zinc-800/60" />
-
-          <section className="grid gap-4 lg:grid-cols-2">
-            <Card className="bg-zinc-900/60 border-zinc-800/60">
-              <CardContent className="space-y-4 p-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-zinc-100">Device Routing</h3>
-                  <p className="text-xs text-zinc-400">Toggle hardware inputs &amp; outputs used by the autonomy stack.</p>
-                </div>
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-4">
+        <Tabs
+          value={activeTab}
+          onValueChange={setActiveTab}
+          defaultValue="runtime"
+          className="flex h-full flex-col gap-4 px-6 pb-6 pt-4"
+        >
+          <TabsList className="w-full justify-start">
+            <TabsTrigger value="runtime" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Runtime</TabsTrigger>
+            <TabsTrigger value="prompts" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Prompts</TabsTrigger>
+            <TabsTrigger value="devices" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Devices</TabsTrigger>
+            <TabsTrigger value="audio" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Audio</TabsTrigger>
+            <TabsTrigger value="vision" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Vision</TabsTrigger>
+            <TabsTrigger value="models" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Models</TabsTrigger>
+          </TabsList>
+          <div className="flex-1 overflow-hidden">
+            <TabsContent value="runtime" className="h-full overflow-y-auto">
+              <div className="space-y-6 pb-8 pr-1">
+                <section>
+                  <div className="flex items-center justify-between mb-3">
                     <div>
-                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Camera className="w-4 h-4"/>Camera</div>
-                      <p className="text-xs text-zinc-400">Enable or disable vision streaming to the runtime.</p>
+                      <h3 className="text-lg font-semibold text-zinc-100">Bridge Connection</h3>
+                      <p className="text-xs text-zinc-400">Manage the WebSocket runtime bridge and endpoint.</p>
                     </div>
-                    <Switch checked={state.settings.cameraEnabled} onCheckedChange={(value)=>{
-                      handleToggle("cameraEnabled", value, () => {
-                        setState(p => ({ ...p, visionEnabled: value }));
-                        push({ type: "toggle", what: "vision", value });
-                      });
-                    }}/>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Mic className="w-4 h-4"/>Microphone Capture</div>
-                      <p className="text-xs text-zinc-400">Stream live audio into STT and conversational buffers.</p>
-                    </div>
-                    <Switch checked={state.settings.microphoneEnabled || state.micOn} onCheckedChange={(value)=>{
-                      handleToggle("microphoneEnabled", value, () => setMic(value));
-                    }}/>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Volume2 className="w-4 h-4"/>Speaker Output</div>
-                      <p className="text-xs text-zinc-400">Route TTS audio to speakers and remote peers.</p>
-                    </div>
-                    <Switch checked={state.settings.speakerEnabled} onCheckedChange={(value)=>{
-                      handleToggle("speakerEnabled", value, () => push({ type: "toggle", what: "speaker", value }));
-                    }}/>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Radio className="w-4 h-4"/>Text-to-Speech</div>
-                      <p className="text-xs text-zinc-400">Controls synthetic voice playback in the runtime.</p>
-                    </div>
-                    <Switch checked={state.settings.ttsEnabled && state.audioEnabled} onCheckedChange={(value)=>{
-                      handleToggle("ttsEnabled", value, () => {
-                        setState(p => ({ ...p, audioEnabled: value }));
-                        push({ type: "toggle", what: "tts", value });
-                      });
-                    }}/>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="font-medium text-zinc-200 flex items-center gap-2"><Brain className="w-4 h-4"/>Speech-to-Text</div>
-                      <p className="text-xs text-zinc-400">Enable transcription for microphone and streamed audio.</p>
-                    </div>
-                    <Switch checked={state.settings.sttEnabled} onCheckedChange={(value)=>{
-                      handleToggle("sttEnabled", value, () => push({ type: "toggle", what: "stt", value }));
-                    }}/>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="bg-zinc-900/60 border-zinc-800/60">
-              <CardContent className="space-y-4 p-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-zinc-100">Audio Pipeline</h3>
-                  <p className="text-xs text-zinc-400">Tune voice characteristics, sensitivity, and levels.</p>
-                </div>
-                <div className="space-y-4">
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Piper Voice</span>
-                    <select value={state.settings.ttsVoice} onChange={(e)=>{
-                      updateSettings({ ttsVoice: e.target.value });
-                      push({ type: "param", key: "tts_voice", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none">
-                      {voices.map(v => (
-                        <option key={v.value} value={v.value}>{v.label}</option>
-                      ))}
-                      {!voices.some(v => v.value === state.settings.ttsVoice) && state.settings.ttsVoice ? (
-                        <option value={state.settings.ttsVoice}>{state.settings.ttsVoice}</option>
-                      ) : null}
-                    </select>
-                  </label>
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Mic Sensitivity</span><span>{state.settings.micSensitivity}%</span></div>
-                    <Slider key={sliderKey("mic", state.settings.micSensitivity)} defaultValue={[state.settings.micSensitivity]} min={0} max={100} step={5} onValueChange={(v)=>{
-                      updateSettings({ micSensitivity: v[0] });
-                      push({ type: "param", key: "mic_sensitivity", value: v[0] });
-                    }}/>
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Output Volume</span><span>{state.settings.masterVolume}%</span></div>
-                    <Slider key={sliderKey("vol", state.settings.masterVolume)} defaultValue={[state.settings.masterVolume]} min={0} max={100} step={5} onValueChange={(v)=>{
-                      updateSettings({ masterVolume: v[0] });
-                      push({ type: "param", key: "master_volume", value: v[0] });
-                    }}/>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </section>
-
-          <Separator className="bg-zinc-800/60" />
-
-          <section className="grid gap-4 lg:grid-cols-2">
-            <Card className="bg-zinc-900/60 border-zinc-800/60">
-              <CardContent className="space-y-4 p-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-zinc-100">Camera Configuration</h3>
-                  <p className="text-xs text-zinc-400">Frame rate, exposure, and clarity tuning for the perception stack.</p>
-                </div>
-                <div className="space-y-4">
-                  <label className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Resolution</span>
-                    <select value={state.settings.cameraResolution} onChange={(e)=>{
-                      updateSettings({ cameraResolution: e.target.value });
-                      push({ type: "param", key: "camera_resolution", value: e.target.value });
-                    }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none">
-                      {['1920x1080','1280x720','1024x576','640x480'].map(res => <option key={res} value={res}>{res}</option>)}
-                    </select>
-                  </label>
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Exposure</span><span>{state.settings.cameraExposure}%</span></div>
-                    <Slider key={sliderKey("exposure", state.settings.cameraExposure)} defaultValue={[state.settings.cameraExposure]} min={0} max={100} step={5} onValueChange={(v)=>{
-                      updateSettings({ cameraExposure: v[0] });
-                      push({ type: "param", key: "camera_exposure", value: v[0] });
-                    }}/>
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-zinc-400"><span>Brightness</span><span>{state.settings.cameraBrightness}%</span></div>
-                    <Slider key={sliderKey("brightness", state.settings.cameraBrightness)} defaultValue={[state.settings.cameraBrightness]} min={0} max={100} step={5} onValueChange={(v)=>{
-                      updateSettings({ cameraBrightness: v[0] });
-                      push({ type: "param", key: "camera_brightness", value: v[0] });
-                    }}/>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="bg-zinc-900/60 border-zinc-800/60">
-              <CardContent className="space-y-4 p-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-zinc-100">LLM Runtime</h3>
-                  <p className="text-xs text-zinc-400">All controls that shape cognition stay together for clarity.</p>
-                </div>
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <span className="text-xs uppercase tracking-wide text-zinc-400">Conditional Presets</span>
-                    <div className="grid gap-2 md:grid-cols-3">
-                      {performancePresets.map(preset => {
-                        const active = state.settings.modelStrategy === preset.id;
-                        const presetClasses = active
-                          ? "border-emerald-500/60 bg-emerald-500/10"
-                          : "border-zinc-800/70 bg-zinc-950/40 hover:border-emerald-500/40";
-                        const buttonClasses = "rounded-xl border px-3 py-3 text-left transition " + presetClasses;
-                        return (
-                          <button
-                            key={preset.id}
-                            type="button"
-                            onClick={() => applyPreset(preset.id)}
-                            className={buttonClasses}
-                          >
-                            <div className="flex items-center justify-between text-sm font-semibold text-zinc-100">
-                              {preset.label}
-                              {active && (
-                                <Badge className="bg-emerald-500/20 text-emerald-100 border border-emerald-400/30">Active</Badge>
-                              )}
-                            </div>
-                            <p className="mt-1 text-xs text-zinc-400">{preset.description}</p>
-                            <div className="mt-2 flex flex-wrap gap-1">
-                              {preset.conditions.map(condition => (
-                                <Badge
-                                  key={condition}
-                                  className="bg-zinc-900/70 text-zinc-300 border border-zinc-800/70"
-                                >
-                                  {condition}
-                                </Badge>
-                              ))}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {state.settings.modelStrategy === "custom" && (
-                      <p className="text-xs text-amber-300/80">
-                        Using custom model paths. Presets will overwrite your manual configuration.
-                      </p>
-                    )}
-                  </div>
-                  <div className="space-y-3">
-                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-3">
-                      <span className="flex-1 text-xs uppercase tracking-wide text-zinc-400">Model Directory</span>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          onClick={handleModelRescan}
-                          disabled={modelScanPending || !modelDirectory.trim()}
-                          className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-60"
-                        >
-                          {modelScanPending ? "Scanning…" : "Rescan"}
-                        </Button>
-                      </div>
-                    </div>
-                    <FilePathInput
-                      value={modelDirectory}
-                      onChange={val => updateSettings({ modelDirectory: val })}
-                      onCommit={handleModelDirectoryCommit}
-                      allowDirectories
-                      placeholder="/models/llm"
-                    />
-                    {modelScanError ? (
-                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                        {modelScanError}
-                      </div>
-                    ) : null}
-                    <div className="space-y-2">
-                      {modelScanPending ? (
-                        <div className="text-xs text-zinc-400">Scanning directory for .gguf models…</div>
-                      ) : catalogEntries.length === 0 ? (
-                        <div className="rounded-lg border border-zinc-800/60 bg-zinc-950/60 px-3 py-3 text-xs text-zinc-500">
-                          No .gguf models discovered yet. Select a directory and rescan to populate the catalog.
-                        </div>
+                    <div className="flex items-center gap-2">
+                      {!state.connected ? (
+                        <Button className="bg-emerald-600/90 hover:bg-emerald-500/90 text-white" onClick={connect}><Play className="w-4 h-4 mr-1"/>Connect</Button>
                       ) : (
-                        catalogEntries.map(entry => {
-                          const base = modelDirectory.trim();
-                          const resolved = entry.path && entry.path.length > 0
-                            ? entry.path
-                            : base
-                              ? `${base.replace(/[\\/]+$/, "")}/${entry.name}`
-                              : entry.name;
-                          const normalizedResolved = resolved.replace(/\\+/g, "/");
-                          const normalizedSelected = (selectedModelPath || "").replace(/\\+/g, "/");
-                          const isSelected = normalizedResolved === normalizedSelected;
-                          const buttonClass = isSelected
-                            ? "border-emerald-500/60 bg-emerald-500/10"
-                            : "border-zinc-800/70 bg-zinc-950/40 hover:border-emerald-500/30";
-                          return (
-                            <button
-                              key={entry.path || entry.name}
-                              type="button"
-                              onClick={() => handleModelSelect(entry)}
-                              className={`w-full rounded-xl border px-3 py-3 text-left text-sm transition ${buttonClass}`}
-                            >
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="space-y-1">
-                                  <div className="text-sm font-semibold text-zinc-100 truncate">{entry.name}</div>
-                                  <div className="max-w-[240px] truncate text-[11px] text-zinc-500">{entry.path || resolved}</div>
-                                </div>
-                                <div className="space-y-1 text-right">
-                                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${MODEL_TYPE_STYLES[entry.type]}`}>
-                                    {MODEL_TYPE_LABEL[entry.type]}
-                                  </span>
-                                  <div className="text-[11px] text-zinc-400">{entry.sizeLabel}</div>
-                                </div>
-                              </div>
-                            </button>
-                          );
-                        })
+                        <Button variant="danger" className="bg-red-600/90 hover:bg-red-500/90 text-white" onClick={disconnect}><Square className="w-4 h-4 mr-1"/>Disconnect</Button>
                       )}
                     </div>
                   </div>
-                  <div className="space-y-3">
+                  <div className="grid gap-4 md:grid-cols-[2fr_1fr]">
                     <label className="flex flex-col gap-2">
-                      <span className="text-xs uppercase tracking-wide text-zinc-400">Conversation Model</span>
-                      <FilePathInput
-                        value={state.settings.llmModelPath}
-                        onChange={val => updateSettings({ llmModelPath: val })}
-                        onCommit={createModelCommitHandler("llmModelPath", "llm_model_path", "Switching conversation model")}
-                        accept={[".gguf"]}
-                      />
+                      <span className="text-xs uppercase tracking-wide text-zinc-400">Runtime URL</span>
+                      <input value={state.url} onChange={(e)=>setState(p=>({ ...p, url: e.target.value }))} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm focus:border-emerald-500/80 focus:outline-none focus:ring-0 text-zinc-100"/>
                     </label>
-                    <label className="flex flex-col gap-2">
-                      <span className="text-xs uppercase tracking-wide text-zinc-400">Vision Model</span>
-                      <FilePathInput
-                        value={state.settings.visionModelPath}
-                        onChange={val => updateSettings({ visionModelPath: val })}
-                        onCommit={createModelCommitHandler("visionModelPath", "vision_model_path", "Switching vision model")}
-                        accept={[".bin", ".onnx"]}
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2">
-                      <span className="text-xs uppercase tracking-wide text-zinc-400">Audio Model</span>
-                      <FilePathInput
-                        value={state.settings.audioModelPath}
-                        onChange={val => updateSettings({ audioModelPath: val })}
-                        onCommit={createModelCommitHandler("audioModelPath", "audio_model_path", "Switching audio model")}
-                        accept={[".onnx", ".bin"]}
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2">
-                      <span className="text-xs uppercase tracking-wide text-zinc-400">STT Model</span>
-                      <FilePathInput
-                        value={state.settings.sttModelPath}
-                        onChange={val => updateSettings({ sttModelPath: val })}
-                        onCommit={createModelCommitHandler("sttModelPath", "stt_model_path", "Switching speech-to-text model")}
-                        allowDirectories
-                      />
-                    </label>
+                    <Card className="bg-zinc-900/60 border-zinc-800/60">
+                      <CardContent className="p-4 text-xs text-zinc-400 space-y-1">
+                        <div className="font-semibold text-zinc-200 text-sm">Status</div>
+                        <div className="flex items-center gap-2 text-zinc-300"><span className={`w-2.5 h-2.5 rounded-full ${state.connected ? "bg-emerald-500" : "bg-red-500"}`}></span>{state.connected ? "Connected" : "Disconnected"}</div>
+                        <div className="text-zinc-500">The UI will remember this endpoint and auto-reconnect.</div>
+                      </CardContent>
+                    </Card>
                   </div>
-                </div>
-                <div>
-                  <div className="flex items-center justify-between text-xs text-zinc-400">
-                    <span>Temperature</span>
-                    <span>{state.settings.llmTemperature.toFixed(2)}</span>
-                  </div>
-                  <Slider
-                    key={sliderKey("temp", Math.round(state.settings.llmTemperature * 100))}
-                    defaultValue={[Math.round(state.settings.llmTemperature * 100)]}
-                    min={0}
-                    max={120}
-                    step={5}
-                    onValueChange={(v)=>{
-                      const val = Math.round((v[0] / 100) * 100) / 100;
-                      updateSettings({ llmTemperature: val });
-                      push({ type: "param", key: "llm_temperature", value: val });
-                    }}
-                  />
-                </div>
-                <div>
-                  <div className="flex items-center justify-between text-xs text-zinc-400">
-                    <span>Max Tokens</span>
-                    <span>{state.settings.llmMaxTokens}</span>
-                  </div>
-                  <Slider
-                    key={sliderKey("maxtok", state.settings.llmMaxTokens)}
-                    defaultValue={[state.settings.llmMaxTokens]}
-                    min={512}
-                    max={8192}
-                    step={256}
-                    onValueChange={(v)=>{
-                      updateSettings({ llmMaxTokens: v[0] });
-                      push({ type: "param", key: "llm_max_tokens", value: v[0] });
-                    }}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-          </section>
-
-          <Separator className="bg-zinc-800/60" />
-
-          <section>
-            <Card className="bg-zinc-900/60 border-zinc-800/60">
-              <CardContent className="p-4">
-                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold text-zinc-100">Live Diagnostics</h3>
-                    <p className="text-xs text-zinc-400">Adjustments stream immediately to the runtime and persist between sessions.</p>
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-xs text-zinc-300">
-                    <Badge className="bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">LLM</Badge>
-                    <Badge className="bg-purple-500/10 text-purple-300 border border-purple-500/20">Audio</Badge>
-                    <Badge className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">Vision</Badge>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </section>
-        </div>
+                </section>
+                <section>
+                  <Card className="bg-zinc-900/60 border-zinc-800/60">
+                    <CardContent className="p-4">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <h3 className="text-lg font-semibold text-zinc-100">Live Diagnostics</h3>
+                          <p className="text-xs text-zinc-400">Adjustments stream immediately to the runtime and persist between sessions.</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2 text-xs text-zinc-300">
+                          <Badge className="bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">LLM</Badge>
+                          <Badge className="bg-purple-500/10 text-purple-300 border border-purple-500/20">Audio</Badge>
+                          <Badge className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">Vision</Badge>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </section>
+              </div>
+            </TabsContent>
+            <TabsContent value="prompts" className="h-full overflow-y-auto">
+              <div className="space-y-6 pb-8 pr-1">
+                <section>
+                  <Card className="bg-zinc-900/60 border-zinc-800/60">
+                    <CardContent className="space-y-4 p-4">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <h3 className="text-lg font-semibold text-zinc-100">System Prompts</h3>
+                          <p className="text-xs text-zinc-400">Define the persona and internal reasoning guidance used by the language model.</p>
+                        </div>
+                        <div className="text-[11px] uppercase tracking-[0.3em] text-emerald-300/80">Live runtime sync</div>
+                      </div>
+                      <div className="grid gap-4 lg:grid-cols-2">
+                        <label className="flex flex-col gap-2">
+                          <span className="text-xs uppercase tracking-wide text-zinc-400">System Persona Prompt</span>
+                          <textarea
+                            value={systemPrompt}
+                            onChange={event => updateSettings({ systemPrompt: event.target.value })}
+                            onBlur={event => handlePromptCommit("system_prompt", event.target.value)}
+                            placeholder="Set the global behavior for Nomous..."
+                            className="min-h-[140px] w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-2">
+                          <span className="text-xs uppercase tracking-wide text-zinc-400">Thinking Prompt</span>
+                          <textarea
+                            value={thinkingPrompt}
+                            onChange={event => updateSettings({ thinkingPrompt: event.target.value })}
+                            onBlur={event => handlePromptCommit("thinking_prompt", event.target.value)}
+                            placeholder="Guide internal reasoning, tool usage, and reflection..."
+                            className="min-h-[140px] w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
+                          />
+                        </label>
+                      </div>
+                      <p className="text-xs text-zinc-500">
+                        Updates are saved locally and streamed to the runtime. Reload the active language model to bake the new prompts into its context.
+                      </p>
+                    </CardContent>
+                  </Card>
+                </section>
+              </div>
+            </TabsContent>
+            <TabsContent value="devices" className="h-full overflow-y-auto">
+              <div className="space-y-6 pb-8 pr-1">
+                <section>
+                  <Card className="bg-zinc-900/60 border-zinc-800/60">
+                    <CardContent className="space-y-4 p-4">
+                      <div>
+                        <h3 className="text-lg font-semibold text-zinc-100">Device Routing</h3>
+                        <p className="text-xs text-zinc-400">Toggle hardware inputs &amp; outputs used by the autonomy stack.</p>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-4">
+                          <div>
+                            <div className="font-medium text-zinc-200 flex items-center gap-2"><Camera className="w-4 h-4"/>Camera</div>
+                            <p className="text-xs text-zinc-400">Enable or disable vision streaming to the runtime.</p>
+                          </div>
+                          <Switch checked={state.settings.cameraEnabled} onCheckedChange={(value)=>{
+                            handleToggle("cameraEnabled", value, () => {
+                              setState(p => ({ ...p, visionEnabled: value }));
+                              push({ type: "toggle", what: "vision", value });
+                            });
+                          }}/>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <div>
+                            <div className="font-medium text-zinc-200 flex items-center gap-2"><Mic className="w-4 h-4"/>Microphone Capture</div>
+                            <p className="text-xs text-zinc-400">Stream live audio into STT and conversational buffers.</p>
+                          </div>
+                          <Switch checked={state.settings.microphoneEnabled || state.micOn} onCheckedChange={(value)=>{
+                            handleToggle("microphoneEnabled", value, () => setMic(value));
+                          }}/>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <div>
+                            <div className="font-medium text-zinc-200 flex items-center gap-2"><Volume2 className="w-4 h-4"/>Speaker Output</div>
+                            <p className="text-xs text-zinc-400">Route TTS audio to speakers and remote peers.</p>
+                          </div>
+                          <Switch checked={state.settings.speakerEnabled} onCheckedChange={(value)=>{
+                            handleToggle("speakerEnabled", value, () => push({ type: "toggle", what: "speaker", value }));
+                          }}/>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <div>
+                            <div className="font-medium text-zinc-200 flex items-center gap-2"><Radio className="w-4 h-4"/>Text-to-Speech</div>
+                            <p className="text-xs text-zinc-400">Controls synthetic voice playback in the runtime.</p>
+                          </div>
+                          <Switch checked={state.settings.ttsEnabled && state.audioEnabled} onCheckedChange={(value)=>{
+                            handleToggle("ttsEnabled", value, () => {
+                              setState(p => ({ ...p, audioEnabled: value }));
+                              push({ type: "toggle", what: "tts", value });
+                            });
+                          }}/>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <div>
+                            <div className="font-medium text-zinc-200 flex items-center gap-2"><Brain className="w-4 h-4"/>Speech-to-Text</div>
+                            <p className="text-xs text-zinc-400">Enable transcription for microphone and streamed audio.</p>
+                          </div>
+                          <Switch checked={state.settings.sttEnabled} onCheckedChange={(value)=>{
+                            handleToggle("sttEnabled", value, () => push({ type: "toggle", what: "stt", value }));
+                          }}/>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </section>
+              </div>
+            </TabsContent>
+            <TabsContent value="audio" className="h-full overflow-y-auto">
+              <div className="space-y-6 pb-8 pr-1">
+                <section>
+                  <Card className="bg-zinc-900/60 border-zinc-800/60">
+                    <CardContent className="space-y-4 p-4">
+                      <div>
+                        <h3 className="text-lg font-semibold text-zinc-100">Audio Pipeline</h3>
+                        <p className="text-xs text-zinc-400">Tune voice characteristics, sensitivity, and levels.</p>
+                      </div>
+                      <div className="space-y-4">
+                        <label className="flex flex-col gap-2">
+                          <span className="text-xs uppercase tracking-wide text-zinc-400">Piper Voice</span>
+                          <select value={state.settings.ttsVoice} onChange={(e)=>{
+                            updateSettings({ ttsVoice: e.target.value });
+                            push({ type: "param", key: "tts_voice", value: e.target.value });
+                          }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none">
+                            {voices.map(v => (
+                              <option key={v.value} value={v.value}>{v.label}</option>
+                            ))}
+                            {!voices.some(v => v.value === state.settings.ttsVoice) && state.settings.ttsVoice ? (
+                              <option value={state.settings.ttsVoice}>{state.settings.ttsVoice}</option>
+                            ) : null}
+                          </select>
+                        </label>
+                        <div>
+                          <div className="flex items-center justify-between text-xs text-zinc-400"><span>Mic Sensitivity</span><span>{state.settings.micSensitivity}%</span></div>
+                          <Slider key={sliderKey("mic", state.settings.micSensitivity)} defaultValue={[state.settings.micSensitivity]} min={0} max={100} step={5} onValueChange={(v)=>{
+                            updateSettings({ micSensitivity: v[0] });
+                            push({ type: "param", key: "mic_sensitivity", value: v[0] });
+                          }}/>
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between text-xs text-zinc-400"><span>Output Volume</span><span>{state.settings.masterVolume}%</span></div>
+                          <Slider key={sliderKey("vol", state.settings.masterVolume)} defaultValue={[state.settings.masterVolume]} min={0} max={100} step={5} onValueChange={(v)=>{
+                            updateSettings({ masterVolume: v[0] });
+                            push({ type: "param", key: "master_volume", value: v[0] });
+                          }}/>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </section>
+              </div>
+            </TabsContent>
+            <TabsContent value="vision" className="h-full overflow-y-auto">
+              <div className="space-y-6 pb-8 pr-1">
+                <section>
+                  <Card className="bg-zinc-900/60 border-zinc-800/60">
+                    <CardContent className="space-y-4 p-4">
+                      <div>
+                        <h3 className="text-lg font-semibold text-zinc-100">Camera Configuration</h3>
+                        <p className="text-xs text-zinc-400">Frame rate, exposure, and clarity tuning for the perception stack.</p>
+                      </div>
+                      <div className="space-y-4">
+                        <label className="flex flex-col gap-2">
+                          <span className="text-xs uppercase tracking-wide text-zinc-400">Resolution</span>
+                          <select value={state.settings.cameraResolution} onChange={(e)=>{
+                            updateSettings({ cameraResolution: e.target.value });
+                            push({ type: "param", key: "camera_resolution", value: e.target.value });
+                          }} className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/80 focus:outline-none">
+                            {["1920x1080","1280x720","1024x576","640x480"].map(res => <option key={res} value={res}>{res}</option>)}
+                          </select>
+                        </label>
+                        <div>
+                          <div className="flex items-center justify-between text-xs text-zinc-400"><span>Exposure</span><span>{state.settings.cameraExposure}%</span></div>
+                          <Slider key={sliderKey("exposure", state.settings.cameraExposure)} defaultValue={[state.settings.cameraExposure]} min={0} max={100} step={5} onValueChange={(v)=>{
+                            updateSettings({ cameraExposure: v[0] });
+                            push({ type: "param", key: "camera_exposure", value: v[0] });
+                          }}/>
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between text-xs text-zinc-400"><span>Brightness</span><span>{state.settings.cameraBrightness}%</span></div>
+                          <Slider key={sliderKey("brightness", state.settings.cameraBrightness)} defaultValue={[state.settings.cameraBrightness]} min={0} max={100} step={5} onValueChange={(v)=>{
+                            updateSettings({ cameraBrightness: v[0] });
+                            push({ type: "param", key: "camera_brightness", value: v[0] });
+                          }}/>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </section>
+              </div>
+            </TabsContent>
+            <TabsContent value="models" className="h-full overflow-y-auto">
+              <div className="space-y-6 pb-8 pr-1">
+                <section>
+                  <Card className="bg-zinc-900/60 border-zinc-800/60">
+                    <CardContent className="space-y-4 p-4">
+                      <div>
+                        <h3 className="text-lg font-semibold text-zinc-100">LLM Runtime</h3>
+                        <p className="text-xs text-zinc-400">All controls that shape cognition stay together for clarity.</p>
+                      </div>
+                      <div className="space-y-4">
+                        <div className="space-y-2">
+                          <span className="text-xs uppercase tracking-wide text-zinc-400">Conditional Presets</span>
+                          <div className="grid gap-2 md:grid-cols-3">
+                            {performancePresets.map(preset => {
+                              const active = state.settings.modelStrategy === preset.id;
+                              const presetClasses = active
+                                ? "border-emerald-500/60 bg-emerald-500/10"
+                                : "border-zinc-800/70 bg-zinc-950/40 hover:border-emerald-500/40";
+                              const buttonClasses = "rounded-xl border px-3 py-3 text-left transition " + presetClasses;
+                              return (
+                                <button
+                                  key={preset.id}
+                                  type="button"
+                                  onClick={() => applyPreset(preset.id)}
+                                  className={buttonClasses}
+                                >
+                                  <div className="flex items-center justify-between text-sm font-semibold text-zinc-100">
+                                    {preset.label}
+                                    {active && (
+                                      <Badge className="bg-emerald-500/20 text-emerald-100 border border-emerald-400/30">Active</Badge>
+                                    )}
+                                  </div>
+                                  <p className="mt-1 text-xs text-zinc-400">{preset.description}</p>
+                                  <div className="mt-2 flex flex-wrap gap-1">
+                                    {preset.conditions.map(condition => (
+                                      <Badge
+                                        key={condition}
+                                        className="bg-zinc-900/70 text-zinc-300 border border-zinc-800/70"
+                                      >
+                                        {condition}
+                                      </Badge>
+                                    ))}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {state.settings.modelStrategy === "custom" && (
+                            <p className="text-xs text-amber-300/80">
+                              Using custom model paths. Presets will overwrite your manual configuration.
+                            </p>
+                          )}
+                        </div>
+                        <div className="space-y-3">
+                          <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-3">
+                            <span className="flex-1 text-xs uppercase tracking-wide text-zinc-400">Model Directory</span>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                onClick={handleModelRescan}
+                                disabled={modelScanPending || !modelDirectory.trim()}
+                                className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-60"
+                              >
+                                {modelScanPending ? "Scanning…" : "Rescan"}
+                              </Button>
+                            </div>
+                          </div>
+                          <FilePathInput
+                            value={modelDirectory}
+                            onChange={val => updateSettings({ modelDirectory: val })}
+                            onCommit={handleModelDirectoryCommit}
+                            allowDirectories
+                            placeholder="/models/llm"
+                          />
+                          {modelScanError ? (
+                            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                              {modelScanError}
+                            </div>
+                          ) : null}
+                          <div className="space-y-2">
+                            {modelScanPending ? (
+                              <div className="text-xs text-zinc-400">Scanning directory for .gguf models…</div>
+                            ) : catalogEntries.length === 0 ? (
+                              <div className="rounded-lg border border-zinc-800/60 bg-zinc-950/60 px-3 py-3 text-xs text-zinc-500">
+                                No .gguf models discovered yet. Select a directory and rescan to populate the catalog.
+                              </div>
+                            ) : (
+                              catalogEntries.map(entry => {
+                                const base = modelDirectory.trim();
+                                const resolved = entry.path && entry.path.length > 0
+                                  ? entry.path
+                                  : base
+                                    ? `${base.replace(/[\\/]+$/, "")}/${entry.name}`
+                                    : entry.name;
+                                const normalizedResolved = resolved.replace(/\\+/g, "/");
+                                const normalizedSelected = (selectedModelPath || "").replace(/\\+/g, "/");
+                                const isSelected = normalizedResolved === normalizedSelected;
+                                const buttonClass = isSelected
+                                  ? "border-emerald-500/60 bg-emerald-500/10"
+                                  : "border-zinc-800/70 bg-zinc-950/40 hover:border-emerald-500/30";
+                                return (
+                                  <button
+                                    key={entry.path || entry.name}
+                                    type="button"
+                                    onClick={() => handleModelSelect(entry)}
+                                    className={`w-full rounded-xl border px-3 py-3 text-left text-sm transition ${buttonClass}`}
+                                  >
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="space-y-1">
+                                        <div className="text-sm font-semibold text-zinc-100 truncate">{entry.name}</div>
+                                        <div className="max-w-[240px] truncate text-[11px] text-zinc-500">{entry.path || resolved}</div>
+                                      </div>
+                                      <div className="space-y-1 text-right">
+                                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${MODEL_TYPE_STYLES[entry.type]}`}>
+                                          {MODEL_TYPE_LABEL[entry.type]}
+                                        </span>
+                                        <div className="text-[11px] text-zinc-400">{entry.sizeLabel}</div>
+                                      </div>
+                                    </div>
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+                        <div className="space-y-3">
+                          <label className="flex flex-col gap-2">
+                            <span className="text-xs uppercase tracking-wide text-zinc-400">Conversation Model</span>
+                            <FilePathInput
+                              value={state.settings.llmModelPath}
+                              onChange={val => updateSettings({ llmModelPath: val })}
+                              onCommit={createModelCommitHandler("llmModelPath", "llm_model_path", "Switching conversation model")}
+                              accept={[".gguf"]}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-2">
+                            <span className="text-xs uppercase tracking-wide text-zinc-400">Vision Model</span>
+                            <FilePathInput
+                              value={state.settings.visionModelPath}
+                              onChange={val => updateSettings({ visionModelPath: val })}
+                              onCommit={createModelCommitHandler("visionModelPath", "vision_model_path", "Switching vision model")}
+                              accept={[".bin", ".onnx"]}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-2">
+                            <span className="text-xs uppercase tracking-wide text-zinc-400">Audio Model</span>
+                            <FilePathInput
+                              value={state.settings.audioModelPath}
+                              onChange={val => updateSettings({ audioModelPath: val })}
+                              onCommit={createModelCommitHandler("audioModelPath", "audio_model_path", "Switching audio model")}
+                              accept={[".onnx", ".bin"]}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-2">
+                            <span className="text-xs uppercase tracking-wide text-zinc-400">STT Model</span>
+                            <FilePathInput
+                              value={state.settings.sttModelPath}
+                              onChange={val => updateSettings({ sttModelPath: val })}
+                              onCommit={createModelCommitHandler("sttModelPath", "stt_model_path", "Switching speech-to-text model")}
+                              allowDirectories
+                            />
+                          </label>
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between text-xs text-zinc-400">
+                            <span>Temperature</span>
+                            <span>{state.settings.llmTemperature.toFixed(2)}</span>
+                          </div>
+                          <Slider
+                            key={sliderKey("temp", Math.round(state.settings.llmTemperature * 100))}
+                            defaultValue={[Math.round(state.settings.llmTemperature * 100)]}
+                            min={0}
+                            max={120}
+                            step={5}
+                            onValueChange={(v)=>{
+                              const val = Math.round((v[0] / 100) * 100) / 100;
+                              updateSettings({ llmTemperature: val });
+                              push({ type: "param", key: "llm_temperature", value: val });
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between text-xs text-zinc-400">
+                            <span>Max Tokens</span>
+                            <span>{state.settings.llmMaxTokens}</span>
+                          </div>
+                          <Slider
+                            key={sliderKey("maxtok", state.settings.llmMaxTokens)}
+                            defaultValue={[state.settings.llmMaxTokens]}
+                            min={512}
+                            max={8192}
+                            step={256}
+                            onValueChange={(v)=>{
+                              updateSettings({ llmMaxTokens: v[0] });
+                              push({ type: "param", key: "llm_max_tokens", value: v[0] });
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </section>
+              </div>
+            </TabsContent>
+          </div>
+        </Tabs>
       </div>
     </div>
   );
