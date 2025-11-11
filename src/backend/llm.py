@@ -218,12 +218,46 @@ class LocalLLM:
         cleaned = re.sub(r"(?i)\b(?:assistant|nomous|ai|system|bot)\s*:\s*", "", cleaned)
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
 
-        # Limit to at most two sentences to avoid rambling
-        sentences = re.split(r"(?<=[.!?])\s+", cleaned)
-        if len(sentences) > 2:
-            cleaned = " ".join(sentences[:2]).strip()
+        # Remove meta-instruction sentences that echo internal guidance
+        raw_sentences = re.split(r"(?<=[.!?])\s+|\n+", cleaned)
+        filtered_sentences = []
+        meta_keywords = [
+            "tool", "instruction", "decision", "milestone", "memory",
+            "system prompt", "thinking prompt", "tool_call", "respond with",
+            "visual observation", "available tools", "use them", "okay,",
+        ]
+        for sentence in raw_sentences:
+            stripped = sentence.strip()
+            if not stripped:
+                continue
+            lower = stripped.lower()
+            if any(keyword in lower for keyword in meta_keywords):
+                continue
+            if re.match(r"^[A-Z\s]{3,}:", stripped):
+                continue
+            filtered_sentences.append(stripped)
 
-        return cleaned
+        if not filtered_sentences:
+            for sentence in raw_sentences:
+                stripped = sentence.strip()
+                if not stripped:
+                    continue
+                lower = stripped.lower()
+                if ":" in stripped:
+                    continue
+                if any(keyword in lower for keyword in ("tool", "instruction", "system")):
+                    continue
+                filtered_sentences.append(stripped)
+                break
+
+        if not filtered_sentences:
+            filtered_sentences = [cleaned]
+
+        # Limit to at most two sentences to avoid rambling
+        if len(filtered_sentences) > 2:
+            filtered_sentences = filtered_sentences[:2]
+
+        return " ".join(filtered_sentences).strip()
 
     async def stop(self):
         logger.info("LLM stopping...")
