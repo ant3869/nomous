@@ -1133,7 +1133,7 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect, zoom = 1 }: Memor
   }, [nodes]);
 
   const zoomTransform = React.useMemo(() => {
-    if (!zoom || Math.abs(zoom - 1) < 0.001) {
+    if (Math.abs(zoom - 1) < 0.001) {
       return undefined;
     }
     const cx = layout.width / 2;
