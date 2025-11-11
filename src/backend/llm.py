@@ -219,7 +219,7 @@ class LocalLLM:
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
 
         # Remove meta-instruction sentences that echo internal guidance
-        raw_sentences = re.split(r"(?<=[.!?])\s+|\n+", cleaned)
+        raw_sentences = re.split(r"(?<=[.!?])\s+", cleaned)
         filtered_sentences = []
         meta_keywords = [
             "tool", "instruction", "decision", "milestone", "memory",
