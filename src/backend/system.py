@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import platform
 import shutil
@@ -11,7 +12,6 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
 
 import psutil
-import torch
 from pynvml import (
     NVMLError,
     NVML_TEMPERATURE_GPU,
@@ -24,6 +24,23 @@ from pynvml import (
     nvmlInit,
     nvmlShutdown,
 )
+
+
+logger = logging.getLogger(__name__)
+
+try:  # pragma: no cover - success path depends on local environment
+    import torch
+except Exception as exc:  # pragma: no cover - exercised in unit tests via monkeypatch
+    torch = None  # type: ignore[assignment]
+    TORCH_AVAILABLE = False
+    TORCH_IMPORT_ERROR: Optional[Exception] = exc
+    logger.warning(
+        "PyTorch import failed (%s). GPU metrics will be unavailable.",
+        exc,
+    )
+else:
+    TORCH_AVAILABLE = True
+    TORCH_IMPORT_ERROR = None
 
 
 @dataclass
@@ -46,6 +63,18 @@ def detect_compute_device() -> ComputeDeviceInfo:
 
     backend = "CPU"
     name = platform.processor() or "CPU"
+    if not TORCH_AVAILABLE or torch is None:
+        import_error = TORCH_IMPORT_ERROR
+        error_detail = f": {import_error}" if import_error else ""
+        reason = f"PyTorch unavailable{error_detail}. Falling back to CPU monitoring only."
+        return ComputeDeviceInfo(
+            backend=backend,
+            name=name,
+            reason=reason,
+            cuda_version=None,
+            gpu_count=0,
+        )
+
     reason = "No CUDA-capable GPU detected; defaulting to CPU."
     cuda_version: Optional[str] = None
     gpu_count = 0
