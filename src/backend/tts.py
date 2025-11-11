@@ -6,9 +6,12 @@ import os
 import time
 import asyncio
 import logging
+import platform
+import shutil
 import wave
 import audioop
 from pathlib import Path
+from typing import List, Optional
 from .utils import msg_speak, msg_event
 
 logger = logging.getLogger(__name__)
@@ -106,30 +109,68 @@ class PiperTTS:
     async def set_voice_path(self, path: str):
         await self.set_voice(path)
 
+    def _get_play_command(self, wav_path: str) -> Optional[List[str]]:
+        """Determine the best available playback command for the current OS."""
+
+        system = platform.system()
+
+        if system == "Windows":
+            powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+            if powershell:
+                return [
+                    powershell,
+                    "-c",
+                    f"(New-Object Media.SoundPlayer '{wav_path}').PlaySync()"
+                ]
+            logger.debug("PowerShell not available for audio playback")
+            return None
+
+        if system == "Darwin":  # macOS
+            afplay = shutil.which("afplay")
+            if afplay:
+                return [afplay, wav_path]
+            logger.debug("afplay command not available on macOS")
+            return None
+
+        # Linux or other Unix-like systems
+        for candidate in ("paplay", "aplay", "ffplay"):
+            path = shutil.which(candidate)
+            if path:
+                if candidate == "ffplay":
+                    return [path, "-nodisp", "-autoexit", wav_path]
+                return [path, wav_path]
+
+        logger.debug("No suitable audio playback command found on this system")
+        return None
+
     async def _play_audio(self, wav_path: str):
-        """Play audio file using Windows sound API."""
+        """Play audio file using a platform-appropriate command."""
+        cmd = self._get_play_command(wav_path)
+
+        if not cmd:
+            logger.warning("Audio playback skipped: no supported player found")
+            return
+
+        logger.debug("Using playback command: %s", cmd)
+
         try:
-            # Use PowerShell to play audio (works on Windows without extra dependencies)
-            play_cmd = [
-                "powershell", "-c",
-                f"(New-Object Media.SoundPlayer '{wav_path}').PlaySync()"
-            ]
-            
             proc = await asyncio.create_subprocess_exec(
-                *play_cmd,
+                *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL
             )
-            
+
             await asyncio.wait_for(proc.wait(), timeout=30.0)
             logger.info(f"Audio playback completed: {os.path.basename(wav_path)}")
-            
+
         except asyncio.TimeoutError:
             logger.warning("Audio playback timed out")
             try:
                 proc.kill()
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to kill audio playback process: {e}")
+        except FileNotFoundError:
+            logger.warning("Audio playback command disappeared during execution")
         except Exception as e:
             logger.error(f"Error playing audio: {e}")
 
