@@ -224,14 +224,18 @@ class LocalLLM:
         meta_keywords = [
             "tool", "instruction", "decision", "milestone", "memory",
             "system prompt", "thinking prompt", "tool_call", "respond with",
-            "visual observation", "available tools", "use them", "okay,",
+            "visual observation", "available tools", "use them",
         ]
         for sentence in raw_sentences:
             stripped = sentence.strip()
             if not stripped:
                 continue
             lower = stripped.lower()
+            # Filter meta keywords by substring
             if any(keyword in lower for keyword in meta_keywords):
+                continue
+            # Filter sentences starting with "okay," (case-insensitive, at sentence start)
+            if re.match(r"^(okay,)\b", stripped, re.IGNORECASE):
                 continue
             if re.match(r"^[A-Z\s]{3,}:", stripped):
                 continue
