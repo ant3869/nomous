@@ -63,7 +63,7 @@ def detect_compute_device() -> ComputeDeviceInfo:
 
     backend = "CPU"
     name = platform.processor() or "CPU"
-    if not TORCH_AVAILABLE or torch is None:
+    if not TORCH_AVAILABLE:
         import_error = TORCH_IMPORT_ERROR
         error_detail = f": {import_error}" if import_error else ""
         reason = f"PyTorch unavailable{error_detail}. Falling back to CPU monitoring only."
