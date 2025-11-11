@@ -313,9 +313,9 @@ class CameraLoop:
             ema = (1 - alpha) * ema + alpha * brightness_sample
         self._brightness_ema = ema
 
-        brightness = (brightness_sample + ema) / 2.0
+        brightness = ema
         logger.debug(
-            "Frame brightness raw=%.1f ema=%.1f combined=%.1f",
+            "Frame brightness raw=%.1f ema=%.1f used=%.1f",
             brightness_sample,
             ema,
             brightness,
