@@ -4,6 +4,7 @@
 
 import base64
 import json
+import os
 import asyncio
 import logging
 from typing import Optional
@@ -19,9 +20,8 @@ class AudioSTT:
         self.rate = int(cfg["audio"]["sample_rate"])
 
         self.model_path = cfg["paths"]["vosk_model_dir"]
-        logger.info(f"Loading Vosk model from {self.model_path}")
-        self.model = Model(self.model_path)
-        self.rec = KaldiRecognizer(self.model, self.rate)
+        self.model: Optional[Model] = None
+        self.rec: Optional[KaldiRecognizer] = None
 
         self.enabled = True
         self._lock = asyncio.Lock()
@@ -32,7 +32,7 @@ class AudioSTT:
         self._min_final_chars = 3
         self._update_thresholds()
 
-        logger.info("AudioSTT initialized successfully")
+        self._load_model()
 
     def set_llm(self, llm):
         """Set LLM reference for automatic triggering."""
@@ -64,6 +64,26 @@ class AudioSTT:
             self._min_partial_chars = 4
             self._min_final_chars = 4
 
+    def _load_model(self):
+        """Load the default Vosk model, disabling STT if it fails."""
+        model_path = self.model_path
+
+        if not os.path.isdir(model_path):
+            logger.error(f"Vosk model directory not found: {model_path}")
+            self.enabled = False
+            return
+
+        try:
+            logger.info(f"Loading Vosk model from {model_path}")
+            self.model = Model(model_path)
+            self.rec = KaldiRecognizer(self.model, self.rate)
+            logger.info("AudioSTT initialized successfully")
+        except Exception as exc:
+            logger.error(f"Failed to load Vosk model: {exc}")
+            self.model = None
+            self.rec = None
+            self.enabled = False
+
     async def reload_model(self, model_path: str):
         """Hot-reload the STT acoustic model."""
         model_path = model_path.strip()
@@ -71,6 +91,9 @@ class AudioSTT:
             raise ValueError("Model path cannot be empty")
 
         async with self._lock:
+            if not os.path.isdir(model_path):
+                raise FileNotFoundError(f"Model path does not exist: {model_path}")
+
             logger.info(f"Reloading Vosk model from {model_path}")
             new_model = await asyncio.to_thread(Model, model_path)
             new_recognizer = KaldiRecognizer(new_model, self.rate)
@@ -86,7 +109,11 @@ class AudioSTT:
         """Process audio chunk and automatically trigger LLM on speech."""
         if not self.enabled:
             return
-        
+
+        if not self.model or not self.rec:
+            logger.debug("STT feed skipped: model not loaded")
+            return
+
         if rate != self.rate:
             logger.warning(f"Sample rate mismatch: expected {self.rate}, got {rate}")
             return
@@ -103,8 +130,9 @@ class AudioSTT:
         async with self._lock:
             try:
                 # Check if we have a complete utterance
-                if self.rec.AcceptWaveform(raw):
-                    result = json.loads(self.rec.Result())
+                recognizer = self.rec
+                if recognizer.AcceptWaveform(raw):
+                    result = json.loads(recognizer.Result())
                     text = (result.get("text") or "").strip()
 
                     words = [w for w in text.split() if w]
@@ -125,7 +153,7 @@ class AudioSTT:
                             self._min_final_chars,
                         )
                 else:
-                    partial_result = json.loads(self.rec.PartialResult())
+                    partial_result = json.loads(recognizer.PartialResult())
                     partial = partial_result.get("partial", "").strip()
 
                     if partial and len(partial) >= self._min_partial_chars:
