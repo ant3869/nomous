@@ -167,8 +167,8 @@ class PiperTTS:
             logger.warning("Audio playback timed out")
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to kill audio playback process: {e}")
         except FileNotFoundError:
             logger.warning("Audio playback command disappeared during execution")
         except Exception as e:
