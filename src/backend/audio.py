@@ -92,7 +92,11 @@ class AudioSTT:
 
         async with self._lock:
             if not os.path.isdir(model_path):
-                raise FileNotFoundError(f"Model path does not exist: {model_path}")
+                logger.error(f"Vosk model directory not found: {model_path}")
+                self.enabled = False
+                self.model = None
+                self.rec = None
+                return
 
             logger.info(f"Reloading Vosk model from {model_path}")
             new_model = await asyncio.to_thread(Model, model_path)
