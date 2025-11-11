@@ -9,6 +9,7 @@ import asyncio
 import logging
 from pathlib import Path
 from queue import SimpleQueue, Empty
+from typing import Optional
 from .utils import to_data_url, msg_event, msg_image
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ class CameraLoop:
         self._running = False
         self._command_queue = SimpleQueue()
         self._brightness_scale = 1.0
+        self._brightness_ema: Optional[float] = None
 
         # Vision analysis
         self.llm = None
@@ -292,24 +294,48 @@ class CameraLoop:
         """Generate detailed description of the frame."""
         height, width = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Brightness (0-255 scale, adjusted thresholds for more accurate detection)
-        brightness = gray.mean()
-        logger.debug(f"Frame brightness: {brightness:.1f}")
-        
-        if brightness < 40:
+
+        # Estimate brightness using HSV value channel for more robust lighting detection.
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        value_channel = hsv[:, :, 2]
+
+        if self._numpy_available and np is not None:
+            brightness_sample = float(value_channel.mean())
+        else:
+            brightness_sample = float(cv2.mean(value_channel)[0])
+
+        # Smooth readings to avoid sudden jumps when exposure changes frame-to-frame.
+        ema = self._brightness_ema
+        if ema is None:
+            ema = brightness_sample
+        else:
+            alpha = 0.18  # slow updates to better represent ambient light
+            ema = (1 - alpha) * ema + alpha * brightness_sample
+        self._brightness_ema = ema
+
+        brightness = (brightness_sample + ema) / 2.0
+        logger.debug(
+            "Frame brightness raw=%.1f ema=%.1f combined=%.1f",
+            brightness_sample,
+            ema,
+            brightness,
+        )
+
+        if brightness < 45:
             light = "very dark"
-        elif brightness < 85:
+        elif brightness < 75:
             light = "dark"
-        elif brightness < 120:
+        elif brightness < 115:
             light = "dimly lit"
-        elif brightness < 170:
+        elif brightness < 155:
+            light = "moderately lit"
+        elif brightness < 195:
             light = "well lit"
-        elif brightness < 210:
+        elif brightness < 230:
             light = "bright"
         else:
             light = "very bright"
-        
+
         # Motion
         if motion_level > 40:
             activity = "with noticeable movement"
@@ -332,6 +358,8 @@ class CameraLoop:
             except Exception as e:
                 logger.debug(f"Face detection error: {e}")
         
+        complexity = self._analyze_complexity(gray)
+
         # Construct description
         description_bits = []
 
@@ -340,6 +368,8 @@ class CameraLoop:
             description_bits.append(f"in a {light} environment")
         else:
             description_bits.append(f"The space looks {light}")
+            if complexity in {"very detailed", "detailed"}:
+                description_bits.append(f"with {complexity} visuals")
 
         if motion_level > 5:
             description_bits.append(activity)
