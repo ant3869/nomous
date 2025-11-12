@@ -12,7 +12,7 @@ import wave
 import audioop
 from pathlib import Path
 from typing import List, Optional
-from .utils import msg_speak, msg_event
+from .utils import msg_event
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +266,6 @@ class PiperTTS:
         
         try:
             logger.info(f"Speaking: {text[:100]}...")
-            await self.bridge.post(msg_speak(text))
             
             # Run Piper process
             proc = await asyncio.create_subprocess_exec(
