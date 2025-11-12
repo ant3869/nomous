@@ -14,12 +14,19 @@ import pytest
 from src.backend.config import load_config
 
 
+def _loopback_fallback(host: str) -> str:
+    """
+    Normalize host to loopback if it is a wildcard or empty.
+    """
+    if host in {"0.0.0.0", "::", "", "*"}:
+        return "127.0.0.1"
+    return host
+
 def resolve_ws_uri() -> str:
     cfg = load_config()
     host = str(cfg.get("ws", {}).get("host", "127.0.0.1"))
     port = int(cfg.get("ws", {}).get("port", 8765))
-    if host in {"0.0.0.0", "::", "", "*"}:
-        host = "127.0.0.1"
+    host = _loopback_fallback(host)
     return f"ws://{host}:{port}"
 
 
