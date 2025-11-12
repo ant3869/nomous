@@ -155,7 +155,7 @@ class LocalLLM:
 
         auto_configured = False
 
-        # Normalise string inputs like "auto" or numeric text.
+        # Normalize string inputs like "auto" or numeric text.
         if isinstance(raw_value, str):
             stripped = raw_value.strip().lower()
             if stripped in {"auto", "detect", "auto_full", "all"}:
