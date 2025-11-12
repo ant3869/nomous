@@ -239,7 +239,7 @@ class LocalLLM:
             raise FileNotFoundError(message)
 
         if n_gpu_layers != 0:
-            # Ensure llama.cpp initialises its CUDA kernels when available.
+            # Ensure llama.cpp initializes its CUDA kernels when available.
             os.environ.setdefault("LLAMA_CUBLAS", "1")
             human_layers = "all" if n_gpu_layers < 0 else str(n_gpu_layers)
             logger.info(f"GPU acceleration enabled: offloading {human_layers} layer(s)")
