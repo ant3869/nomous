@@ -691,17 +691,13 @@ class LocalLLM:
                     for call in tool_calls:
                         tool_name = call.get("tool")
                         args = call.get("args", {})
-                        result = await self.tools.execute_tool(tool_name, args)
-                        tool_results.append({
-                            "tool": tool_name,
-                            "result": result
-                        })
-                        
-                        # Send tool result to UI
+                        execution = await self.tools.execute_tool(tool_name, args)
+                        tool_results.append(execution)
+
+                        # Send tool result to UI with full metadata
                         await self.bridge.post({
                             "type": "tool_result",
-                            "tool": tool_name,
-                            "result": result
+                            **execution
                         })
                     
                     # Remove tool calls from response for speaking
