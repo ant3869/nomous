@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -519,27 +520,96 @@ def update_config_for_gpu(use_gpu):
     with open(config_path, 'w') as f:
         yaml.dump(config, f)
 
-def is_port_in_use(port):
-    """Check if a port is in use"""
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.bind(('127.0.0.1', port))
-            return False
-        except socket.error:
+def _loopback_fallback(host: str) -> str:
+    """Return a loopback-safe host when services listen on all interfaces."""
+
+    if not host:
+        return "127.0.0.1"
+    candidate = host.strip()
+    if candidate in {"0.0.0.0", "::", "*"}:
+        return "127.0.0.1"
+    return candidate
+
+
+def _display_host(host: str) -> str:
+    """Return a host string suitable for user-facing output."""
+
+    candidate = host.strip() if host else "127.0.0.1"
+    if candidate in {"127.0.0.1", "0.0.0.0", "::", "*"}:
+        return "localhost"
+    return candidate
+
+
+def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Return ``True`` if a TCP connection can be made to ``host:port``."""
+
+    target_host = _loopback_fallback(host)
+    try:
+        with socket.create_connection((target_host, port), timeout=0.5):
             return True
+    except OSError:
+        return False
+
+
+def find_available_port(preferred: int, host: str = "127.0.0.1", attempts: int = 20) -> int:
+    """Return an available TCP port, preferring ``preferred`` when possible.
+
+    This function attempts to bind to the port before returning it, reducing
+    the race window where another process could claim the port.
+    """
+
+    target_host = _loopback_fallback(host)
+    port = preferred
+    for _ in range(max(1, attempts)):
+        if not is_port_in_use(port, target_host):
+            # Try to bind to the port to ensure it's truly available
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind((target_host, port))
+                    # Successfully bound, release immediately
+                    return port
+            except OSError:
+                pass  # Port was taken between check and bind, try next
+        port += 1
+
+    # Fallback: bind to a random available port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((target_host, 0))
+        sock.listen(1)
+        return sock.getsockname()[1]
+
 
 def wait_for_backend(ws_host, ws_port, timeout=30):
     """Wait for backend to be ready"""
     start_time = time.time()
+    check_host = _loopback_fallback(ws_host)
     logger.info("Waiting for backend service on ws://%s:%s", ws_host, ws_port)
     while time.time() - start_time < timeout:
-        if is_port_in_use(ws_port):
+        if is_port_in_use(ws_port, check_host):
             print_success(f"Backend is ready at ws://{ws_host}:{ws_port}")
             return True
         time.sleep(1)
         print_status("Waiting for backend to start...", style="bold cyan")
     logger.error("Backend did not start within %s seconds", timeout)
+    return False
+
+
+def wait_for_frontend(host: str, port: int, timeout: int = 45) -> bool:
+    """Wait for the Vite development server to accept connections."""
+
+    start_time = time.time()
+    check_host = _loopback_fallback(host)
+    display_host = _display_host(host)
+    logger.info("Waiting for frontend dev server on http://%s:%s", host, port)
+    while time.time() - start_time < timeout:
+        if is_port_in_use(port, check_host):
+            print_success(f"Frontend is ready at http://{display_host}:{port}")
+            return True
+        time.sleep(1)
+        print_status("Waiting for frontend to start...", style="bold cyan")
+    logger.error("Frontend did not start within %s seconds", timeout)
     return False
 
 def cleanup_processes(processes):
@@ -617,15 +687,39 @@ def main():
     # Load configuration
     try:
         config = load_config()
-        ws_host = config['ws']['host']
-        ws_port = config['ws']['port']
+        ws_host = str(config['ws']['host'])
+        ws_port = int(config['ws']['port'])
     except Exception as e:
         print_error(f"Error loading configuration: {e}")
         logger.exception("Failed to load configuration")
         return 1
 
+    ws_env_host = _loopback_fallback(ws_host)
+    ws_display_host = _display_host(ws_host)
+
+    raw_frontend_host = (
+        os.environ.get("NOMOUS_FRONTEND_HOST")
+        or os.environ.get("VITE_DEV_SERVER_HOST")
+        or "127.0.0.1"
+    )
+    frontend_host = raw_frontend_host.strip() or "127.0.0.1"
+    frontend_display_host = _display_host(frontend_host)
+
+    preferred_port = (
+        os.environ.get("NOMOUS_FRONTEND_PORT")
+        or os.environ.get("VITE_DEV_SERVER_PORT")
+        or "5173"
+    )
+    try:
+        preferred_frontend_port = int(preferred_port)
+    except ValueError:
+        preferred_frontend_port = 5173
+
+    frontend_port = find_available_port(preferred_frontend_port, frontend_host)
+    frontend_url = f"http://{frontend_display_host}:{frontend_port}"
+
     processes = []
-    
+
     try:
         # Start backend
         print_status("Starting backend server...")
@@ -647,18 +741,32 @@ def main():
         # Start frontend
         print_status("Starting frontend development server...")
         npm_cmd = 'npm.cmd' if sys.platform == 'win32' else 'npm'
+        frontend_env = os.environ.copy()
+        frontend_env["VITE_WS_PROXY_TARGET"] = f"ws://{ws_env_host}:{ws_port}"
+        frontend_env["VITE_DEFAULT_WS_URL"] = f"ws://{ws_env_host}:{ws_port}/ws"
+        frontend_env["VITE_DEV_SERVER_PORT"] = str(frontend_port)
+        frontend_env["VITE_DEV_SERVER_HOST"] = frontend_host
+
+        frontend_command = [
+            npm_cmd,
+            'run',
+            'dev',
+            '--',
+        ]
         frontend_proc = subprocess.Popen(
-            [npm_cmd, 'run', 'dev'],
+            frontend_command,
+            env=frontend_env,
             creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
         )
         processes.append(frontend_proc)
         logger.info("Frontend process started with PID %s", frontend_proc.pid)
 
-        # Wait a moment for the dev server to start
-        time.sleep(5)
-        
+        if not wait_for_frontend(frontend_host, frontend_port):
+            print_warning(
+                "Frontend development server did not report ready status within the timeout"
+            )
+
         # Open browser
-        frontend_url = "http://localhost:5173"  # Default Vite dev server port
         print_status(f"Opening browser to {frontend_url}")
         webbrowser.open(frontend_url)
         logger.info("Browser open requested for %s", frontend_url)
@@ -667,13 +775,13 @@ def main():
             "[bold green]Services are running![/]\n"
             "• Press [bold]Ctrl+C[/] to stop all services\n"
             f"• Frontend: [bold blue]{frontend_url}[/]\n"
-            f"• Backend: [bold blue]ws://{ws_host}:{ws_port}[/]",
+            f"• Backend: [bold blue]ws://{ws_display_host}:{ws_port}[/]",
             border_style="green"
         ))
         logger.info(
             "Services running • Frontend: %s • Backend: ws://%s:%s",
             frontend_url,
-            ws_host,
+            ws_display_host,
             ws_port,
         )
 

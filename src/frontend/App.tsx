@@ -134,6 +134,10 @@ const TARGET_SAMPLE_RATE = 16000;
 const MAX_CHAT_HISTORY = 200;
 const STORAGE_SETTINGS_KEY = "nomous.settings";
 const STORAGE_WS_KEY = "nomous.ws";
+const ENV_DEFAULT_WS_URL = typeof import.meta.env.VITE_DEFAULT_WS_URL === "string"
+  ? import.meta.env.VITE_DEFAULT_WS_URL.trim()
+  : "";
+const FALLBACK_WS_URL = ENV_DEFAULT_WS_URL.length > 0 ? ENV_DEFAULT_WS_URL : "ws://localhost:8765";
 
 function clamp01(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -456,12 +460,37 @@ function resolveStoredSettings(): ControlSettings {
   return mergeSettings({ ...DEFAULT_CONTROL_SETTINGS }, stored);
 }
 
+function computeDefaultWsUrl(): string {
+  if (typeof window === "undefined") {
+    return FALLBACK_WS_URL;
+  }
+  // Use window.location.host only in development mode, otherwise fallback to documented backend address
+  const isDev =
+    (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.MODE === "development") ||
+    (typeof process !== "undefined" && process.env && process.env.NODE_ENV === "development");
+  if (isDev) {
+    const { protocol, host } = window.location;
+    if (typeof host === "string" && host.trim().length > 0) {
+      const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
+      return `${wsProtocol}//${host}/ws`;
+    }
+  }
+  // In production, fallback to documented backend address
+  return FALLBACK_WS_URL;
+}
+
 function resolveInitialUrl(): string {
   if (typeof window === "undefined") {
-    return "ws://localhost:8765";
+    return FALLBACK_WS_URL;
   }
   const stored = window.localStorage.getItem(STORAGE_WS_KEY);
-  return stored && stored.trim().length > 0 ? stored : "ws://localhost:8765";
+  if (stored && stored.trim().length > 0) {
+    return stored;
+  }
+  if (ENV_DEFAULT_WS_URL.length > 0) {
+    return ENV_DEFAULT_WS_URL;
+  }
+  return computeDefaultWsUrl();
 }
 
 function createInitialState(): DashboardState {
