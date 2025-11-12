@@ -604,7 +604,7 @@ class LocalLLM:
                         await self.bridge.post(msg_token(total_tokens))
 
                         # Accumulate thought updates and emit complete sentences
-                        pending_thought += text.replace("\r", "")
+                        pending_thought += re.sub(r'\s+', ' ', text)
 
                         # Only process sentence detection if buffer is large enough or contains a terminator
                         if (
