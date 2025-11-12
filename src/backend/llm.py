@@ -714,8 +714,7 @@ class LocalLLM:
 
             if pending_thought.strip():
                 final_candidate = pending_thought.strip()
-                if final_candidate:
-                    spoken_segments.append(final_candidate)
+                spoken_segments.append(final_candidate)
                 await self.bridge.post({
                     "type": "thought",
                     "text": f"Generating: {final_candidate}",
