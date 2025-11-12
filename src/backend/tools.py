@@ -354,15 +354,22 @@ class ToolExecutor:
 
         logger.info("Executing tool: %s with args: %s", tool_name, validated_args)
 
-        start = time.perf_counter()
-        raw_result = tool.function(**validated_args)
-        if asyncio.iscoroutine(raw_result):
-            raw_result = await raw_result
-        duration_ms = (time.perf_counter() - start) * 1000
+        try:
+            start = time.perf_counter()
+            raw_result = tool.function(**validated_args)
+            if asyncio.iscoroutine(raw_result):
+                raw_result = await raw_result
+            duration_ms = (time.perf_counter() - start) * 1000
 
-        normalized_result = self._normalize_result(raw_result)
-        success = self._determine_success(normalized_result)
-        summary = self._summarize_execution(tool, normalized_result)
+            normalized_result = self._normalize_result(raw_result)
+            success = self._determine_success(normalized_result)
+            summary = self._summarize_execution(tool, normalized_result)
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - start) * 1000
+            logger.error("Tool execution failed: %s", exc, exc_info=True)
+            normalized_result = {"error": str(exc)}
+            success = False
+            summary = f"Execution error: {str(exc)}"
 
         payload = {
             "tool": tool.name,
