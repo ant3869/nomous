@@ -2673,6 +2673,7 @@ export default function App(){
   const windowSamples = Math.max(1, state.tokenWindow.length);
   const inboundPerSecond = totalInboundTokens / windowSamples;
   const outboundPerSecond = totalOutboundTokens / windowSamples;
+  const outboundPerMinute = outboundPerSecond * 60;
   const netTokenFlow = totalOutboundTokens - totalInboundTokens;
   const maxTokenBudget = state.settings.llmMaxTokens || 0;
   const latestTokenSample = state.tokenWindow[state.tokenWindow.length - 1] ?? { inTok: 0, outTok: 0 };
