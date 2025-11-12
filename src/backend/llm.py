@@ -366,7 +366,7 @@ class LocalLLM:
         instruction_prefixes = (
             "avoid ",
             "keep ",
-            "remember",
+            "remember ",
             "no ",
             "stay ",
             "first action",
