@@ -752,10 +752,6 @@ def main():
             'run',
             'dev',
             '--',
-            '--port',
-            str(frontend_port),
-            '--host',
-            frontend_host,
         ]
         frontend_proc = subprocess.Popen(
             frontend_command,
