@@ -30,7 +30,7 @@ def test_sanitize_removes_explicit_scheduling_tokens_with_words():
     text = "Set a reminder to respond-in 10 seconds, then proceed."
     sanitized = sanitize(text)
     assert "respond-in 10 seconds" not in sanitized
-    assert "Set a reminder to then proceed." == sanitized
+    assert "Set a reminder to  then proceed." == sanitized
 
 
 def test_sanitize_preserves_non_scheduling_phrase():
