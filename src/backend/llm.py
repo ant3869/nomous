@@ -454,7 +454,7 @@ class LocalLLM:
                 requested_tokens = self.max_tokens
 
             stream_limit = requested_tokens or self.failsafe_tokens
-            failsafe_limit = max(self.failsafe_tokens, stream_limit)
+            failsafe_limit = self.failsafe_tokens
             stream = self.model(
                 prompt,
                 max_tokens=stream_limit,
