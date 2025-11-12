@@ -743,7 +743,7 @@ def main():
         npm_cmd = 'npm.cmd' if sys.platform == 'win32' else 'npm'
         frontend_env = os.environ.copy()
         frontend_env["VITE_WS_PROXY_TARGET"] = f"ws://{ws_env_host}:{ws_port}"
-        frontend_env["VITE_DEFAULT_WS_URL"] = f"ws://{ws_env_host}:{ws_port}"
+        frontend_env["VITE_DEFAULT_WS_URL"] = f"ws://{ws_env_host}:{ws_port}/ws"
         frontend_env["VITE_DEV_SERVER_PORT"] = str(frontend_port)
         frontend_env["VITE_DEV_SERVER_HOST"] = frontend_host
 
