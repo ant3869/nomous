@@ -606,23 +606,28 @@ class LocalLLM:
                         # Accumulate thought updates and emit complete sentences
                         pending_thought += text.replace("\r", "")
 
-                        while True:
-                            match = re.search(r"(.+?)([.!?\n])", pending_thought, re.DOTALL)
-                            if not match:
-                                break
+                        # Only process sentence detection if buffer is large enough or contains a terminator
+                        if (
+                            len(pending_thought) >= 40 or
+                            re.search(r"[.!?\n]", pending_thought)
+                        ):
+                            while True:
+                                match = re.search(r"(.+?)([.!?\n])", pending_thought, re.DOTALL)
+                                if not match:
+                                    break
 
-                            sentence_body, terminator = match.groups()
-                            candidate = sentence_body.strip()
-                            if terminator != "\n":
-                                candidate = f"{candidate}{terminator}".strip()
+                                sentence_body, terminator = match.groups()
+                                candidate = sentence_body.strip()
+                                if terminator != "\n":
+                                    candidate = f"{candidate}{terminator}".strip()
 
-                            if candidate:
-                                await self.bridge.post({
-                                    "type": "thought",
-                                    "text": f"Generating: {candidate}",
-                                })
+                                if candidate:
+                                    await self.bridge.post({
+                                        "type": "thought",
+                                        "text": f"Generating: {candidate}",
+                                    })
 
-                            pending_thought = pending_thought[match.end():].lstrip()
+                                pending_thought = pending_thought[match.end():].lstrip()
 
                         if len(pending_thought.strip()) > 200:
                             candidate = pending_thought.strip()
