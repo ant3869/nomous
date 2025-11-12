@@ -59,7 +59,29 @@ class LocalLLM:
 
         self.temperature = float(cfg["llm"]["temperature"])
         self.top_p = float(cfg["llm"]["top_p"])
-        self.max_tokens = int(cfg["llm"].get("max_tokens", 256))
+
+        max_tokens_cfg = cfg["llm"].get("max_tokens")
+        self.max_tokens: int | None = None
+        if max_tokens_cfg is not None:
+            try:
+                parsed_max = int(max_tokens_cfg)
+            except (TypeError, ValueError):
+                logger.warning("Invalid max_tokens value %r; defaulting to unlimited", max_tokens_cfg)
+            else:
+                if parsed_max > 0:
+                    self.max_tokens = max(32, parsed_max)
+                else:
+                    logger.info("max_tokens <= 0 – treating as unlimited")
+
+        failsafe_cfg = cfg["llm"].get("failsafe_tokens", 4096)
+        try:
+            self.failsafe_tokens = max(128, int(failsafe_cfg))
+        except (TypeError, ValueError):
+            logger.warning("Invalid failsafe_tokens value %r; defaulting to 4096", failsafe_cfg)
+            self.failsafe_tokens = 4096
+
+        if self.max_tokens is not None:
+            self.failsafe_tokens = max(self.failsafe_tokens, self.max_tokens)
         self._reinforcement = 0.0
 
         # Autonomous behavior
@@ -272,8 +294,20 @@ class LocalLLM:
             self.temperature = float(temperature)
             logger.info(f"LLM temperature set to {self.temperature:.2f}")
         if max_tokens is not None:
-            self.max_tokens = max(32, int(max_tokens))
-            logger.info(f"LLM max tokens set to {self.max_tokens}")
+            try:
+                parsed_max = int(max_tokens)
+            except (TypeError, ValueError):
+                logger.warning("Invalid max_tokens update %r; ignoring", max_tokens)
+            else:
+                if parsed_max <= 0:
+                    self.max_tokens = None
+                    logger.info("LLM max tokens set to unlimited")
+                else:
+                    self.max_tokens = max(32, parsed_max)
+                    logger.info(f"LLM max tokens set to {self.max_tokens}")
+
+                if self.max_tokens is not None:
+                    self.failsafe_tokens = max(self.failsafe_tokens, self.max_tokens)
 
     async def reload_model(self, model_path: str):
         model_path = model_path.strip()
@@ -409,37 +443,60 @@ class LocalLLM:
             # Send thinking process to UI
             await self.bridge.post({"type": "thought", "text": f"Prompt: {prompt[:200]}..."})
 
-            max_tok = max_tokens or self.max_tokens
+            requested_tokens: int | None = None
+            if max_tokens is not None:
+                try:
+                    requested_tokens = max(32, int(max_tokens))
+                except (TypeError, ValueError):
+                    logger.warning("Invalid max_tokens override %r; ignoring", max_tokens)
+                    requested_tokens = None
+            elif self.max_tokens is not None:
+                requested_tokens = self.max_tokens
+
+            stream_limit = requested_tokens or self.failsafe_tokens
+            failsafe_limit = max(self.failsafe_tokens, stream_limit)
             stream = self.model(
                 prompt,
-                max_tokens=max_tok,
+                max_tokens=stream_limit,
                 temperature=self.temperature,
                 top_p=self.top_p,
                 stream=True,
                 stop=["Person:", "You:", "\n\n\n", "###", "User:"],
                 repeat_penalty=1.1
             )
-            
+
             tokens = []
             total_tokens = 0
-            
+
             for chunk in stream:
                 if chunk and "choices" in chunk and len(chunk["choices"]) > 0:
                     choice = chunk["choices"][0]
                     text = choice.get("text", "")
-                    
+
                     if choice.get("finish_reason") == "length":
                         logger.warning("Hit max token limit, response may be truncated")
-                    
+
                     if text:
                         tokens.append(text)
                         total_tokens += max(1, len(text) // 4)
                         await self.bridge.post(msg_token(total_tokens))
-                        
+
                         # Stream thinking chunks to UI
                         if len(tokens) % 3 == 0:  # Every 3 tokens
                             await self.bridge.post({"type": "thought", "text": f"Generating: {''.join(tokens[-9:])}"})
-            
+
+                        if total_tokens >= failsafe_limit:
+                            logger.warning(
+                                "Reached failsafe token limit (%s tokens), stopping generation",
+                                failsafe_limit
+                            )
+                            await self.bridge.post(
+                                msg_event(
+                                    f"generation stopped after {failsafe_limit} tokens to prevent runaway output"
+                                )
+                            )
+                            break
+
             response = "".join(tokens).strip()
 
             # Remove any role-play artifacts
@@ -482,7 +539,11 @@ class LocalLLM:
 
             if len(response) < 3 and total_tokens < min_tokens:
                 logger.warning(f"Response too short ({len(response)} chars, {total_tokens} tokens), regenerating...")
-                return await self._generate(prompt, max_tokens=max_tok, min_tokens=0)
+                return await self._generate(
+                    prompt,
+                    max_tokens=requested_tokens or self.max_tokens,
+                    min_tokens=0
+                )
 
             logger.info(f"Generated ({total_tokens} tokens): {response[:100]}")
             await self.bridge.post({"type": "thought", "text": f"Final: {response}"})
