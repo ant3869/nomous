@@ -379,17 +379,50 @@ async def test_tool_execution_history():
     """Test that tool execution is tracked."""
     llm = MockLLM()
     llm.recent_context = []
-    
+
     executor = ToolExecutor(llm)
-    
+
     # Execute a tool
     await executor.execute_tool("recall_recent_context", {"count": 1})
-    
+
     assert len(executor.execution_history) == 1
     assert executor.execution_history[0]["tool"] == "recall_recent_context"
     assert executor.execution_history[0]["success"] is True
-    
+
     print("✅ Tool execution history tracked correctly")
+
+
+@pytest.mark.asyncio
+async def test_tool_usage_stats_reports_top_level_error():
+    """Ensure analytics report uses top-level error message when available."""
+    llm = MockLLM()
+    executor = ToolExecutor(llm)
+
+    executor.execution_history = [
+        {
+            "tool": "search_memory",
+            "display_name": "Search Memory",
+            "category": "memory",
+            "timestamp": 1700000000000,
+            "duration_ms": 12.5,
+            "args": {"query": "test"},
+            "warnings": [],
+            "result": {},
+            "success": False,
+            "summary": "Search failed",
+            "error": "Top-level tool error",
+        }
+    ]
+
+    payload = await executor.execute_tool("get_tool_usage_stats", {})
+
+    assert payload["success"] is True
+    stats = payload["result"]
+    assert stats["total"] == 1
+    assert stats["recent_failures"], "Expected at least one recent failure entry"
+    assert stats["recent_failures"][0]["error"] == "Top-level tool error"
+
+    print("✅ Tool usage stats surface top-level errors correctly")
 
 
 @pytest.mark.asyncio
@@ -446,6 +479,7 @@ def run_tests():
         test_check_appropriate_response,
         test_get_current_capabilities,
         test_tool_execution_history,
+        test_tool_usage_stats_reports_top_level_error,
         test_invalid_tool_call,
         test_missing_required_parameter
     ]
