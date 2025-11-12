@@ -693,8 +693,7 @@ class LocalLLM:
 
                         if len(pending_thought.strip()) > 200:
                             candidate = pending_thought.strip()
-                            if candidate:
-                                spoken_segments.append(candidate)
+                            spoken_segments.append(candidate)
                             await self.bridge.post({
                                 "type": "thought",
                                 "text": f"Generating: {candidate}",
