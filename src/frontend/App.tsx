@@ -1082,6 +1082,33 @@ function QuickStatCard({
   );
 }
 
+function TokenStat({
+  label,
+  value,
+  helper,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  helper: string;
+  tone?: "neutral" | "positive" | "caution";
+}) {
+  const accent =
+    tone === "positive"
+      ? "text-emerald-300"
+      : tone === "caution"
+        ? "text-amber-300"
+        : "text-zinc-100";
+
+  return (
+    <div className="rounded-xl border border-zinc-800/60 bg-zinc-950/70 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">{label}</div>
+      <div className={`mt-1 text-lg font-semibold ${accent}`}>{value}</div>
+      <div className="text-[11px] text-zinc-500">{helper}</div>
+    </div>
+  );
+}
+
 interface MemoryGraphProps {
   nodes: MemoryNode[];
   edges: MemoryEdge[];
@@ -2610,6 +2637,34 @@ export default function App(){
   } = useNomousBridge();
   const st = statusMap[state.status];
   const tokenTotal = state.tokenWindow.reduce((a, p) => a + p.inTok + p.outTok, 0);
+  const totalInboundTokens = state.tokenWindow.reduce((acc, point) => acc + point.inTok, 0);
+  const totalOutboundTokens = state.tokenWindow.reduce((acc, point) => acc + point.outTok, 0);
+  const peakInboundTokens = state.tokenWindow.reduce((max, point) => Math.max(max, point.inTok), 0);
+  const peakOutboundTokens = state.tokenWindow.reduce((max, point) => Math.max(max, point.outTok), 0);
+  const windowSamples = Math.max(1, state.tokenWindow.length);
+  const inboundPerSecond = totalInboundTokens / windowSamples;
+  const outboundPerSecond = totalOutboundTokens / windowSamples;
+  const inboundPerMinute = inboundPerSecond * 60;
+  const outboundPerMinute = outboundPerSecond * 60;
+  const netTokenFlow = totalOutboundTokens - totalInboundTokens;
+  const maxTokenBudget = state.settings.llmMaxTokens || 0;
+  const latestTokenSample = state.tokenWindow[state.tokenWindow.length - 1] ?? { inTok: 0, outTok: 0 };
+  const recentTokenWarning = useMemo(
+    () => state.systemLines.find(line => /max token/i.test(line)),
+    [state.systemLines]
+  );
+  const netFlowTone: "neutral" | "positive" | "caution" = Math.abs(netTokenFlow) < 1
+    ? "neutral"
+    : netTokenFlow > 0
+      ? "positive"
+      : "caution";
+  const netFlowLabel = `${netTokenFlow >= 0 ? "+" : ""}${Math.round(netTokenFlow)}`;
+  const utilizationPercent = maxTokenBudget > 0 ? Math.min(100, (totalOutboundTokens / maxTokenBudget) * 100) : 0;
+  const utilizationTone: "neutral" | "positive" | "caution" = utilizationPercent > 70
+    ? "caution"
+    : utilizationPercent < 40
+      ? "positive"
+      : "neutral";
   const [controlCenterOpen, setControlCenterOpen] = useState(false);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const memoryInsights = useMemo(() => computeMemoryInsights(state.memory.nodes, state.memory.edges), [state.memory.nodes, state.memory.edges]);
@@ -3032,7 +3087,7 @@ export default function App(){
 
               <TabsContent value="chat" className="pt-4">
                 <Card className="bg-zinc-900/70 border-zinc-800/60">
-                  <CardContent className="flex h-[26rem] flex-col gap-4 p-4">
+                  <CardContent className="flex min-h-[32rem] flex-1 flex-col gap-4 p-4 lg:h-[60vh]">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 text-zinc-200">
                         <MessageSquare className="h-4 w-4" />
@@ -3064,9 +3119,9 @@ export default function App(){
                           value={chatInput}
                           onChange={event => setChatInput(event.target.value)}
                           onKeyDown={handleChatKeyDown}
-                          rows={2}
+                          rows={3}
                           placeholder="Type your instruction or question..."
-                          className="min-h-[64px] flex-1 rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
+                          className="min-h-[96px] flex-1 rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
                         />
                         <Button
                           type="submit"
@@ -3120,34 +3175,76 @@ export default function App(){
                 </div>
               </TabsContent>
 
-              <TabsContent value="tokens" className="pt-4">
-                <Card className="bg-zinc-900/70 border-zinc-800/60">
-                  <CardContent className="p-4 text-zinc-200">
-                    <div className="flex items-center gap-2 mb-2"><Activity className="w-4 h-4"/><span className="font-semibold">Token Flow (last 30s)</span></div>
-                    <div className="h-60">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={state.tokenWindow} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
-                          <defs>
-                            <linearGradient id="gIn2" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#a78bfa" stopOpacity={0.9}/>
-                              <stop offset="95%" stopColor="#a78bfa" stopOpacity={0.08}/>
-                            </linearGradient>
-                            <linearGradient id="gOut2" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#34d399" stopOpacity={0.9}/>
-                              <stop offset="95%" stopColor="#34d399" stopOpacity={0.08}/>
-                            </linearGradient>
-                          </defs>
-                          <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.12} />
-                          <XAxis dataKey="t" hide />
-                          <YAxis hide />
-                          <RTooltip contentStyle={{ background: "#0b0b0c", border: "1px solid #2a2a2e", color: "#e5e7eb" }} />
-                          <Area type="monotone" dataKey="inTok" stroke="#a78bfa" fillOpacity={1} fill="url(#gIn2)" />
-                          <Area type="monotone" dataKey="outTok" stroke="#34d399" fillOpacity={1} fill="url(#gOut2)" />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </CardContent>
-                </Card>
+              <TabsContent value="tokens" className="pt-4 space-y-4">
+                <div className="grid gap-4 xl:grid-cols-[2fr_1fr]">
+                  <Card className="bg-zinc-900/70 border-zinc-800/60">
+                    <CardContent className="p-4 text-zinc-200">
+                      <div className="mb-3 flex items-center justify-between">
+                        <div className="flex items-center gap-2"><Activity className="w-4 h-4"/><span className="font-semibold">Token Flow (last 30s)</span></div>
+                        <Badge className="bg-zinc-900/70 text-zinc-200 border border-zinc-700/60">{Math.round(outboundPerMinute)} tok/min</Badge>
+                      </div>
+                      <div className="h-60">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <AreaChart data={state.tokenWindow} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
+                            <defs>
+                              <linearGradient id="gIn2" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#a78bfa" stopOpacity={0.9}/>
+                                <stop offset="95%" stopColor="#a78bfa" stopOpacity={0.08}/>
+                              </linearGradient>
+                              <linearGradient id="gOut2" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#34d399" stopOpacity={0.9}/>
+                                <stop offset="95%" stopColor="#34d399" stopOpacity={0.08}/>
+                              </linearGradient>
+                            </defs>
+                            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.12} />
+                            <XAxis dataKey="t" hide />
+                            <YAxis hide />
+                            <RTooltip contentStyle={{ background: "#0b0b0c", border: "1px solid #2a2a2e", color: "#e5e7eb" }} />
+                            <Area type="monotone" dataKey="inTok" stroke="#a78bfa" fillOpacity={1} fill="url(#gIn2)" />
+                            <Area type="monotone" dataKey="outTok" stroke="#34d399" fillOpacity={1} fill="url(#gOut2)" />
+                          </AreaChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <div className="space-y-4">
+                    <Card className="bg-zinc-900/70 border-zinc-800/60">
+                      <CardContent className="space-y-4 p-4 text-zinc-200">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-semibold">Usage Snapshot</span>
+                          <Badge className="bg-zinc-900/70 text-zinc-200 border border-zinc-700/60">Window · 30s</Badge>
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <TokenStat label="Inbound" value={totalInboundTokens.toLocaleString()} helper={`≈ ${inboundPerSecond.toFixed(1)} tok/s`} />
+                          <TokenStat label="Outbound" value={totalOutboundTokens.toLocaleString()} helper={`≈ ${outboundPerSecond.toFixed(1)} tok/s`} tone="positive" />
+                          <TokenStat label="Latest burst" value={`${latestTokenSample.inTok} / ${latestTokenSample.outTok}`} helper="In / Out tokens (last sample)" />
+                          <TokenStat label="Peak load" value={`${peakInboundTokens} / ${peakOutboundTokens}`} helper="Highest in / out sample" />
+                          <TokenStat label="Net flow" value={netFlowLabel} helper="Out - In across the window" tone={netFlowTone} />
+                          <TokenStat label="Context budget" value={maxTokenBudget ? `${Math.round(utilizationPercent)}%` : "n/a"} helper={maxTokenBudget ? `${maxTokenBudget.toLocaleString()} token cap` : "Set max tokens to track saturation"} tone={utilizationTone} />
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    <Card className="bg-zinc-900/70 border-zinc-800/60">
+                      <CardContent className="space-y-2 p-4 text-sm text-zinc-300">
+                        <div className="flex items-center gap-2 font-semibold text-zinc-100"><AlertTriangle className="h-4 w-4 text-amber-300" /> Token Health</div>
+                        <p className="text-xs text-zinc-400">
+                          Track the rolling context budget to avoid truncation. Keep outbound flow under 70% of the configured max tokens or force a prompt refresh before long explanations.
+                        </p>
+                        {recentTokenWarning ? (
+                          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
+                            {recentTokenWarning}
+                          </div>
+                        ) : (
+                          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-100">
+                            No max-token warnings detected this session.
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </div>
+                </div>
               </TabsContent>
 
               <TabsContent value="memory" className="pt-4">
