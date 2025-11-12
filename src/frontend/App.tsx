@@ -19,6 +19,7 @@ import { buildMemoryNodeDetail, computeMemoryInsights } from "./utils/memory";
 import type { MemoryNodeDetail, MemoryInsightEntry } from "./utils/memory";
 import { normaliseVoiceFilename, readJson, writeJson } from "./utils/storage";
 import { ToolActivity, ToolStats } from "./components/ToolActivity";
+import type { ToolResult } from "./components/ToolActivity";
 import { SystemUsageCard } from "./components/SystemUsageCard";
 
 const DEFAULT_SYSTEM_PROMPT =
@@ -98,12 +99,6 @@ interface ControlSettings {
   systemPrompt: string;
   thinkingPrompt: string;
   modelDirectory: string;
-}
-
-interface ToolResult {
-  tool: string;
-  result: any;
-  timestamp: number;
 }
 
 interface ChatMessage {
@@ -796,15 +791,47 @@ function useNomousBridge() {
         }
         case "memory": setState(p => ({ ...p, memory: { nodes: msg.nodes ?? p.memory.nodes, edges: msg.edges ?? p.memory.edges } })); break;
         case "tool_result": {
+          const timestamp = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
+          const rawDuration = typeof msg.duration_ms === "number" ? msg.duration_ms : Number(msg.durationMs ?? 0);
+          const durationMs = Number.isFinite(rawDuration) ? Number(rawDuration) : 0;
+          const toolId = typeof msg.tool === "string" ? msg.tool : "unknown";
+          const resultPayload =
+            msg.result && typeof msg.result === "object"
+              ? (msg.result as Record<string, unknown>)
+              : { value: msg.result };
+          const success = typeof msg.success === "boolean" ? msg.success : !("error" in resultPayload);
+
           const toolResult: ToolResult = {
-            tool: msg.tool || 'unknown',
-            result: msg.result || {},
-            timestamp: Date.now()
+            tool: toolId,
+            displayName:
+              typeof msg.display_name === "string"
+                ? msg.display_name
+                : toolId.replace(/_/g, " ").replace(/\b\w/g, s => s.toUpperCase()),
+            category: typeof msg.category === "string" ? msg.category : "general",
+            description: typeof msg.description === "string" ? msg.description : "",
+            args:
+              msg.args && typeof msg.args === "object" && !Array.isArray(msg.args)
+                ? (msg.args as Record<string, unknown>)
+                : {},
+            result: resultPayload,
+            success,
+            summary: typeof msg.summary === "string" ? msg.summary : "",
+            warnings: Array.isArray(msg.warnings) ? msg.warnings.map(w => String(w)) : [],
+            timestamp,
+            durationMs,
           };
+
+          const summarySnippet = toolResult.summary ? toolResult.summary.slice(0, 160) : "";
+          const statusEmoji = toolResult.success ? "✅" : "⚠️";
+          const displayName = toolResult.displayName || toolResult.tool;
+          const toolLine = summarySnippet
+            ? `${statusEmoji} Tool ${displayName} — ${summarySnippet}`
+            : `${statusEmoji} Tool ${displayName}`;
+
           setState(p => ({
             ...p,
-            toolActivity: [...p.toolActivity, toolResult].slice(-100), // Keep last 100
-            systemLines: [`[${new Date().toLocaleTimeString()}] 🛠️ Tool: ${msg.tool}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
+            toolActivity: [...p.toolActivity, toolResult].slice(-100),
+            systemLines: [`[${new Date().toLocaleTimeString()}] ${toolLine}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
           }));
           break;
         }
