@@ -359,7 +359,25 @@ class LocalLLM:
             "tool", "instruction", "decision", "milestone", "memory",
             "system prompt", "thinking prompt", "tool_call", "respond with",
             "visual observation", "available tools", "use them",
+            "markdown", "formatting", "double-check", "accuracy",
+            "internal", "thought process", "first action", "action plan",
+            "checklist", "step-by-step",
         ]
+        instruction_prefixes = (
+            "avoid ",
+            "keep ",
+            "remember",
+            "no ",
+            "stay ",
+            "first action",
+            "next action",
+            "action plan",
+            "focus ",
+            "prioritize ",
+            "use plain",
+            "use natural",
+            "double-check",
+        )
         for sentence in raw_sentences:
             stripped = sentence.strip()
             if not stripped:
@@ -373,20 +391,23 @@ class LocalLLM:
                 continue
             if re.match(r"^[A-Z\s]{3,}:", stripped):
                 continue
+            if lower.startswith(instruction_prefixes):
+                continue
             filtered_sentences.append(stripped)
 
         if not filtered_sentences:
+            pronoun_pattern = re.compile(r"\b(i|i'm|i've|i'll|we|let's|you)\b", re.IGNORECASE)
             for sentence in raw_sentences:
                 stripped = sentence.strip()
                 if not stripped:
                     continue
-                lower = stripped.lower()
                 if ":" in stripped:
                     continue
-                if any(keyword in lower for keyword in ("tool", "instruction", "system")):
+                if any(keyword in stripped.lower() for keyword in ("tool", "instruction", "system")):
                     continue
-                filtered_sentences.append(stripped)
-                break
+                if pronoun_pattern.search(stripped):
+                    filtered_sentences.append(stripped)
+                    break
 
         if not filtered_sentences:
             filtered_sentences = [cleaned]
