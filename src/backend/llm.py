@@ -264,7 +264,7 @@ class LocalLLM:
             return _instantiate(n_gpu_layers)
         except Exception as exc:
             if n_gpu_layers != 0:
-                logger.warning("GPU initialisation failed (%s); retrying on CPU", exc)
+                logger.warning("GPU initialization failed (%s); retrying on CPU", exc)
                 self._schedule_bridge_post(
                     msg_event("GPU offload unavailable, retrying language model on CPU")
                 )
