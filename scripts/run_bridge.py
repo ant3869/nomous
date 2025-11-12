@@ -16,6 +16,7 @@ from websockets.server import WebSocketServerProtocol
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
+from src.backend.analytics import ConversationAnalytics
 from src.backend.config import load_config
 from src.backend.utils import Bridge, msg_status, msg_event
 from src.backend.video import CameraLoop
@@ -54,6 +55,7 @@ class Server:
         self._autonomous_task: Optional[asyncio.Task] = None
         self.memory: Optional[MemoryStore] = None
         self.system_monitor: Optional[SystemMonitor] = None
+        self.analytics: Optional[ConversationAnalytics] = None
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -190,10 +192,20 @@ class Server:
             else:
                 logger.info("Memory store unavailable (disabled)")
 
+            self.analytics = ConversationAnalytics()
+            logger.info("Conversation analytics initialized")
+
             self.tts = PiperTTS(CFG, self.bridge)
             logger.info("TTS initialized")
 
-            self.llm = await LocalLLM.create(CFG, self.bridge, self.tts, self.memory, loop)
+            self.llm = await LocalLLM.create(
+                CFG,
+                self.bridge,
+                self.tts,
+                self.memory,
+                loop,
+                analytics=self.analytics,
+            )
             logger.info("LLM initialized")
 
             prompts = self.llm.get_prompts()
@@ -318,6 +330,8 @@ class Server:
             logger.error(f"Error stopping memory store: {e}")
         finally:
             self.memory = None
+
+        self.analytics = None
 
         logger.info("All workers stopped")
 

@@ -8,16 +8,21 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from llama_cpp import Llama
 
 from .memory import MemoryStore
+from .protocol import msg_metrics
 from .system import detect_compute_device
 from .utils import msg_event, msg_token, msg_speak, msg_status
 from .tools import ToolExecutor
 
 logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing aid only
+    from .analytics import ConversationAnalytics
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -42,11 +47,13 @@ class LocalLLM:
         memory: Optional[MemoryStore] = None,
         loop: asyncio.AbstractEventLoop | None = None,
         *,
+        analytics: Optional["ConversationAnalytics"] = None,
         load_immediately: bool = True,
     ):
         self.bridge = bridge
         self.tts = tts
         self.memory = memory
+        self.analytics = analytics
         self._cfg = cfg
         self._loop = loop or asyncio.get_event_loop()
         self._last_progress_sent = -1
@@ -113,8 +120,25 @@ class LocalLLM:
             self._load_model_sync(self.model_path)
 
     @classmethod
-    async def create(cls, cfg, bridge, tts, memory: Optional[MemoryStore], loop: asyncio.AbstractEventLoop | None = None):
-        instance = cls(cfg, bridge, tts, memory, loop, load_immediately=False)
+    async def create(
+        cls,
+        cfg,
+        bridge,
+        tts,
+        memory: Optional[MemoryStore],
+        loop: asyncio.AbstractEventLoop | None = None,
+        *,
+        analytics: Optional["ConversationAnalytics"] = None,
+    ):
+        instance = cls(
+            cfg,
+            bridge,
+            tts,
+            memory,
+            loop,
+            analytics=analytics,
+            load_immediately=False,
+        )
         await instance._load_model_async(instance.model_path, announce=True)
         logger.info("LLM initialized successfully")
         return instance
@@ -412,6 +436,9 @@ class LocalLLM:
         self._reinforcement += float(delta)
         logger.info(f"Reinforcement applied: {delta:+.1f} (total: {self._reinforcement:+.1f})")
         await self.bridge.post(msg_event(f"reinforcement: {self._reinforcement:+.1f}"))
+        if self.analytics:
+            metrics_payload = self.analytics.apply_reward(delta)
+            await self.bridge.post(msg_metrics(metrics_payload))
 
     def _add_context(self, context_type: str, content: str):
         """Add to rolling context memory."""
@@ -662,14 +689,23 @@ class LocalLLM:
         try:
             logger.info(f"Chat input: {user_text[:100]}")
             self._add_context("user_text", user_text)
-            
+
+            if self.analytics:
+                self.analytics.observe_user_message(user_text)
+
             prompt = self._build_prompt(user_text, "text")
             response = await self._generate(prompt)
 
             if response:
                 self._add_context("assistant", response)
+                metrics_payload = None
+                if self.analytics:
+                    metrics_payload = self.analytics.observe_model_response(response)
+
                 yield msg_speak(response)
                 await self.tts.speak(response)
+                if metrics_payload:
+                    await self.bridge.post(msg_metrics(metrics_payload))
                 if self.memory:
                     await self.memory.record_interaction("text", user_text, response)
         finally:
@@ -689,14 +725,23 @@ class LocalLLM:
         try:
             logger.info(f"Processing audio: {transcribed_text}")
             self._add_context("audio", transcribed_text)
-            
+
+            if self.analytics:
+                self.analytics.observe_user_message(transcribed_text)
+
             prompt = self._build_prompt(transcribed_text, "audio")
             response = await self._generate(prompt)
 
             if response:
                 self._add_context("assistant", response)
                 await self.bridge.post(msg_speak(response))
+                metrics_payload = None
+                if self.analytics:
+                    metrics_payload = self.analytics.observe_model_response(response)
+
                 await self.tts.speak(response)
+                if metrics_payload:
+                    await self.bridge.post(msg_metrics(metrics_payload))
                 if self.memory:
                     await self.memory.record_interaction("audio", transcribed_text, response)
                 
