@@ -649,6 +649,7 @@ class LocalLLM:
             tokens = []
             pending_thought = ""
             total_tokens = 0
+            spoken_segments: list[str] = []
 
             for chunk in stream:
                 if chunk and "choices" in chunk and len(chunk["choices"]) > 0:
@@ -682,6 +683,7 @@ class LocalLLM:
                                     candidate = f"{candidate}{terminator}".strip()
 
                                 if candidate:
+                                    spoken_segments.append(candidate)
                                     await self.bridge.post({
                                         "type": "thought",
                                         "text": f"Generating: {candidate}",
@@ -691,6 +693,8 @@ class LocalLLM:
 
                         if len(pending_thought.strip()) > 200:
                             candidate = pending_thought.strip()
+                            if candidate:
+                                spoken_segments.append(candidate)
                             await self.bridge.post({
                                 "type": "thought",
                                 "text": f"Generating: {candidate}",
@@ -710,9 +714,12 @@ class LocalLLM:
                             break
 
             if pending_thought.strip():
+                final_candidate = pending_thought.strip()
+                if final_candidate:
+                    spoken_segments.append(final_candidate)
                 await self.bridge.post({
                     "type": "thought",
-                    "text": f"Generating: {pending_thought.strip()}",
+                    "text": f"Generating: {final_candidate}",
                 })
 
             response = "".join(tokens).strip()
@@ -748,6 +755,9 @@ class LocalLLM:
                     response = '\n'.join(response_lines).strip()
 
             sanitized = self._sanitize_response(response)
+            if not sanitized and spoken_segments:
+                fallback = " ".join(segment.strip() for segment in spoken_segments if segment.strip())
+                sanitized = self._sanitize_response(fallback) or fallback.strip()
             if sanitized:
                 response = sanitized
 
