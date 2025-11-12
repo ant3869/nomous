@@ -350,6 +350,26 @@ class LocalLLM:
         cleaned = re.sub(r"\(([^\)\n]{0,80})\)", _strip_stage, cleaned)
         cleaned = re.sub(r"\[([^\]\n]{0,80})\]", _strip_stage, cleaned)
         cleaned = re.sub(r"(?i)\b(?:assistant|nomous|ai|system|bot)\s*:\s*", "", cleaned)
+
+        scheduling_pattern = re.compile(
+            r"\brespond(?:[-_\s]?in)\s*(?:[:=]\s*|\s+)"
+            r"(?:\d+(?:\.\d+)?\s*(?:ms|milliseconds?|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?)\b"
+            r"|\d{1,2}:\d{2}(?::\d{2})?\b)"
+            r"(?P<suffix>\s*[,.!?])?",
+            re.IGNORECASE,
+        )
+
+        def _strip_schedule(match: re.Match[str]) -> str:
+            suffix = match.group("suffix")
+            if suffix:
+                remainder = match.string[match.end():]
+                if remainder and remainder.strip():
+                    return ""
+                return suffix
+            return " "
+
+        cleaned = scheduling_pattern.sub(_strip_schedule, cleaned)
+        cleaned = re.sub(r"\s+([,.;!?])", r"\1", cleaned)
         cleaned = re.sub(
             r"(?i)respond[_\s-]*in\s*[:=]?\s*\d+\s*(?:seconds?|secs?|s)?(?:\s*[.!?,])?",
             "",
