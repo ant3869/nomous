@@ -359,8 +359,8 @@ class LocalLLM:
             "tool", "instruction", "decision", "milestone", "memory",
             "system prompt", "thinking prompt", "tool_call", "respond with",
             "visual observation", "available tools", "use them",
-            "markdown", "formatting", "double-check", "accuracy",
-            "internal", "thought process", "first action", "action plan",
+            "markdown", "formatting", "accuracy",
+            "internal", "thought process",
             "checklist", "step-by-step",
         ]
         instruction_prefixes = (
