@@ -539,11 +539,19 @@ class LocalLLM:
 
             if len(response) < 3 and total_tokens < min_tokens:
                 logger.warning(f"Response too short ({len(response)} chars, {total_tokens} tokens), regenerating...")
-                return await self._generate(
-                    prompt,
-                    max_tokens=requested_tokens or self.max_tokens,
-                    min_tokens=0
-                )
+                # Ensure failsafe_tokens is always used if both requested_tokens and self.max_tokens are None
+                if requested_tokens is None and self.max_tokens is None:
+                    return await self._generate(
+                        prompt,
+                        max_tokens=self.failsafe_tokens,
+                        min_tokens=0
+                    )
+                else:
+                    return await self._generate(
+                        prompt,
+                        max_tokens=requested_tokens or self.max_tokens,
+                        min_tokens=0
+                    )
 
             logger.info(f"Generated ({total_tokens} tokens): {response[:100]}")
             await self.bridge.post({"type": "thought", "text": f"Final: {response}"})
