@@ -966,7 +966,9 @@ class ToolExecutor:
                 "tool": item.get("tool"),
                 "timestamp": item.get("timestamp"),
                 "summary": item.get("summary"),
-                "error": (item.get("result") or {}).get("error")
+                "error": item.get("error")
+                if item.get("error") is not None
+                else (item.get("result") or {}).get("error")
             }
             for item in reversed(history)
             if not item.get("success")
