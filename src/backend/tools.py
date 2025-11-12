@@ -317,6 +317,7 @@ class ToolExecutor:
         tool = self.tools.get(tool_name)
 
         if not tool:
+            message = f"Unknown tool: {tool_name}"
             result_payload = {
                 "tool": tool_name,
                 "display_name": tool_name.replace("_", " ").title(),
@@ -326,9 +327,10 @@ class ToolExecutor:
                 "duration_ms": 0.0,
                 "args": args or {},
                 "warnings": [],
-                "result": {"error": f"Unknown tool: {tool_name}"},
+                "result": {"error": message},
                 "success": False,
-                "summary": f"Unknown tool requested: {tool_name}"
+                "summary": f"Unknown tool requested: {tool_name}",
+                "error": message,
             }
             self._record_execution(result_payload)
             return result_payload
@@ -336,9 +338,11 @@ class ToolExecutor:
         try:
             validated_args, warnings = self._validate_arguments(tool, args)
         except ValueError as exc:
+            display_name = tool.display_name or tool.name.replace("_", " ").title()
+
             error_payload = {
                 "tool": tool.name,
-                "display_name": tool.display_name,
+                "display_name": display_name,
                 "category": tool.category,
                 "description": tool.description,
                 "timestamp": int(timestamp * 1000),
@@ -347,7 +351,8 @@ class ToolExecutor:
                 "warnings": [],
                 "result": {"error": str(exc)},
                 "success": False,
-                "summary": str(exc)
+                "summary": str(exc),
+                "error": str(exc),
             }
             self._record_execution(error_payload)
             return error_payload
@@ -371,9 +376,11 @@ class ToolExecutor:
             success = False
             summary = f"Execution error: {str(exc)}"
 
+        display_name = tool.display_name or tool.name.replace("_", " ").title()
+
         payload = {
             "tool": tool.name,
-            "display_name": tool.display_name,
+            "display_name": display_name,
             "category": tool.category,
             "description": tool.description,
             "timestamp": int(timestamp * 1000),
@@ -382,7 +389,7 @@ class ToolExecutor:
             "warnings": warnings,
             "result": normalized_result,
             "success": success,
-            "summary": summary
+            "summary": summary,
         }
 
         if success and "success" not in normalized_result:
@@ -390,6 +397,11 @@ class ToolExecutor:
 
         if not success and "success" not in normalized_result:
             payload["result"]["success"] = False
+
+        if not success:
+            payload["error"] = normalized_result.get("error", summary)
+        else:
+            payload.pop("error", None)
 
         self._record_execution(payload)
         return payload

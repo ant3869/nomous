@@ -350,6 +350,11 @@ class LocalLLM:
         cleaned = re.sub(r"\(([^\)\n]{0,80})\)", _strip_stage, cleaned)
         cleaned = re.sub(r"\[([^\]\n]{0,80})\]", _strip_stage, cleaned)
         cleaned = re.sub(r"(?i)\b(?:assistant|nomous|ai|system|bot)\s*:\s*", "", cleaned)
+        cleaned = re.sub(
+            r"(?i)respond[_\s-]*in\s*[:=]?\s*\d+\s*(?:seconds?|secs?|s)?(?:\s*[.!?,])?",
+            "",
+            cleaned,
+        )
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
 
         # Remove meta-instruction sentences that echo internal guidance
