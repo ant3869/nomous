@@ -414,7 +414,7 @@ class ToolExecutor:
                 value = self._coerce_argument(param, args[param.name])
                 if param.enum and value not in param.enum:
                     raise ValueError(
-                        f"Invalid value '{value}' for parameter '{param.name}'. Must be one of: {', '.join(param.enum)}"
+                        f"Invalid value '{value}' for parameter '{param.name}'. Must be one of: {', '.join(str(v) for v in param.enum)}"
                     )
                 validated[param.name] = value
             elif param.required:
