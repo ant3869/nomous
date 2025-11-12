@@ -552,16 +552,30 @@ def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
 
 
 def find_available_port(preferred: int, host: str = "127.0.0.1", attempts: int = 20) -> int:
-    """Return an available TCP port, preferring ``preferred`` when possible."""
+    """Return an available TCP port, preferring ``preferred`` when possible.
+
+    This function attempts to bind to the port before returning it, reducing
+    the race window where another process could claim the port.
+    """
 
     target_host = _loopback_fallback(host)
     port = preferred
     for _ in range(max(1, attempts)):
         if not is_port_in_use(port, target_host):
-            return port
+            # Try to bind to the port to ensure it's truly available
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind((target_host, port))
+                    # Successfully bound, release immediately
+                    return port
+            except OSError:
+                pass  # Port was taken between check and bind, try next
         port += 1
 
+    # Fallback: bind to a random available port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((target_host, 0))
         sock.listen(1)
         return sock.getsockname()[1]
