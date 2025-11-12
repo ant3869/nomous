@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Optional
 from llama_cpp import Llama
 
 from .memory import MemoryStore
+from .system import detect_compute_device
 from .utils import msg_event, msg_token, msg_speak, msg_status
 from .tools import ToolExecutor
 
@@ -83,6 +85,8 @@ class LocalLLM:
         if self.max_tokens is not None:
             self.failsafe_tokens = max(self.failsafe_tokens, self.max_tokens)
         self._reinforcement = 0.0
+        self._auto_gpu_layers = False
+        self._resolved_gpu_layers = 0
 
         # Autonomous behavior
         self.autonomous_mode = True
@@ -146,6 +150,47 @@ class LocalLLM:
 
         self._schedule_bridge_post(payload)
 
+    def _resolve_gpu_layers(self, raw_value) -> tuple[int, bool]:
+        """Return ``(layers, auto_configured)`` based on config and hardware."""
+
+        auto_configured = False
+
+        # Normalise string inputs like "auto" or numeric text.
+        if isinstance(raw_value, str):
+            stripped = raw_value.strip().lower()
+            if stripped in {"auto", "detect", "auto_full", "all"}:
+                raw_value = 0
+            else:
+                try:
+                    raw_value = int(stripped)
+                except ValueError:
+                    logger.warning(
+                        "Invalid n_gpu_layers string %r; defaulting to CPU", raw_value
+                    )
+                    return 0, False
+
+        try:
+            n_gpu_layers = int(raw_value)
+        except (TypeError, ValueError):
+            logger.warning("Invalid n_gpu_layers value %r; defaulting to CPU", raw_value)
+            return 0, False
+
+        if n_gpu_layers < 0:
+            return -1, False
+
+        if n_gpu_layers > 0:
+            return n_gpu_layers, False
+
+        device = detect_compute_device()
+        if device.is_gpu:
+            auto_configured = True
+            logger.info(
+                "Auto-configuring llama.cpp GPU offload for %s", device.name
+            )
+            return -1, True
+
+        return 0, False
+
     def _load_model_sync(self, model_path: str, announce: bool = False):
         model_path = str(model_path)
         logger.info(f"Loading LLM from {model_path} (sync)")
@@ -159,7 +204,17 @@ class LocalLLM:
         self._last_progress_detail = None
         self._emit_load_progress(0, "Initializing…")
 
-        model = self._create_model(model_path)
+        try:
+            model = self._create_model(model_path)
+        except FileNotFoundError as exc:
+            self._emit_load_progress(0, "Model missing")
+            logger.error("LLM load failed: %s", exc)
+            raise
+        except Exception as exc:
+            self._emit_load_progress(0, "Load failed")
+            logger.error("LLM load failed: %s", exc, exc_info=True)
+            raise
+
         self.model = model
         self.model_path = model_path
 
@@ -171,15 +226,33 @@ class LocalLLM:
     def _create_model(self, model_path: str) -> Llama:
         llm_cfg = self._cfg.get("llm", {})
         n_gpu_layers_cfg = llm_cfg.get("n_gpu_layers", 0)
+        n_gpu_layers, auto_configured = self._resolve_gpu_layers(n_gpu_layers_cfg)
 
-        try:
-            n_gpu_layers = int(n_gpu_layers_cfg)
-        except (TypeError, ValueError):
-            logger.warning("Invalid n_gpu_layers value %r; defaulting to CPU", n_gpu_layers_cfg)
-            n_gpu_layers = 0
+        self._auto_gpu_layers = auto_configured
+        self._resolved_gpu_layers = n_gpu_layers
 
-        if n_gpu_layers > 0:
-            logger.info(f"GPU acceleration enabled: {n_gpu_layers} layers on GPU")
+        model_file = Path(model_path)
+        if not model_file.exists():
+            message = f"Language model file not found: {model_file}"
+            logger.error(message)
+            self._schedule_bridge_post(msg_event(message))
+            raise FileNotFoundError(message)
+
+        if n_gpu_layers != 0:
+            # Ensure llama.cpp initialises its CUDA kernels when available.
+            os.environ.setdefault("LLAMA_CUBLAS", "1")
+            human_layers = "all" if n_gpu_layers < 0 else str(n_gpu_layers)
+            logger.info(f"GPU acceleration enabled: offloading {human_layers} layer(s)")
+
+        def _instantiate(layers: int) -> Llama:
+            return Llama(
+                model_path=model_path,
+                n_ctx=llm_cfg["n_ctx"],
+                n_threads=llm_cfg["n_threads"],
+                n_gpu_layers=layers,
+                verbose=False,
+                progress_callback=_progress
+            )
 
         def _progress(current: int, total: int) -> bool:
             percent = int((current / total) * 100) if total else 0
@@ -187,14 +260,17 @@ class LocalLLM:
             self._emit_load_progress(percent, detail)
             return True
 
-        return Llama(
-            model_path=model_path,
-            n_ctx=llm_cfg["n_ctx"],
-            n_threads=llm_cfg["n_threads"],
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-            progress_callback=_progress
-        )
+        try:
+            return _instantiate(n_gpu_layers)
+        except Exception as exc:
+            if n_gpu_layers != 0:
+                logger.warning("GPU initialisation failed (%s); retrying on CPU", exc)
+                self._schedule_bridge_post(
+                    msg_event("GPU offload unavailable, retrying language model on CPU")
+                )
+                self._resolved_gpu_layers = 0
+                return _instantiate(0)
+            raise
 
     async def _load_model_async(self, model_path: str, announce: bool = False):
         model_path = str(model_path)
@@ -209,7 +285,17 @@ class LocalLLM:
         self._last_progress_detail = None
         self._emit_load_progress(0, "Initializing…")
 
-        model = await asyncio.to_thread(self._create_model, model_path)
+        try:
+            model = await asyncio.to_thread(self._create_model, model_path)
+        except FileNotFoundError as exc:
+            self._emit_load_progress(0, "Model missing")
+            logger.error("Async LLM load failed: %s", exc)
+            raise
+        except Exception as exc:
+            self._emit_load_progress(0, "Load failed")
+            logger.error("Async LLM load failed: %s", exc, exc_info=True)
+            raise
+
         self.model = model
         self.model_path = model_path
 
