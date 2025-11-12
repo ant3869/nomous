@@ -382,7 +382,7 @@ class LocalLLM:
             "visual observation", "available tools", "use them",
             "markdown", "formatting", "accuracy",
             "internal", "thought process",
-            "checklist", "step-by-step",
+            "checklist", "step-by-step", "step by step", "break it down",
             "provide a direct", "direct, conversational answer",
             "collect your thoughts",
         ]
@@ -416,6 +416,22 @@ class LocalLLM:
             if re.match(r"^[A-Z\s]{3,}:", stripped):
                 continue
             if lower.startswith(instruction_prefixes):
+                continue
+            if lower.startswith("let me ") and not lower.startswith("let me know"):
+                continue
+            if lower.startswith((
+                "i need to ",
+                "i should ",
+                "i must ",
+                "i'll need to ",
+                "i will need to ",
+                "first i need to ",
+                "first, i need to ",
+                "first i should ",
+                "first, i should ",
+                "i'll try to ",
+                "i will try to ",
+            )):
                 continue
             filtered_sentences.append(stripped)
 
