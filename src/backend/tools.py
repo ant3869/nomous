@@ -401,7 +401,7 @@ class ToolExecutor:
         if not success:
             payload["error"] = normalized_result.get("error", summary)
         else:
-            payload.pop("error", None)
+            pass
 
         self._record_execution(payload)
         return payload
