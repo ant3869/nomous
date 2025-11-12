@@ -362,6 +362,8 @@ class LocalLLM:
             "markdown", "formatting", "accuracy",
             "internal", "thought process",
             "checklist", "step-by-step",
+            "provide a direct", "direct, conversational answer",
+            "collect your thoughts",
         ]
         instruction_prefixes = (
             "avoid ",
@@ -377,6 +379,7 @@ class LocalLLM:
             "use plain",
             "use natural",
             "double-check",
+            "important:",
         )
         for sentence in raw_sentences:
             stripped = sentence.strip()
