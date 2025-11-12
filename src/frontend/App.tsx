@@ -464,11 +464,18 @@ function computeDefaultWsUrl(): string {
   if (typeof window === "undefined") {
     return FALLBACK_WS_URL;
   }
-  const { protocol, host } = window.location;
-  if (typeof host === "string" && host.trim().length > 0) {
-    const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
-    return `${wsProtocol}//${host}/ws`;
+  // Use window.location.host only in development mode, otherwise fallback to documented backend address
+  const isDev =
+    (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.MODE === "development") ||
+    (typeof process !== "undefined" && process.env && process.env.NODE_ENV === "development");
+  if (isDev) {
+    const { protocol, host } = window.location;
+    if (typeof host === "string" && host.trim().length > 0) {
+      const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
+      return `${wsProtocol}//${host}/ws`;
+    }
   }
+  // In production, fallback to documented backend address
   return FALLBACK_WS_URL;
 }
 
