@@ -5,10 +5,22 @@ Run after starting the server
 """
 
 import asyncio
-import websockets
 import json
 import time
+
+import websockets
 import pytest
+
+from src.backend.config import load_config
+
+
+def resolve_ws_uri() -> str:
+    cfg = load_config()
+    host = str(cfg.get("ws", {}).get("host", "127.0.0.1"))
+    port = int(cfg.get("ws", {}).get("port", 8765))
+    if host in {"0.0.0.0", "::", "", "*"}:
+        host = "127.0.0.1"
+    return f"ws://{host}:{port}"
 
 
 @pytest.mark.asyncio
@@ -18,7 +30,7 @@ async def test_fixes():
     print("=" * 60)
     print()
     
-    uri = "ws://localhost:8765"
+    uri = resolve_ws_uri()
     
     try:
         async with websockets.connect(uri) as ws:
