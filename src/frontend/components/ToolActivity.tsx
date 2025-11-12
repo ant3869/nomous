@@ -87,29 +87,29 @@ export function ToolActivity({ tools, maxDisplay = 10 }: ToolActivityProps) {
   
   if (displayTools.length === 0) {
     return (
-      <Card className="bg-slate-900/50 border-slate-700">
+      <Card className="border-zinc-800/60 bg-zinc-900/70">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-sm">
+          <CardTitle className="flex items-center gap-2 text-sm text-zinc-200">
             <Wrench className="h-4 w-4" />
             Tool Activity
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="text-center text-slate-400 text-sm py-4">
+          <div className="py-4 text-center text-sm text-zinc-500">
             No tools used yet
           </div>
         </CardContent>
       </Card>
     );
   }
-  
+
   return (
-    <Card className="bg-slate-900/50 border-slate-700">
+    <Card className="border-zinc-800/60 bg-zinc-900/70">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-sm">
+        <CardTitle className="flex items-center gap-2 text-sm text-zinc-200">
           <Wrench className="h-4 w-4" />
           Tool Activity
-          <Badge variant="outline" className="ml-auto">
+          <Badge variant="outline" className="ml-auto border-emerald-500/40 text-emerald-200">
             {tools.length} total
           </Badge>
         </CardTitle>
@@ -125,24 +125,24 @@ export function ToolActivity({ tools, maxDisplay = 10 }: ToolActivityProps) {
           return (
             <div
               key={`${toolUse.tool}-${toolUse.timestamp}-${idx}`}
-              className="flex items-start gap-2 p-2 rounded-md bg-slate-800/50 hover:bg-slate-800 transition-colors"
+              className="flex items-start gap-2 rounded-lg border border-zinc-800/60 bg-zinc-950/50 p-2 transition-colors hover:border-emerald-500/40 hover:bg-zinc-900/80"
             >
-              <div className={`p-1.5 rounded border ${colorClass}`}>
+              <div className={`rounded border ${colorClass} p-1.5`}>
                 {icon}
               </div>
-              <div className="flex-1 min-w-0">
+              <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-sm text-slate-200">
+                  <span className="text-sm font-medium text-zinc-100">
                     {toolUse.tool}
                   </span>
                   <Badge variant="outline" className={`text-xs ${colorClass}`}>
                     {category}
                   </Badge>
-                  <span className="text-xs text-slate-500 ml-auto">
+                  <span className="ml-auto text-xs text-zinc-500">
                     {timeAgo < 60 ? `${timeAgo}s ago` : `${Math.floor(timeAgo / 60)}m ago`}
                   </span>
                 </div>
-                <div className="text-xs text-slate-400 mt-1 truncate">
+                <div className="mt-1 truncate text-xs text-zinc-400">
                   {resultText}
                 </div>
               </div>
@@ -177,23 +177,23 @@ export function ToolStats({ tools }: { tools: ToolResult[] }) {
   
   return (
     <div className="grid grid-cols-2 gap-2">
-      <Card className="bg-slate-900/50 border-slate-700">
+      <Card className="border-zinc-800/60 bg-zinc-900/70">
         <CardContent className="pt-4">
-          <div className="text-2xl font-bold text-slate-200">
+          <div className="text-2xl font-bold text-zinc-100">
             {stats.total}
           </div>
-          <div className="text-xs text-slate-400">
+          <div className="text-xs text-zinc-500">
             Total Tools Used
           </div>
         </CardContent>
       </Card>
-      
-      <Card className="bg-slate-900/50 border-slate-700">
+
+      <Card className="border-zinc-800/60 bg-zinc-900/70">
         <CardContent className="pt-4">
-          <div className="text-2xl font-bold text-slate-200">
+          <div className="text-2xl font-bold text-zinc-100">
             {Object.keys(stats.categories).length}
           </div>
-          <div className="text-xs text-slate-400">
+          <div className="text-xs text-zinc-500">
             Categories Active
           </div>
         </CardContent>

@@ -22,7 +22,7 @@ class PiperTTS:
         self.bridge = bridge
         p = cfg["paths"]
         
-        self.exe = p["piper_exe"]
+        self.exe = self._resolve_executable(p.get("piper_exe"))
         self.voice = p["piper_voice"]
         self.out_dir = p["piper_out_dir"]
         self.rate = 22050
@@ -31,28 +31,76 @@ class PiperTTS:
         self.master_volume = 0.7
 
         self._voices_root = Path(self.voice).parent
-        
-        # Validate paths
-        if not os.path.exists(self.exe):
-            logger.error(f"Piper executable not found: {self.exe}")
+
+        # Validate executable path
+        if not self.exe or not os.path.exists(self.exe):
+            logger.error(
+                "Piper executable not found. Checked configured path and common fallbacks."
+            )
             self.enabled = False
         else:
             logger.info(f"Piper found: {self.exe}")
-        
-        if not os.path.exists(self.voice):
-            logger.error(f"Piper voice not found: {self.voice}")
-            self.enabled = False
-        else:
+
+        # Validate or discover voice model
+        try:
+            resolved_voice = self._resolve_voice_path(self.voice)
+            self.voice = str(resolved_voice)
             logger.info(f"Voice model found: {self.voice}")
-        
+        except FileNotFoundError:
+            logger.warning("Configured voice model not found, attempting auto-discovery")
+            fallback_voice = self._auto_discover_voice()
+            if fallback_voice:
+                self.voice = str(fallback_voice)
+                logger.info(f"Using fallback voice model: {self.voice}")
+            else:
+                logger.error("No Piper voice models available. Disabling TTS.")
+                self.enabled = False
+
         # Create output directory
         os.makedirs(self.out_dir, exist_ok=True)
         logger.info(f"TTS output directory: {self.out_dir}")
-        
+
         if self.enabled:
             logger.info("PiperTTS initialized successfully")
         else:
             logger.warning("PiperTTS disabled due to missing files")
+
+    def _resolve_executable(self, configured: Optional[str]) -> Optional[str]:
+        if configured:
+            configured_path = Path(configured).expanduser()
+        else:
+            configured_path = None
+
+        candidates: List[Path] = []
+
+        if configured_path:
+            candidates.append(configured_path)
+            if configured_path.suffix.lower() == ".exe":
+                candidates.append(configured_path.with_suffix(""))
+            if configured_path.name.lower().endswith("piper.exe"):
+                candidates.append(configured_path.with_name("piper"))
+
+        env_path = shutil.which("piper")
+        if env_path:
+            candidates.append(Path(env_path))
+
+        for candidate in candidates:
+            if candidate and candidate.exists():
+                return str(candidate)
+
+        return str(configured_path) if configured_path and configured_path.exists() else None
+
+    def _auto_discover_voice(self) -> Optional[Path]:
+        root = self._voices_root
+        if not root.exists():
+            return None
+
+        try:
+            for candidate in root.rglob("*.onnx"):
+                return candidate
+        except Exception as exc:
+            logger.debug("Voice discovery failed: %s", exc)
+        return None
 
     async def stop(self):
         logger.info("PiperTTS stopping...")

@@ -65,6 +65,7 @@ class LocalLLM:
         # Autonomous behavior
         self.autonomous_mode = True
         self.last_vision_analysis = 0
+        self._last_spoken_vision: tuple[str, float] | None = None
         self.vision_cooldown = 15  # seconds between autonomous vision checks
         self.last_thought = 0
         self.thought_cooldown = 30  # seconds between unprompted thoughts
@@ -563,9 +564,24 @@ class LocalLLM:
             
             # DECISION: Should we comment on this?
             # Only speak if something interesting (person, gesture, or significant change)
-            interesting = any(word in description.lower() for word in 
-                            ['person', 'people', 'waving', 'gesture', 'pointing', 'thumbs', 'peace'])
-            
+            interesting = any(
+                word in description.lower()
+                for word in ['person', 'people', 'waving', 'gesture', 'pointing', 'thumbs', 'peace']
+            )
+
+            normalized_description = description.strip().lower()
+            if self._last_spoken_vision:
+                last_text, last_time = self._last_spoken_vision
+                if (
+                    normalized_description
+                    and normalized_description == last_text
+                    and now - last_time < max(self.vision_cooldown * 2, 30)
+                ):
+                    logger.info("Vision (quiet - duplicate): %s", description[:100])
+                    self._add_context("vision_quiet", description)
+                    await self.bridge.post({"type": "thought", "text": f"Observing (unchanged): {description}"})
+                    return
+
             # Random chance to stay quiet (20% of the time, even if interesting)
             import random
             if not interesting or (random.random() < 0.2):
@@ -573,10 +589,10 @@ class LocalLLM:
                 self._add_context("vision_quiet", description)
                 await self.bridge.post({"type": "thought", "text": f"Observing: {description}"})
                 return
-            
+
             logger.info(f"Vision (speaking): {description[:100]}")
             self._add_context("vision", description)
-            
+
             prompt = self._build_prompt(description, "vision")
             response = await self._generate(prompt, max_tokens=80)
 
@@ -584,6 +600,7 @@ class LocalLLM:
                 self._add_context("assistant", response)
                 await self.bridge.post(msg_speak(response))
                 await self.tts.speak(response)
+                self._last_spoken_vision = (normalized_description, now)
                 if self.memory:
                     await self.memory.record_interaction("vision", description, response, tags=["vision"])
                 
@@ -622,8 +639,7 @@ class LocalLLM:
 
             if response and len(response) > 3:
                 self._add_context("assistant_autonomous", response)
-                await self.bridge.post(msg_speak(response))
-                await self.tts.speak(response)
+                await self.bridge.post({"type": "thought", "text": response})
                 if self.memory:
                     await self.memory.record_interaction("autonomous", "internal_reflection", response)
             else:
