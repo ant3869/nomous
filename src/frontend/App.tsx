@@ -82,7 +82,7 @@ interface WSMessage {
 
 interface STTEventMessage extends WSMessage {
   type: "stt";
-  phase?: STTPhase | string;
+  phase?: STTPhase;
   forwarded?: boolean | string;
 }
 interface ControlSettings {
