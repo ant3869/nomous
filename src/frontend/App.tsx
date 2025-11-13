@@ -127,6 +127,18 @@ interface LoadingOverlay {
 
 const TARGET_SAMPLE_RATE = 16000;
 const MAX_CHAT_HISTORY = 200;
+const STATUS_KEYWORDS = new Set([
+  "idle",
+  "thinking",
+  "ready",
+  "error",
+  "connected",
+  "disconnected",
+  "listening",
+  "speaking",
+  "noticing",
+  "learning",
+]);
 const STORAGE_SETTINGS_KEY = "nomous.settings";
 const STORAGE_WS_KEY = "nomous.ws";
 const ENV_DEFAULT_WS_URL = typeof import.meta.env.VITE_DEFAULT_WS_URL === "string"
@@ -740,14 +752,37 @@ function useNomousBridge() {
       switch (msg.type) {
         case "status": {
           const stamp = `[${new Date().toLocaleTimeString()}]`;
-          setState(p => ({
-            ...p,
-            status: msg.value,
-            statusDetail: msg.detail ?? p.statusDetail,
-            systemLines: msg.detail
-              ? [`${stamp} ${String(msg.value ?? "status").toUpperCase()} → ${msg.detail}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
-              : p.systemLines,
-          }));
+          const value = typeof msg.value === "string" ? msg.value : String(msg.value ?? "status");
+          const rawDetail = typeof msg.detail === "string" ? msg.detail : "";
+
+          setState(p => {
+            let speechLines = p.speechLines;
+            let chatMessages = p.chatMessages;
+            let statusDetail = rawDetail || p.statusDetail;
+            let speechText: string | null = null;
+
+            if (value.toLowerCase() === "speaking") {
+              speechText = extractSpeechText(rawDetail || msg);
+              if (speechText) {
+                speechLines = mergeSpeechLines(p.speechLines, stamp, speechText);
+                chatMessages = mergeAssistantChatMessages(p.chatMessages, speechText);
+                statusDetail = speechText;
+              }
+            }
+
+            const systemLines = statusDetail
+              ? [`${stamp} ${value.toUpperCase()} → ${statusDetail}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
+              : p.systemLines;
+
+            return {
+              ...p,
+              status: value,
+              statusDetail,
+              systemLines,
+              speechLines,
+              chatMessages,
+            };
+          });
           break;
         }
         case "token": {
@@ -760,15 +795,22 @@ function useNomousBridge() {
           });
           break;
         }
-        case "speak": {
+        case "speak":
+        case "speech":
+        case "speech_commitment":
+        case "speech_final": {
+          const speechText = extractSpeechText(msg);
+          if (!speechText) {
+            break;
+          }
           const stamp = `[${new Date().toLocaleTimeString()}]`;
-          log(`speak â†’ ${msg.text}`);
+          log(`speak → ${speechText}`);
           setState(p => ({
             ...p,
             status: "speaking",
-            statusDetail: msg.text,
-            speechLines: msg.text ? mergeSpeechLines(p.speechLines, stamp, msg.text) : p.speechLines,
-            chatMessages: msg.text ? mergeAssistantChatMessages(p.chatMessages, msg.text) : p.chatMessages,
+            statusDetail: speechText,
+            speechLines: mergeSpeechLines(p.speechLines, stamp, speechText),
+            chatMessages: mergeAssistantChatMessages(p.chatMessages, speechText),
           }));
           break;
         }
@@ -1571,6 +1613,66 @@ function mergeAssistantChatMessages(messages: ChatMessage[], nextText: string): 
     return appended.slice(appended.length - MAX_CHAT_HISTORY);
   }
   return appended;
+}
+
+function normalizeSpeechCandidate(candidate: unknown, { skipStatusWords = false } = {}): string | null {
+  if (typeof candidate === "string") {
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (skipStatusWords && STATUS_KEYWORDS.has(trimmed.toLowerCase())) {
+      return null;
+    }
+    return trimmed;
+  }
+
+  if (Array.isArray(candidate)) {
+    const joined = candidate
+      .map(part => (typeof part === "string" ? part.trim() : ""))
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    return joined || null;
+  }
+
+  return null;
+}
+
+function extractSpeechText(payload: unknown): string | null {
+  const direct = normalizeSpeechCandidate(payload);
+  if (direct) {
+    return direct;
+  }
+
+  if (payload && typeof payload === "object") {
+    const obj = payload as Record<string, unknown>;
+    const fromFields = normalizeSpeechCandidate(obj.text)
+      ?? normalizeSpeechCandidate(obj.detail)
+      ?? normalizeSpeechCandidate(obj.message)
+      ?? normalizeSpeechCandidate(obj.content)
+      ?? normalizeSpeechCandidate(obj.segments);
+    if (fromFields) {
+      return fromFields;
+    }
+
+    const valueCandidate = normalizeSpeechCandidate(obj.value, { skipStatusWords: true });
+    if (valueCandidate) {
+      return valueCandidate;
+    }
+
+    const nestedKeys: string[] = ["payload", "data"];
+    for (const key of nestedKeys) {
+      if (key in obj && obj[key] && obj[key] !== payload) {
+        const nested = extractSpeechText(obj[key]);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 function extractSpeechLineText(line: string): string {
