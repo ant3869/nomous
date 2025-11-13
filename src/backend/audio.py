@@ -150,8 +150,8 @@ class AudioSTT:
                             asyncio.create_task(self.llm.process_audio(text))
                             await self.bridge.post({"type": "stt", "phase": "forwarded", "text": text, "forwarded": True})
                         else:
-                            logger.error("LLM not set! Cannot process audio")
-                            await self.bridge.post(msg_event("ERROR: LLM not connected"))
+                            logger.warning("LLM not set – skipping audio hand-off but keeping transcription visible")
+                            await self.bridge.post(msg_event("⚠️ STT captured speech but no LLM is configured. Configure an LLM to enable spoken follow-ups."))
                     elif text:
                         logger.debug(
                             "Dropping STT final '%s' below threshold %d",

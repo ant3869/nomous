@@ -59,6 +59,8 @@ const MODEL_TYPE_LABEL: Record<ModelCatalogType, string> = {
 /** Nomous – Autonomy Dashboard (fixed) */
 export type NomousStatus = "idle" | "thinking" | "speaking" | "noticing" | "learning" | "error";
 interface TokenPoint { t: number; inTok: number; outTok: number }
+type STTPhase = "partial" | "final" | "forwarded";
+
 interface WSMessage {
   type: string;
   value?: string;
@@ -76,6 +78,12 @@ interface WSMessage {
   error?: string | null;
   system_prompt?: string;
   thinking_prompt?: string;
+}
+
+interface STTEventMessage extends WSMessage {
+  type: "stt";
+  phase?: STTPhase | string;
+  forwarded?: boolean | string;
 }
 interface ControlSettings {
   cameraEnabled: boolean;
@@ -139,6 +147,7 @@ interface SttFinalRecord {
 
 const TARGET_SAMPLE_RATE = 16000;
 const MAX_CHAT_HISTORY = 200;
+const THOUGHT_ACCUMULATOR_WINDOW_MS = 4500;
 const STATUS_KEYWORDS = new Set([
   "idle",
   "thinking",
@@ -286,6 +295,14 @@ function mergeBehaviorStats(prev: BehaviorStats, payload: any): BehaviorStats {
   }
 
   return next;
+}
+
+function removeListeningLines(lines: string[]): string[] {
+  return lines.filter(line => !line.includes("Listening:"));
+}
+
+function limitSttHistory(lines: string[]): string[] {
+  return lines.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1));
 }
 
 function describeLatency(ms: number): string {
@@ -763,7 +780,9 @@ function useNomousBridge() {
 
   const handleMessage = useCallback((ev: MessageEvent) => {
     try {
-      const msg = JSON.parse(typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data));
+      const msg = JSON.parse(
+        typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data),
+      ) as WSMessage;
       switch (msg.type) {
         case "status": {
           const stamp = `[${new Date().toLocaleTimeString()}]`;
@@ -846,7 +865,11 @@ function useNomousBridge() {
             const prevAccumulator = thoughtAccumulatorRef.current;
             let nextLines = p.thoughtLines;
 
-            if (prevAccumulator && prevAccumulator.prefix === prefix && now - prevAccumulator.updatedAt < 4500) {
+            if (
+              prevAccumulator &&
+              prevAccumulator.prefix === prefix &&
+              now - prevAccumulator.updatedAt < THOUGHT_ACCUMULATOR_WINDOW_MS
+            ) {
               const combinedDetail = combineThoughtDetails(prevAccumulator.content, detail);
               const updatedEntry = `${prevAccumulator.stamp} ${formatThoughtDisplay(prefix, combinedDetail)}`;
               const [, ...rest] = nextLines;
@@ -865,44 +888,49 @@ function useNomousBridge() {
           break;
         }
         case "stt": {
-          const rawText = typeof msg.text === "string" ? msg.text : "";
+          const sttMsg = msg as STTEventMessage;
+          const rawText = typeof sttMsg.text === "string" ? sttMsg.text : "";
           const normalizedText = normalizeStreamText(rawText);
           if (!normalizedText) {
             break;
           }
 
-          const phaseRaw = typeof msg.phase === "string" ? msg.phase.toLowerCase() : "";
-          const phase = phaseRaw.length > 0 ? phaseRaw : "partial";
-          const forwarded = msg.forwarded === true || msg.forwarded === "true";
+          const phaseRaw = typeof sttMsg.phase === "string" ? sttMsg.phase.toLowerCase() : "";
+          const phase: STTPhase =
+            phaseRaw === "final" || phaseRaw === "forwarded" ? (phaseRaw as STTPhase) : "partial";
+          // Default to "partial" when the backend omits a phase so that transient captions still render.
+          const forwarded = sttMsg.forwarded === true || sttMsg.forwarded === "true";
 
           setState(p => {
-            const filtered = p.sttLines.filter(line => !line.includes("Listening:"));
+            const filtered = removeListeningLines(p.sttLines);
+            const trimmedHistory = limitSttHistory(filtered);
             const stamp = `[${new Date().toLocaleTimeString()}]`;
             let nextLines;
 
             if (phase === "partial") {
               const entry = `${stamp} Listening: ${normalizedText}`;
-              nextLines = [entry, ...filtered.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+              nextLines = [entry, ...trimmedHistory];
             } else if (phase === "final") {
               const suffix = forwarded ? " → queued for response" : "";
               const entry = `${stamp} Captured: ${normalizedText}${suffix}`;
-              nextLines = [entry, ...filtered.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+              nextLines = [entry, ...trimmedHistory];
               sttFinalRef.current = { text: normalizedText, stamp };
             } else if (phase === "forwarded") {
               const reference = sttFinalRef.current;
               if (reference && reference.text === normalizedText) {
                 const [, ...rest] = filtered;
                 const entry = `${reference.stamp} Dispatched: ${normalizedText} → reasoning core`;
-                nextLines = [entry, ...rest.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+                nextLines = [entry, ...limitSttHistory(rest)];
               } else {
                 const entry = `${stamp} Dispatched: ${normalizedText} → reasoning core`;
-                nextLines = [entry, ...filtered.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+                // A forwarded event can arrive before we capture the matching final payload; fall back to the filtered log.
+                nextLines = [entry, ...trimmedHistory];
               }
               sttFinalRef.current = null;
             } else {
               const title = phase.charAt(0).toUpperCase() + phase.slice(1);
               const entry = `${stamp} ${title}: ${normalizedText}`;
-              nextLines = [entry, ...filtered.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+              nextLines = [entry, ...trimmedHistory];
             }
 
             return { ...p, sttLines: nextLines };
