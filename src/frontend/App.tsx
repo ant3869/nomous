@@ -1615,6 +1615,22 @@ function mergeAssistantChatMessages(messages: ChatMessage[], nextText: string): 
   return appended;
 }
 
+const MAX_SPEECH_PAYLOAD_DEPTH = 5;
+
+/**
+ * Normalizes a candidate value that may contain speech text into a single trimmed string.
+ *
+ * @param candidate - The raw candidate value that may represent speech text.
+ * @param options - Normalization options.
+ * @param options.skipStatusWords - When true, ignore status keywords such as "thinking".
+ * @returns A normalized speech string or null if the candidate cannot be converted.
+ *
+ * @example
+ * normalizeSpeechCandidate([" Hello ", "world  "]); // "Hello world"
+ *
+ * @example
+ * normalizeSpeechCandidate("thinking", { skipStatusWords: true }); // null
+ */
 function normalizeSpeechCandidate(candidate: unknown, { skipStatusWords = false } = {}): string | null {
   if (typeof candidate === "string") {
     const trimmed = candidate.trim();
@@ -1629,6 +1645,7 @@ function normalizeSpeechCandidate(candidate: unknown, { skipStatusWords = false 
 
   if (Array.isArray(candidate)) {
     const joined = candidate
+      // Non-string array values are treated as empty strings intentionally.
       .map(part => (typeof part === "string" ? part.trim() : ""))
       .filter(Boolean)
       .join(" ")
@@ -1639,13 +1656,37 @@ function normalizeSpeechCandidate(candidate: unknown, { skipStatusWords = false 
   return null;
 }
 
-function extractSpeechText(payload: unknown): string | null {
+/**
+ * Extracts human-readable speech text from a nested payload structure.
+ *
+ * @param payload - The payload to inspect for speech text.
+ * @param depth - Current recursion depth used to cap traversal.
+ * @param visited - A set tracking visited objects to prevent circular references.
+ * @returns The extracted speech string or null when unavailable.
+ *
+ * @example
+ * extractSpeechText({ text: "Hello" }); // "Hello"
+ *
+ * @example
+ * extractSpeechText({ payload: { message: ["Hi", "there"] } }); // "Hi there"
+ */
+function extractSpeechText(payload: unknown, depth = 0, visited?: Set<unknown>): string | null {
+  if (depth >= MAX_SPEECH_PAYLOAD_DEPTH) {
+    return null;
+  }
+
   const direct = normalizeSpeechCandidate(payload);
   if (direct) {
     return direct;
   }
 
   if (payload && typeof payload === "object") {
+    const visitSet = visited ?? new Set<unknown>();
+    if (visitSet.has(payload)) {
+      return null;
+    }
+    visitSet.add(payload);
+
     const obj = payload as Record<string, unknown>;
     const fromFields = normalizeSpeechCandidate(obj.text)
       ?? normalizeSpeechCandidate(obj.detail)
@@ -1664,7 +1705,7 @@ function extractSpeechText(payload: unknown): string | null {
     const nestedKeys: string[] = ["payload", "data"];
     for (const key of nestedKeys) {
       if (key in obj && obj[key] && obj[key] !== payload) {
-        const nested = extractSpeechText(obj[key]);
+        const nested = extractSpeechText(obj[key], depth + 1, visitSet);
         if (nested) {
           return nested;
         }
