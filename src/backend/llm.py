@@ -580,14 +580,22 @@ class LocalLLM:
             parts: list[str] = ["<|begin_of_text|>"]
             if system_section:
                 parts.append(
-                    "<|start_header_id|>system<|end_header_id|>\n"
-                    f"{system_section}\n"
-                    "<|eot_id|>"
+                    "".join(
+                        (
+                            "<|start_header_id|>system<|end_header_id|>\n",
+                            f"{system_section}\n",
+                            "<|eot_id|>",
+                        )
+                    )
                 )
             parts.append(
-                "<|start_header_id|>user<|end_header_id|>\n"
-                f"{user_section}\n"
-                "<|eot_id|>"
+                "".join(
+                    (
+                        "<|start_header_id|>user<|end_header_id|>\n",
+                        f"{user_section}\n",
+                        "<|eot_id|>",
+                    )
+                )
             )
             parts.append("<|start_header_id|>assistant<|end_header_id|>\n")
             return "".join(parts)
