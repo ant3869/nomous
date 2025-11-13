@@ -103,9 +103,10 @@ def test_compute_device_info_gpu():
         name="NVIDIA RTX 3080",
         reason="CUDA available",
         cuda_version="11.8",
-        gpu_count=1
+        gpu_count=1,
+        cuda_ready=True
     )
-    
+
     assert info.backend == "GPU"
     assert info.name == "NVIDIA RTX 3080"
     assert info.is_gpu is True
@@ -125,9 +126,10 @@ def test_detect_compute_device_no_cuda(mock_which, mock_torch):
     
     with patch('src.backend.system.platform.processor', return_value="Intel i7"):
         device_info = detect_compute_device()
-    
+
     assert device_info.backend == "CPU"
     assert device_info.is_gpu is False
+    assert device_info.cuda_ready is False
     assert device_info.gpu_count == 0
     assert device_info.cuda_version is None
     assert "No CUDA-capable GPU detected" in device_info.reason
@@ -145,9 +147,10 @@ def test_detect_compute_device_with_cuda(mock_which, mock_torch):
     mock_torch.version.cuda = "11.8"
     
     device_info = detect_compute_device()
-    
+
     assert device_info.backend == "GPU"
     assert device_info.is_gpu is True
+    assert device_info.cuda_ready is True
     assert device_info.gpu_count == 1
     assert device_info.cuda_version == "11.8"
     assert device_info.name == "NVIDIA RTX 3080"
@@ -166,9 +169,10 @@ def test_detect_compute_device_nvidia_smi_no_runtime(mock_which, mock_torch):
     
     with patch('src.backend.system.platform.processor', return_value="Intel i7"):
         device_info = detect_compute_device()
-    
+
     assert device_info.backend == "CPU"
     assert device_info.is_gpu is False
+    assert device_info.cuda_ready is False
     assert "NVIDIA GPU detected but CUDA drivers" in device_info.reason
     print("✅ Device detection with nvidia-smi but no CUDA runtime works")
 
@@ -181,9 +185,10 @@ def test_detect_compute_device_cuda_exception(mock_torch):
     
     with patch('src.backend.system.platform.processor', return_value="Intel i7"):
         device_info = detect_compute_device()
-    
+
     assert device_info.backend == "CPU"
     assert device_info.is_gpu is False
+    assert device_info.cuda_ready is False
     assert "Unable to query CUDA runtime" in device_info.reason
     print("✅ Device detection with CUDA exception works")
 
@@ -230,7 +235,8 @@ def test_system_monitor_nvml_init_success(
         name="NVIDIA RTX 3080",
         reason="CUDA available",
         cuda_version="11.8",
-        gpu_count=1
+        gpu_count=1,
+        cuda_ready=True
     )
     mock_get_count.return_value = 1
     mock_get_name.return_value = b"NVIDIA RTX 3080"
@@ -259,7 +265,8 @@ def test_system_monitor_nvml_init_failure(
     mock_detect.return_value = ComputeDeviceInfo(
         backend="GPU",
         name="NVIDIA RTX 3080",
-        reason="CUDA available"
+        reason="CUDA available",
+        cuda_ready=True
     )
     mock_nvml_init.side_effect = NVMLError(1)
     
@@ -345,7 +352,8 @@ def test_collect_metrics_with_nvml(
         name="NVIDIA RTX 3080",
         reason="CUDA available",
         cuda_version="11.8",
-        gpu_count=1
+        gpu_count=1,
+        cuda_ready=True
     )
     
     mock_get_count.return_value = 1
@@ -387,7 +395,8 @@ def test_collect_metrics_torch_fallback(mock_detect, mock_psutil, mock_torch):
         name="NVIDIA RTX 3080",
         reason="CUDA available",
         cuda_version="11.8",
-        gpu_count=1
+        gpu_count=1,
+        cuda_ready=True
     )
     
     mock_torch.cuda.mem_get_info.return_value = (
@@ -551,7 +560,8 @@ async def test_nvml_shutdown_on_stop(
     mock_detect.return_value = ComputeDeviceInfo(
         backend="GPU",
         name="NVIDIA RTX 3080",
-        reason="CUDA available"
+        reason="CUDA available",
+        cuda_ready=True
     )
     
     mock_get_count.return_value = 1

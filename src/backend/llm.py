@@ -207,12 +207,17 @@ class LocalLLM:
             return n_gpu_layers, False
 
         device = detect_compute_device()
-        if device.is_gpu:
+        if device.is_gpu and device.cuda_ready:
             auto_configured = True
             logger.info(
                 "Auto-configuring llama.cpp GPU offload for %s", device.name
             )
             return -1, True
+        if device.is_gpu and not device.cuda_ready:
+            logger.info(
+                "GPU detected (%s) but CUDA runtime unavailable: %s", device.name, device.reason
+            )
+            return 0, False
 
         return 0, False
 
