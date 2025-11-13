@@ -148,7 +148,7 @@ class AudioSTT:
 
                         if self.llm:
                             logger.info(f"Triggering LLM with audio: {text}")
-                            asyncio.create_task(self.llm.process_audio(text))
+                            await self.llm.process_audio(text)
                             await self.bridge.post({"type": "stt", "phase": "forwarded", "text": text})
                         else:
                             logger.error("LLM not set! Cannot process audio")
