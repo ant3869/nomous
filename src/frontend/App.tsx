@@ -768,9 +768,8 @@ function useNomousBridge() {
               }
             }
 
-            const detailForLog = rawDetail || speechText || "";
-            const systemLines = detailForLog
-              ? [`${stamp} ${value.toUpperCase()} → ${detailForLog}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
+            const systemLines = statusDetail
+              ? [`${stamp} ${value.toUpperCase()} → ${statusDetail}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
               : p.systemLines;
 
             return {
