@@ -142,14 +142,13 @@ class AudioSTT:
                     words = [w for w in text.split() if w]
                     if text and (len(text) >= self._min_final_chars or len(words) >= 1):
                         logger.info(f"STT FINAL: '{text}'")
-                        forwarded = bool(self.llm)
-                        await self.bridge.post({"type": "stt", "phase": "final", "text": text, "forwarded": forwarded})
+                        await self.bridge.post({"type": "stt", "phase": "final", "text": text, "forwarded": False})
                         await self.bridge.post(msg_event(f"🎤 You said: {text}"))
 
                         if self.llm:
                             logger.info(f"Triggering LLM with audio: {text}")
-                            await self.llm.process_audio(text)
-                            await self.bridge.post({"type": "stt", "phase": "forwarded", "text": text})
+                            asyncio.create_task(self.llm.process_audio(text))
+                            await self.bridge.post({"type": "stt", "phase": "forwarded", "text": text, "forwarded": True})
                         else:
                             logger.error("LLM not set! Cannot process audio")
                             await self.bridge.post(msg_event("ERROR: LLM not connected"))
