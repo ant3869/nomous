@@ -1671,7 +1671,7 @@ function normalizeSpeechCandidate(candidate: unknown, { skipStatusWords = false 
  * extractSpeechText({ payload: { message: ["Hi", "there"] } }); // "Hi there"
  */
 function extractSpeechText(payload: unknown, depth = 0, visited?: Set<unknown>): string | null {
-  if (depth > MAX_SPEECH_PAYLOAD_DEPTH) {
+  if (depth >= MAX_SPEECH_PAYLOAD_DEPTH) {
     return null;
   }
 
