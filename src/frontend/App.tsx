@@ -136,6 +136,8 @@ const STATUS_KEYWORDS = new Set([
   "disconnected",
   "listening",
   "speaking",
+  "noticing",
+  "learning",
 ]);
 const STORAGE_SETTINGS_KEY = "nomous.settings";
 const STORAGE_WS_KEY = "nomous.ws";
