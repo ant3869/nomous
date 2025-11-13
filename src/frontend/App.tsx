@@ -1633,7 +1633,7 @@ function normalizeSpeechCandidate(candidate: unknown, { skipStatusWords = false 
       .filter(Boolean)
       .join(" ")
       .trim();
-    return joined ? joined : null;
+    return joined || null;
   }
 
   return null;
