@@ -66,6 +66,12 @@ class LocalLLM:
         llm_cfg = cfg.get("llm", {})
         self.system_prompt = str(llm_cfg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT).strip()
         self.thinking_prompt = str(llm_cfg.get("thinking_prompt") or DEFAULT_THINKING_PROMPT).strip()
+        prompt_style_cfg = str(llm_cfg.get("prompt_style", "auto") or "auto").lower()
+        self.prompt_style = (
+            prompt_style_cfg
+            if prompt_style_cfg != "auto"
+            else self._auto_prompt_style(self.model_path)
+        )
 
         self.temperature = float(cfg["llm"]["temperature"])
         self.top_p = float(cfg["llm"]["top_p"])
@@ -549,6 +555,51 @@ class LocalLLM:
             "thinking_prompt": self.thinking_prompt,
         }
 
+    @staticmethod
+    def _auto_prompt_style(model_path: str | os.PathLike[str] | None) -> str:
+        """Infer a sensible prompt template based on known model naming patterns."""
+
+        if not model_path:
+            return "plain"
+
+        path_text = str(model_path).lower()
+        if "llama-3" in path_text or "llama3" in path_text:
+            return "llama-3-chat"
+
+        return "plain"
+
+    def _apply_prompt_template(self, system_text: str, user_text: str) -> str:
+        """Format ``system_text`` and ``user_text`` using the configured template."""
+
+        template = self.prompt_style
+
+        if template == "llama-3-chat":
+            # Llama 3 chat expects explicit header tokens around each role.
+            system_section = system_text.strip()
+            user_section = user_text.strip()
+            parts: list[str] = ["<|begin_of_text|>"]
+            if system_section:
+                parts.append(
+                    "<|start_header_id|>system<|end_header_id|>\n"
+                    f"{system_section}\n"
+                    "<|eot_id|>"
+                )
+            parts.append(
+                "<|start_header_id|>user<|end_header_id|>\n"
+                f"{user_section}\n"
+                "<|eot_id|>"
+            )
+            parts.append("<|start_header_id|>assistant<|end_header_id|>\n")
+            return "".join(parts)
+
+        # Fallback to the legacy plain prompt used by older base and instruct models.
+        sections = []
+        if system_text.strip():
+            sections.append(system_text.strip())
+        if user_text.strip():
+            sections.append(user_text.strip())
+        return "\n\n".join(sections)
+
     def _build_prompt(self, user_input: str, context_type: str = "text", include_tools: bool = True) -> str:
         """Build prompt with context, system persona, and tool instructions."""
 
@@ -609,14 +660,16 @@ class LocalLLM:
 
         scenario = f"{scenario}\n\n{final_instruction}"
 
-        sections = []
+        system_sections: list[str] = []
         if self.system_prompt:
-            sections.append(self.system_prompt)
+            system_sections.append(self.system_prompt.strip())
         if self.thinking_prompt:
-            sections.append(f"THOUGHT PROCESS GUIDANCE:\n{self.thinking_prompt}")
-        sections.append(scenario)
+            system_sections.append(
+                "THOUGHT PROCESS GUIDANCE:\n" + self.thinking_prompt.strip()
+            )
+        system_text = "\n\n".join(system_sections)
 
-        return "\n\n".join(part.strip() for part in sections if part and part.strip())
+        return self._apply_prompt_template(system_text, scenario)
 
     async def _generate(self, prompt: str, max_tokens: int | None = None, min_tokens: int = 10) -> str:
         """Generate response from model with token streaming."""

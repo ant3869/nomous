@@ -37,6 +37,7 @@ DEFAULT: Dict[str, Any] = {
         "temperature": 0.6,
         "top_p": 0.95,
         "tools_enabled": True,
+        "prompt_style": "auto",
         "system_prompt": (
             "You are Nomous, an autonomous multimodal AI orchestrator. "
             "Support the operator with concise, confident guidance, coordinate "
