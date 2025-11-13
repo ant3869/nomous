@@ -83,7 +83,7 @@ interface WSMessage {
 interface STTEventMessage extends WSMessage {
   type: "stt";
   phase?: STTPhase;
-  forwarded?: boolean | string;
+  forwarded?: boolean | "true";
 }
 interface ControlSettings {
   cameraEnabled: boolean;
