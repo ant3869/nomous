@@ -898,7 +898,7 @@ function useNomousBridge() {
           const phaseRaw = typeof sttMsg.phase === "string" ? sttMsg.phase.toLowerCase() : "";
           const phase: STTPhase =
             phaseRaw === "final" || phaseRaw === "forwarded" ? (phaseRaw as STTPhase) : "partial";
-          // Default to "partial" when the backend omits a phase so that transient captions still render.
+          // Default to "partial" for unrecognized phases or when the backend omits the phase field, so that transient captions still render.
           const forwarded = sttMsg.forwarded === true || sttMsg.forwarded === "true";
 
           setState(p => {
