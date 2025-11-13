@@ -82,6 +82,7 @@ class ComputeDeviceInfo:
     reason: str
     cuda_version: Optional[str] = None
     gpu_count: int = 0
+    cuda_ready: bool = False
 
     @property
     def is_gpu(self) -> bool:
@@ -146,6 +147,7 @@ def detect_compute_device() -> ComputeDeviceInfo:
                 reason=reason,
                 cuda_version=cuda_version,
                 gpu_count=gpu_count,
+                cuda_ready=False,
             )
 
         error_detail = f": {import_error}" if import_error else ""
@@ -156,11 +158,13 @@ def detect_compute_device() -> ComputeDeviceInfo:
             reason=reason,
             cuda_version=None,
             gpu_count=0,
+            cuda_ready=False,
         )
 
     reason = "No CUDA-capable GPU detected; defaulting to CPU."
     cuda_version: Optional[str] = None
     gpu_count = 0
+    cuda_ready = False
 
     try:
         if torch.cuda.is_available():
@@ -169,6 +173,7 @@ def detect_compute_device() -> ComputeDeviceInfo:
             backend = "GPU"
             cuda_version = torch.version.cuda
             reason = "CUDA runtime detected and PyTorch GPU build is active."
+            cuda_ready = True
         else:
             if nvml_probe:
                 gpu_name, gpu_count, cuda_version = nvml_probe
@@ -193,6 +198,7 @@ def detect_compute_device() -> ComputeDeviceInfo:
         reason=reason,
         cuda_version=cuda_version,
         gpu_count=gpu_count,
+        cuda_ready=cuda_ready,
     )
 
 

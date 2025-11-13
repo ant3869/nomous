@@ -4,6 +4,7 @@ export interface ComputeDeviceInfo {
   reason: string;
   cuda_version?: string | null;
   gpu_count?: number;
+  cuda_ready?: boolean;
 }
 
 export interface CpuMetrics {
