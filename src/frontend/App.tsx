@@ -2100,7 +2100,7 @@ function normalizeStreamText(text: string): string {
   if (!text) {
     return "";
   }
-  return text.replace(/\s+/g, " ").replace(/\s([,.;!?])/g, "$$1").trim();
+  return text.replace(/\s+/g, " ").replace(/\s([,.;!?])/g, "$1").trim();
 }
 
 function splitThoughtMessage(text: string): { prefix: string | null; detail: string } {
