@@ -377,12 +377,17 @@ def check_compute_backend() -> "ComputeDeviceInfo":
     from src.backend.system import detect_compute_device
 
     info = detect_compute_device()
-    if info.is_gpu:
+    if info.is_gpu and info.cuda_ready:
         print_success(
             f"CUDA is available! Found {info.gpu_count} device(s): {info.name}"
         )
         if info.cuda_version:
             print_success(f"CUDA version: {info.cuda_version}")
+    elif info.is_gpu:
+        print_warning(
+            "GPU detected but CUDA runtime is unavailable. Falling back to CPU execution."
+        )
+        print_warning(info.reason)
     else:
         print_warning("CUDA is not available. Using CPU mode")
         print_warning(info.reason)
@@ -392,12 +397,15 @@ def ensure_gpu_support(pip_cmd: str, info: "ComputeDeviceInfo") -> "ComputeDevic
     """Attempt to install GPU-accelerated wheels when CUDA hardware is detected."""
     from src.backend.system import detect_compute_device
 
-    if info.is_gpu:
+    if info.is_gpu and info.cuda_ready:
         return info
 
-    if not shutil.which("nvidia-smi"):
+    if not (info.is_gpu or shutil.which("nvidia-smi")):
         print_warning("No NVIDIA GPU detected by nvidia-smi; continuing with CPU mode.")
         return info
+
+    if info.is_gpu and not info.cuda_ready:
+        print_warning(info.reason)
 
     print_status(
         "NVIDIA GPU detected but CUDA unavailable. Attempting to install GPU dependencies...",
