@@ -878,7 +878,7 @@ function useNomousBridge() {
           setState(p => {
             const filtered = p.sttLines.filter(line => !line.includes("Listening:"));
             const stamp = `[${new Date().toLocaleTimeString()}]`;
-            let nextLines = p.sttLines;
+            let nextLines;
 
             if (phase === "partial") {
               const entry = `${stamp} Listening: ${normalizedText}`;
