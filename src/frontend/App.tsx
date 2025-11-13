@@ -8,7 +8,7 @@ import { FilePathInput } from "./components/FilePathInput";
 import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { Activity, AlertTriangle, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
+import { Activity, AlertTriangle, AudioWaveform, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Speaker, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode, MemoryNodeKind } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
@@ -114,7 +114,7 @@ interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
-  speechLines: string[]; systemLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
+  speechLines: string[]; systemLines: string[]; sttLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
   settings: ControlSettings; loadingOverlay: LoadingOverlay | null; modelCatalog: ModelCatalogEntry[]; modelCatalogError: string | null;
   promptReloadRequired: boolean;
 }
@@ -123,6 +123,18 @@ interface LoadingOverlay {
   label: string;
   progress: number;
   detail?: string;
+}
+
+interface ThoughtAccumulator {
+  prefix: string | null;
+  stamp: string;
+  content: string;
+  updatedAt: number;
+}
+
+interface SttFinalRecord {
+  text: string;
+  stamp: string;
 }
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -519,6 +531,7 @@ function createInitialState(): DashboardState {
     thoughtLines: [],
     speechLines: [],
     systemLines: [],
+    sttLines: [],
     chatMessages: [],
     toolActivity: [],
     systemMetrics: null,
@@ -638,6 +651,8 @@ function useNomousBridge() {
   const tCounter = useRef(0);
   const [chatInput, setChatInput] = useState("");
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const thoughtAccumulatorRef = useRef<ThoughtAccumulator | null>(null);
+  const sttFinalRef = useRef<SttFinalRecord | null>(null);
 
   useEffect(() => {
     const el = chatScrollRef.current;
@@ -814,9 +829,86 @@ function useNomousBridge() {
           }));
           break;
         }
-        case "thought": 
-          setState(p => ({ ...p, thoughtLines: [`[${new Date().toLocaleTimeString()}] ${msg.text}`, ...p.thoughtLines.slice(0, MAX_CHAT_HISTORY)] })); 
+        case "thought": {
+          const rawThought = typeof msg.text === "string" ? msg.text : "";
+          const normalizedThought = normalizeStreamText(rawThought);
+          if (!normalizedThought) {
+            break;
+          }
+
+          const { prefix, detail } = splitThoughtMessage(normalizedThought);
+          if (!detail && !prefix) {
+            break;
+          }
+
+          const now = Date.now();
+          setState(p => {
+            const prevAccumulator = thoughtAccumulatorRef.current;
+            let nextLines = p.thoughtLines;
+
+            if (prevAccumulator && prevAccumulator.prefix === prefix && now - prevAccumulator.updatedAt < 4500) {
+              const combinedDetail = combineThoughtDetails(prevAccumulator.content, detail);
+              const updatedEntry = `${prevAccumulator.stamp} ${formatThoughtDisplay(prefix, combinedDetail)}`;
+              const [, ...rest] = nextLines;
+              const limitedRest = rest.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1));
+              nextLines = [updatedEntry, ...limitedRest];
+              thoughtAccumulatorRef.current = { ...prevAccumulator, content: combinedDetail, updatedAt: now };
+            } else {
+              const stamp = `[${new Date().toLocaleTimeString()}]`;
+              const entry = `${stamp} ${formatThoughtDisplay(prefix, detail)}`;
+              nextLines = [entry, ...nextLines.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+              thoughtAccumulatorRef.current = { prefix, stamp, content: detail, updatedAt: now };
+            }
+
+            return { ...p, thoughtLines: nextLines };
+          });
           break;
+        }
+        case "stt": {
+          const rawText = typeof msg.text === "string" ? msg.text : "";
+          const normalizedText = normalizeStreamText(rawText);
+          if (!normalizedText) {
+            break;
+          }
+
+          const phaseRaw = typeof msg.phase === "string" ? msg.phase.toLowerCase() : "";
+          const phase = phaseRaw.length > 0 ? phaseRaw : "partial";
+          const forwarded = msg.forwarded === true || msg.forwarded === "true";
+
+          setState(p => {
+            const filtered = p.sttLines.filter(line => !line.includes("Listening:"));
+            const stamp = `[${new Date().toLocaleTimeString()}]`;
+            let nextLines = p.sttLines;
+
+            if (phase === "partial") {
+              const entry = `${stamp} Listening: ${normalizedText}`;
+              nextLines = [entry, ...filtered.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+            } else if (phase === "final") {
+              const suffix = forwarded ? " → queued for response" : "";
+              const entry = `${stamp} Captured: ${normalizedText}${suffix}`;
+              nextLines = [entry, ...filtered.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+              sttFinalRef.current = { text: normalizedText, stamp };
+            } else if (phase === "forwarded") {
+              const reference = sttFinalRef.current;
+              if (reference && reference.text === normalizedText) {
+                const [, ...rest] = filtered;
+                const entry = `${reference.stamp} Dispatched: ${normalizedText} → reasoning core`;
+                nextLines = [entry, ...rest.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+              } else {
+                const entry = `${stamp} Dispatched: ${normalizedText} → reasoning core`;
+                nextLines = [entry, ...filtered.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+              }
+              sttFinalRef.current = null;
+            } else {
+              const title = phase.charAt(0).toUpperCase() + phase.slice(1);
+              const entry = `${stamp} ${title}: ${normalizedText}`;
+              nextLines = [entry, ...filtered.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1))];
+            }
+
+            return { ...p, sttLines: nextLines };
+          });
+          break;
+        }
         case "image": setState(p => ({ ...p, preview: msg.dataUrl })); break;
         case "metrics":
           setState(p => ({
@@ -1442,44 +1534,6 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect, zoom = 1 }: Memor
   );
 }
 
-type StreamCardProps = {
-  title: string;
-  icon: React.ComponentType<{ className?: string }>;
-  description?: string;
-  lines: string[];
-  emptyLabel: string;
-  accentClassName: string;
-  height?: string;
-};
-
-function StreamCard({ title, icon: Icon, description, lines, emptyLabel, accentClassName, height }: StreamCardProps) {
-  const bodyHeight = height ?? "h-56";
-  return (
-    <Card className="bg-zinc-900/70 border-zinc-800/60">
-      <CardContent className="p-4 text-zinc-200 space-y-3">
-        <div className="flex items-center gap-2">
-          <Icon className="w-4 h-4" />
-          <span className="font-semibold">{title}</span>
-        </div>
-        {description ? <p className="text-xs text-zinc-400 leading-relaxed">{description}</p> : null}
-        <div
-          className={`overflow-auto rounded-md bg-black/60 p-3 font-mono text-xs leading-relaxed text-zinc-100/95 whitespace-pre-wrap ${bodyHeight}`}
-        >
-          {lines.length > 0 ? (
-            lines.map((l, i) => (
-              <div key={i} className={`mb-1 last:mb-0 ${accentClassName}`}>
-                {l}
-              </div>
-            ))
-          ) : (
-            <div className="text-zinc-500 text-center mt-8">{emptyLabel}</div>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function MemorySummaryStat({ label, value, helper }: { label: string; value: string; helper?: string }) {
   return (
     <div className="rounded-xl border border-zinc-800/60 bg-black/40 px-4 py-3">
@@ -1550,6 +1604,295 @@ function MemoryList({ title, icon, entries, emptyLabel, selectedId, onSelect }: 
           })
         )}
       </div>
+    </div>
+  );
+}
+
+type StreamView = "thoughts" | "speech" | "signals";
+
+interface ConversationStreamPanelProps {
+  thoughtLines: string[];
+  speechLines: string[];
+  systemLines: string[];
+}
+
+function ConversationStreamPanel({ thoughtLines, speechLines, systemLines }: ConversationStreamPanelProps) {
+  const [activeView, setActiveView] = useState<StreamView>("thoughts");
+
+  const streams = [
+    {
+      id: "thoughts" as const,
+      title: "Cognitive Stream",
+      description: "Trace intermediate reasoning, decisions, and planning notes in real time.",
+      icon: Brain,
+      lines: thoughtLines,
+      empty: "Waiting for thoughts...",
+      accent: "text-purple-300",
+      shortLabel: "Think",
+      height: "h-72",
+    },
+    {
+      id: "speech" as const,
+      title: "Speech Commitments",
+      description: "Monitor which responses were finalized and handed to speech synthesis.",
+      icon: Volume2,
+      lines: speechLines,
+      empty: "No speech prepared yet.",
+      accent: "text-emerald-300",
+      shortLabel: "Speak",
+      height: "h-60",
+    },
+    {
+      id: "signals" as const,
+      title: "System & Prompt Signals",
+      description: "System prompts, status transitions, and any runtime directives from the core.",
+      icon: Radio,
+      lines: systemLines,
+      empty: "No system activity captured yet.",
+      accent: "text-sky-300",
+      shortLabel: "Signals",
+      height: "h-60",
+    },
+  ];
+
+  const active = streams.find(stream => stream.id === activeView) ?? streams[0];
+  const ActiveIcon = active.icon;
+
+  return (
+    <Card className="bg-zinc-900/70 border-zinc-800/60">
+      <CardContent className="space-y-4 p-4 text-zinc-200">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <ActiveIcon className="h-4 w-4" />
+              <span className="font-semibold">{active.title}</span>
+            </div>
+            <p className="text-xs text-zinc-500 leading-relaxed">{active.description}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {streams.map(stream => (
+              <button
+                type="button"
+                key={stream.id}
+                onClick={() => setActiveView(stream.id)}
+                className={`rounded-full border px-3 py-1 text-xs transition ${
+                  activeView === stream.id
+                    ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-100"
+                    : "border-zinc-700/60 bg-black/30 text-zinc-400 hover:border-zinc-600/80"
+                }`}
+              >
+                {stream.shortLabel}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-zinc-800/60 bg-black/60">
+          <div className={`${active.height} overflow-y-auto p-4 font-mono text-xs leading-relaxed text-zinc-100/95 whitespace-pre-wrap`}>
+            {active.lines.length > 0 ? (
+              active.lines.map((line, index) => (
+                <div key={index} className={`mb-1 last:mb-0 ${active.accent}`}>
+                  {line}
+                </div>
+              ))
+            ) : (
+              <div className="mt-12 text-center text-zinc-500">{active.empty}</div>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+interface SttMonitorCardProps {
+  lines: string[];
+  micOn: boolean;
+  micStatus: "positive" | "neutral" | "negative";
+  micStatusLabel: string;
+  micSensitivity: number;
+  sttEnabled: boolean;
+  vu: number;
+  setMic: (on: boolean) => void;
+  updateSettings: (patch: Partial<ControlSettings>) => void;
+}
+
+function SttMonitorCard({ lines, micOn, micStatus, micStatusLabel, micSensitivity, sttEnabled, vu, setMic, updateSettings }: SttMonitorCardProps) {
+  const toggleMic = () => {
+    const next = !micOn;
+    updateSettings({ microphoneEnabled: next });
+    setMic(next);
+  };
+
+  const vuPercent = Math.round(Math.max(0, Math.min(1, vu)) * 100);
+
+  const getAccentForLine = (line: string) => {
+    if (line.includes("Listening:")) return "text-amber-300";
+    if (line.includes("Captured:")) return "text-emerald-300";
+    if (line.includes("Dispatched:")) return "text-sky-300";
+    return "text-zinc-200";
+  };
+
+  const micStatusAccent =
+    micStatus === "positive" ? "text-emerald-300" : micStatus === "negative" ? "text-red-300" : "text-zinc-300";
+
+  return (
+    <Card className="bg-zinc-900/70 border-zinc-800/60">
+      <CardContent className="space-y-4 p-4 text-zinc-200">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AudioWaveform className="h-4 w-4" />
+            <span className="font-semibold">Speech Input Monitor</span>
+          </div>
+          <button
+            type="button"
+            onClick={toggleMic}
+            className={`inline-flex items-center gap-2 rounded-lg px-3 py-1 text-sm transition ${
+              micOn
+                ? "bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700/80"
+                : "bg-emerald-600/90 text-white hover:bg-emerald-500/90"
+            }`}
+          >
+            {micOn ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+            {micOn ? "Stop Listening" : "Enable Mic"}
+          </button>
+        </div>
+
+        <div className="grid gap-3 text-xs text-zinc-400 sm:grid-cols-3">
+          <div>
+            Mic • <span className={`font-medium ${micStatusAccent}`}>{micStatusLabel}</span>
+          </div>
+          <div>
+            STT • <span className={sttEnabled ? "text-emerald-300" : "text-zinc-500"}>{sttEnabled ? "Enabled" : "Disabled"}</span>
+          </div>
+          <div>Sensitivity • {micSensitivity}%</div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="h-2 flex-1 overflow-hidden rounded-full bg-zinc-800">
+            <div
+              className={`h-full transition-all ${
+                micStatus === "positive" ? "bg-emerald-500" : micStatus === "negative" ? "bg-red-500" : "bg-sky-500/70"
+              }`}
+              style={{ width: `${vuPercent}%` }}
+            />
+          </div>
+          <span className="w-16 text-right text-[11px] text-zinc-500">{vuPercent}%</span>
+        </div>
+
+        <div className="rounded-xl border border-zinc-800/60 bg-black/60">
+          <div className="h-48 overflow-y-auto p-4 font-mono text-xs leading-relaxed text-zinc-100/95 whitespace-pre-wrap">
+            {lines.length > 0 ? (
+              lines.map((line, index) => (
+                <div key={index} className={`mb-1 last:mb-0 ${getAccentForLine(line)}`}>
+                  {line}
+                </div>
+              ))
+            ) : (
+              <div className="mt-10 text-center text-zinc-500">No speech captured yet.</div>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+interface ConversationQuickSettingsProps {
+  settings: ControlSettings;
+  micOn: boolean;
+  setMic: (on: boolean) => void;
+  updateSettings: (patch: Partial<ControlSettings>) => void;
+  push: (message: any) => void;
+}
+
+function ConversationQuickSettings({ settings, micOn, setMic, updateSettings, push }: ConversationQuickSettingsProps) {
+  const handleMicChange = (value: boolean) => {
+    updateSettings({ microphoneEnabled: value });
+    setMic(value);
+  };
+
+  const handleSttChange = (value: boolean) => {
+    updateSettings({ sttEnabled: value });
+    push({ type: "toggle", what: "stt", value });
+  };
+
+  const handleTtsChange = (value: boolean) => {
+    updateSettings({ ttsEnabled: value });
+    push({ type: "toggle", what: "tts", value });
+  };
+
+  const handleSpeakerChange = (value: boolean) => {
+    updateSettings({ speakerEnabled: value });
+    push({ type: "toggle", what: "speaker", value });
+  };
+
+  return (
+    <Card className="bg-zinc-900/70 border-zinc-800/60">
+      <CardContent className="space-y-4 p-4 text-zinc-200">
+        <div className="flex items-center gap-2">
+          <Wrench className="h-4 w-4" />
+          <span className="font-semibold">Conversation Controls</span>
+        </div>
+        <p className="text-xs text-zinc-500 leading-relaxed">
+          Toggle realtime capture and response paths without leaving the conversation view.
+        </p>
+        <div className="space-y-3">
+          <QuickToggleRow
+            icon={Mic}
+            label="Microphone capture"
+            helper="Stream audio into the runtime for transcription."
+            checked={micOn}
+            onCheckedChange={handleMicChange}
+          />
+          <QuickToggleRow
+            icon={AudioWaveform}
+            label="Speech-to-text"
+            helper="Transcribe live voice input before routing to the model."
+            checked={settings.sttEnabled}
+            onCheckedChange={handleSttChange}
+          />
+          <QuickToggleRow
+            icon={Volume2}
+            label="Voice replies"
+            helper="Allow the assistant to speak its responses aloud."
+            checked={settings.ttsEnabled}
+            onCheckedChange={handleTtsChange}
+          />
+          <QuickToggleRow
+            icon={Speaker}
+            label="Speaker output"
+            helper="Send synthesized audio to the connected speakers."
+            checked={settings.speakerEnabled}
+            onCheckedChange={handleSpeakerChange}
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+interface QuickToggleRowProps {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  helper?: string;
+  checked: boolean;
+  onCheckedChange: (value: boolean) => void;
+}
+
+function QuickToggleRow({ icon: Icon, label, helper, checked, onCheckedChange }: QuickToggleRowProps) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-zinc-800/60 bg-black/40 px-3 py-2">
+      <div className="flex items-center gap-3">
+        <div className="grid h-9 w-9 place-items-center rounded-lg border border-zinc-800/60 bg-zinc-900/80 text-zinc-300">
+          <Icon className="h-4 w-4" />
+        </div>
+        <div>
+          <div className="text-sm text-zinc-200">{label}</div>
+          {helper ? <div className="text-[11px] text-zinc-500">{helper}</div> : null}
+        </div>
+      </div>
+      <Switch checked={checked} onCheckedChange={onCheckedChange} aria-label={label} />
     </div>
   );
 }
@@ -1751,6 +2094,42 @@ function mergeSpeechLines(lines: string[], stamp: string, nextText: string): str
 
   const trimmedRest = lines.slice(0, Math.max(0, MAX_CHAT_HISTORY - 1));
   return [newEntry, ...trimmedRest];
+}
+
+function normalizeStreamText(text: string): string {
+  if (!text) {
+    return "";
+  }
+  return text.replace(/\s+/g, " ").replace(/\s([,.;!?])/g, "$$1").trim();
+}
+
+function splitThoughtMessage(text: string): { prefix: string | null; detail: string } {
+  const colonIndex = text.indexOf(":");
+  if (colonIndex === -1) {
+    return { prefix: null, detail: text };
+  }
+  const prefix = text.slice(0, colonIndex).trim();
+  const detail = text.slice(colonIndex + 1).trim();
+  return { prefix: prefix.length > 0 ? prefix : null, detail };
+}
+
+function combineThoughtDetails(existing: string, incoming: string): string {
+  const parts = [existing, incoming].map(part => part.trim()).filter(Boolean);
+  if (parts.length === 0) {
+    return "";
+  }
+  return normalizeStreamText(parts.join(" "));
+}
+
+function formatThoughtDisplay(prefix: string | null, detail: string): string {
+  const normalizedDetail = normalizeStreamText(detail);
+  if (prefix && normalizedDetail) {
+    return `${prefix}: ${normalizedDetail}`;
+  }
+  if (prefix) {
+    return prefix;
+  }
+  return normalizedDetail;
 }
 
 interface MemoryDetailCardProps {
@@ -3178,12 +3557,11 @@ export default function App(){
               <TabsList className="flex flex-wrap gap-2 bg-zinc-950/60 border border-zinc-800/60">
                 <TabsTrigger value="overview">Overview</TabsTrigger>
                 <TabsTrigger value="console">Console</TabsTrigger>
-                <TabsTrigger value="chat">Chat</TabsTrigger>
+                <TabsTrigger value="conversation">Conversation</TabsTrigger>
                 <TabsTrigger value="behavior">Behavior</TabsTrigger>
                 <TabsTrigger value="tokens">Tokens</TabsTrigger>
                 <TabsTrigger value="memory">Memory</TabsTrigger>
                 <TabsTrigger value="tools">Tools</TabsTrigger>
-                <TabsTrigger value="thoughts">Thoughts</TabsTrigger>
               </TabsList>
 
               <TabsContent value="overview" className="pt-4">
@@ -3283,57 +3661,95 @@ export default function App(){
                 </div>
               </TabsContent>
 
-              <TabsContent value="chat" className="pt-4">
-                <Card className="bg-zinc-900/70 border-zinc-800/60">
-                  <CardContent className="flex min-h-[32rem] flex-1 flex-col gap-4 p-4 lg:h-[60vh]">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2 text-zinc-200">
-                        <MessageSquare className="h-4 w-4" />
-                        <span className="font-semibold">Manual Chat</span>
-                      </div>
-                      <Badge className={`border ${state.connected ? "bg-emerald-500/20 text-emerald-100 border-emerald-500/40" : "bg-red-500/20 text-red-200 border-red-500/40"}`}>
-                        {state.connected ? "Connected" : "Offline"}
-                      </Badge>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto rounded-lg border border-zinc-800/60 bg-black/50 p-4" ref={chatScrollRef}>
-                      <div className="flex flex-col gap-3">
-                        {state.chatMessages.length === 0 ? (
-                          <div className="text-sm text-zinc-400">
-                            Type a message below to talk to the model without relying on the microphone or camera. Conversations stay in this session only.
+              <TabsContent value="conversation" className="pt-4">
+                <div className="grid gap-4 xl:grid-cols-[7fr_5fr]">
+                  <div className="space-y-4">
+                    <Card className="bg-zinc-900/70 border-zinc-800/60">
+                      <CardContent className="flex min-h-[28rem] flex-1 flex-col gap-4 p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="flex items-center gap-3 text-zinc-200">
+                            <div className="grid h-10 w-10 place-items-center rounded-xl border border-zinc-800/70 bg-black/50">
+                              <MessageSquare className="h-4 w-4" />
+                            </div>
+                            <div>
+                              <div className="text-sm font-semibold">Manual Chat</div>
+                              <div className="text-xs text-zinc-500">Send precise directives without using voice.</div>
+                            </div>
                           </div>
-                        ) : (
-                          state.chatMessages.map(message => (
-                            <ChatBubble key={message.id} message={message} />
-                          ))
-                        )}
-                      </div>
-                    </div>
+                          <Badge className={`border ${state.connected ? "bg-emerald-500/20 text-emerald-100 border-emerald-500/40" : "bg-red-500/20 text-red-200 border-red-500/40"}`}>
+                            {state.connected ? "Connected" : "Offline"}
+                          </Badge>
+                        </div>
 
-                    <form onSubmit={handleChatSubmit} className="space-y-2">
-                      <label className="text-xs uppercase tracking-[0.3em] text-zinc-500">Message</label>
-                      <div className="flex flex-col gap-2 sm:flex-row">
-                        <textarea
-                          value={chatInput}
-                          onChange={event => setChatInput(event.target.value)}
-                          onKeyDown={handleChatKeyDown}
-                          rows={3}
-                          placeholder="Type your instruction or question..."
-                          className="min-h-[96px] flex-1 rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
-                        />
-                        <Button
-                          type="submit"
-                          disabled={!chatInput.trim()}
-                          className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500/90 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
-                        >
-                          <Send className="h-4 w-4" />
-                          Send
-                        </Button>
-                      </div>
-                      <div className="text-[11px] text-zinc-500">Press Enter to send. Use Shift + Enter for a new line.</div>
-                    </form>
-                  </CardContent>
-                </Card>
+                        <div className="flex-1 overflow-hidden rounded-xl border border-zinc-800/60 bg-black/50">
+                          <div className="h-full overflow-y-auto p-4" ref={chatScrollRef}>
+                            <div className="flex flex-col gap-3">
+                              {state.chatMessages.length === 0 ? (
+                                <div className="text-sm text-zinc-400">
+                                  Draft instructions or follow-ups here when you want full control over the wording.
+                                </div>
+                              ) : (
+                                state.chatMessages.map(message => (
+                                  <ChatBubble key={message.id} message={message} />
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <form onSubmit={handleChatSubmit} className="space-y-2">
+                          <label className="text-xs uppercase tracking-[0.3em] text-zinc-500">Message</label>
+                          <div className="flex flex-col gap-2 sm:flex-row">
+                            <textarea
+                              value={chatInput}
+                              onChange={event => setChatInput(event.target.value)}
+                              onKeyDown={handleChatKeyDown}
+                              rows={3}
+                              placeholder="Type your instruction or question..."
+                              className="min-h-[96px] flex-1 rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500/80 focus:outline-none focus:ring-0"
+                            />
+                            <Button
+                              type="submit"
+                              disabled={!chatInput.trim()}
+                              className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500/90 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                            >
+                              <Send className="h-4 w-4" />
+                              Send
+                            </Button>
+                          </div>
+                          <div className="text-[11px] text-zinc-500">Press Enter to send. Use Shift + Enter for a new line.</div>
+                        </form>
+                      </CardContent>
+                    </Card>
+
+                    <SttMonitorCard
+                      lines={state.sttLines}
+                      micOn={state.micOn}
+                      micStatus={micStatus}
+                      micStatusLabel={micStatusLabel}
+                      micSensitivity={micSensitivity}
+                      sttEnabled={state.settings.sttEnabled}
+                      vu={state.vu}
+                      setMic={setMic}
+                      updateSettings={updateSettings}
+                    />
+                  </div>
+
+                  <div className="space-y-4">
+                    <ConversationStreamPanel
+                      thoughtLines={state.thoughtLines}
+                      speechLines={state.speechLines}
+                      systemLines={state.systemLines}
+                    />
+                    <ConversationQuickSettings
+                      settings={state.settings}
+                      micOn={state.micOn}
+                      setMic={setMic}
+                      updateSettings={updateSettings}
+                      push={push}
+                    />
+                  </div>
+                </div>
               </TabsContent>
 
               <TabsContent value="console" className="pt-4">
@@ -3552,42 +3968,6 @@ export default function App(){
                       createMemoryLink(fromId, toId, { weight, relationship, context })
                     }
                   />
-                </div>
-              </TabsContent>
-
-              <TabsContent value="thoughts" className="pt-4">
-                <div className="grid gap-4 lg:grid-cols-3">
-                  <div className="lg:col-span-2">
-                    <StreamCard
-                      title="Cognitive Stream"
-                      icon={MessageSquare}
-                      description="Live reasoning trace as the model explores options and intermediate thoughts."
-                      lines={state.thoughtLines}
-                      emptyLabel="Waiting for thoughts..."
-                      accentClassName="text-purple-300"
-                      height="h-72"
-                    />
-                  </div>
-                  <div className="space-y-4 lg:col-span-1">
-                    <StreamCard
-                      title="Speech Commitments"
-                      icon={Volume2}
-                      description="Finalized responses that were sent to speech synthesis."
-                      lines={state.speechLines}
-                      emptyLabel="No speech prepared yet."
-                      accentClassName="text-emerald-300"
-                      height="h-36"
-                    />
-                    <StreamCard
-                      title="System & Prompt Signals"
-                      icon={Radio}
-                      description="System prompts, status transitions, and other generated directives."
-                      lines={state.systemLines}
-                      emptyLabel="No system activity captured yet."
-                      accentClassName="text-sky-300"
-                      height="h-36"
-                    />
-                  </div>
                 </div>
               </TabsContent>
 

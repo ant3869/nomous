@@ -142,11 +142,14 @@ class AudioSTT:
                     words = [w for w in text.split() if w]
                     if text and (len(text) >= self._min_final_chars or len(words) >= 1):
                         logger.info(f"STT FINAL: '{text}'")
+                        forwarded = bool(self.llm)
+                        await self.bridge.post({"type": "stt", "phase": "final", "text": text, "forwarded": forwarded})
                         await self.bridge.post(msg_event(f"🎤 You said: {text}"))
 
                         if self.llm:
                             logger.info(f"Triggering LLM with audio: {text}")
                             asyncio.create_task(self.llm.process_audio(text))
+                            await self.bridge.post({"type": "stt", "phase": "forwarded", "text": text})
                         else:
                             logger.error("LLM not set! Cannot process audio")
                             await self.bridge.post(msg_event("ERROR: LLM not connected"))
@@ -161,6 +164,7 @@ class AudioSTT:
                     partial = partial_result.get("partial", "").strip()
 
                     if partial and len(partial) >= self._min_partial_chars:
+                        await self.bridge.post({"type": "stt", "phase": "partial", "text": partial})
                         await self.bridge.post(msg_event(f"🎤 Listening: {partial}"))
                             
             except Exception as e:
