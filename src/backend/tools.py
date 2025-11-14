@@ -86,7 +86,7 @@ class ToolExecutor:
         self.register_tool(Tool(
             name="recall_recent_context",
             display_name="Recall Recent Context",
-            description="Retrieve the most recent context and interactions. Use this to maintain conversation continuity and understand what just happened.",
+            description="Get recent conversation history from the LAST FEW MINUTES ONLY. Does NOT search stored memories. Use recall_entity to search for information the user told you in the past.",
             parameters=[
                 ToolParameter("count", "number", "Number of recent items to recall", required=False, default=5)
             ],
@@ -255,11 +255,11 @@ class ToolExecutor:
         self.register_tool(Tool(
             name="recall_entity",
             display_name="Recall Entity",
-            description="Recall information about a person, place, or object using semantic search. Use natural language queries.",
+            description="Search stored memory for ANY information - people, places, objects, facts, passwords, preferences, or anything the user told you. Use this when asked to remember, recall, or retrieve past information. Use natural language queries.",
             parameters=[
-                ToolParameter("query", "string", "What to search for", required=True),
+                ToolParameter("query", "string", "What to search for (e.g., 'user name', 'password', 'words I told you')", required=True),
                 ToolParameter("entity_type", "string", "Type to filter by", required=False,
-                            enum=["person", "place", "object", "all"])
+                            enum=["person", "place", "object", "preference", "all"], default="all")
             ],
             function=self._recall_entity,
             category="memory",
