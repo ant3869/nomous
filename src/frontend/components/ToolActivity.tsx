@@ -33,6 +33,7 @@ export interface ToolResult {
   warnings: string[];
   timestamp: number;
   durationMs: number;
+  executionId?: string; // Unique ID to prevent React key collisions
 }
 
 interface ToolActivityProps {
@@ -189,7 +190,8 @@ export function ToolActivity({ tools, maxDisplay = 10 }: ToolActivityProps) {
           const icon = TOOL_ICONS[toolUse.tool] ?? categoryStyle.icon;
           const statusClass = toolUse.success ? STATUS_BADGES.success : STATUS_BADGES.failure;
           const statusIcon = toolUse.success ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />;
-          const id = `${toolUse.tool}-${toolUse.timestamp}`;
+          // Use unique execution ID if available, otherwise fall back to tool-timestamp
+          const id = toolUse.executionId || `${toolUse.tool}-${toolUse.timestamp}`;
           const expanded = expandedId === id;
           const displayName = toolUse.displayName || toolUse.tool;
 

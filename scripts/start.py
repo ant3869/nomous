@@ -58,6 +58,10 @@ LOG_DIR = PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "nomous.log"
 
+# Clear the log file on startup
+if LOG_FILE.exists():
+    LOG_FILE.unlink()
+
 logger = logging.getLogger("nomous.start")
 logger.setLevel(logging.INFO)
 if not logger.handlers:

@@ -180,6 +180,105 @@ class ToolExecutor:
             return_description="Validation outcome with any detected issues."
         ))
 
+        # Entity memory tools
+        self.register_tool(Tool(
+            name="remember_person",
+            display_name="Remember Person",
+            description="Remember a person's name and details. Use this when you learn someone's name or details about them.",
+            parameters=[
+                ToolParameter("name", "string", "The person's name", required=True),
+                ToolParameter("context", "string", "Context about meeting them or what you learned", required=False),
+                ToolParameter("relationship", "string", "Their relationship to the user", required=False)
+            ],
+            function=self._remember_person,
+            category="memory",
+            return_description="Confirmation that the person was remembered with their details."
+        ))
+
+        self.register_tool(Tool(
+            name="remember_place",
+            display_name="Remember Place",
+            description="Remember a location, room, or place with its characteristics. Use when you observe or learn about a location.",
+            parameters=[
+                ToolParameter("name", "string", "Name of the place", required=True),
+                ToolParameter("description", "string", "What the place looks like or its purpose", required=False),
+                ToolParameter("layout", "string", "Layout or arrangement details", required=False)
+            ],
+            function=self._remember_place,
+            category="memory",
+            return_description="Confirmation that the place was remembered."
+        ))
+
+        self.register_tool(Tool(
+            name="remember_object",
+            display_name="Remember Object",
+            description="Remember a specific object or item you've observed. Helps track belongings and their locations.",
+            parameters=[
+                ToolParameter("name", "string", "Name of the object", required=True),
+                ToolParameter("description", "string", "What it looks like", required=False),
+                ToolParameter("location", "string", "Where it's located", required=False)
+            ],
+            function=self._remember_object,
+            category="memory",
+            return_description="Confirmation that the object was remembered."
+        ))
+
+        self.register_tool(Tool(
+            name="remember_fact",
+            display_name="Remember Fact",
+            description="Remember an important fact or piece of information like passwords, codes, or general knowledge. Use this for any information that should be retained.",
+            parameters=[
+                ToolParameter("category", "string", "Category of the fact", required=False, default="fact",
+                            enum=["preference", "routine", "fact", "context", "instruction", "password", "secret"]),
+                ToolParameter("content", "string", "The fact to remember", required=True),
+                ToolParameter("importance", "number", "How important (1-10)", required=False, default=5)
+            ],
+            function=self._remember_fact,
+            category="memory",
+            return_description="Confirmation that the fact was stored."
+        ))
+
+        self.register_tool(Tool(
+            name="learn_user_preference",
+            display_name="Learn User Preference",
+            description="Learn and remember a user preference or like/dislike. Build understanding of user's tastes.",
+            parameters=[
+                ToolParameter("preference", "string", "The preference to remember", required=True),
+                ToolParameter("strength", "number", "How strong (1-10, negative for dislike)", required=False, default=5),
+                ToolParameter("context", "string", "Context about when you learned this", required=False)
+            ],
+            function=self._learn_preference,
+            category="learning",
+            return_description="Confirmation that the preference was learned."
+        ))
+
+        self.register_tool(Tool(
+            name="recall_entity",
+            display_name="Recall Entity",
+            description="Recall information about a person, place, or object using semantic search. Use natural language queries.",
+            parameters=[
+                ToolParameter("query", "string", "What to search for", required=True),
+                ToolParameter("entity_type", "string", "Type to filter by", required=False,
+                            enum=["person", "place", "object", "all"])
+            ],
+            function=self._recall_entity,
+            category="memory",
+            return_description="List of matching entities with similarity scores."
+        ))
+
+        self.register_tool(Tool(
+            name="get_learning_progress",
+            display_name="Get Learning Progress",
+            description="View your learning timeline showing how understanding has evolved. See what you've learned and when.",
+            parameters=[
+                ToolParameter("entity", "string", "Specific entity to get timeline for", required=False),
+                ToolParameter("limit", "number", "Maximum events to return", required=False, default=20)
+            ],
+            function=self._get_learning_progress,
+            category="learning",
+            return_description="Timeline of learning events showing knowledge evolution."
+        ))
+
         # Development/milestone tools
         self.register_tool(Tool(
             name="track_milestone",
@@ -304,10 +403,16 @@ class ToolExecutor:
                     prompt += f"  - returns: {tool.return_description}\n"
                 for param in tool.parameters:
                     req = "required" if param.required else "optional"
-                    prompt += f"  - {param.name} ({param.type}, {req}): {param.description}\n"
+                    param_info = f"  - {param.name} ({param.type}, {req}): {param.description}"
+                    if param.enum:
+                        param_info += f" [valid values: {', '.join(param.enum)}]"
+                    if param.default is not None:
+                        param_info += f" [default: {param.default}]"
+                    prompt += param_info + "\n"
             prompt += "\n"
 
         prompt += "To use a tool, include in your response: TOOL_CALL: {\"tool\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n"
+        prompt += "Note: For optional parameters with defaults, you can omit them from args or explicitly provide a value.\n"
         return prompt
     
     async def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -377,6 +482,10 @@ class ToolExecutor:
             summary = f"Execution error: {str(exc)}"
 
         display_name = tool.display_name or tool.name.replace("_", " ").title()
+        
+        # Generate unique execution ID to prevent frontend duplication issues
+        import uuid
+        execution_id = str(uuid.uuid4())
 
         payload = {
             "tool": tool.name,
@@ -385,6 +494,7 @@ class ToolExecutor:
             "description": tool.description,
             "timestamp": int(timestamp * 1000),
             "duration_ms": round(duration_ms, 2),
+            "execution_id": execution_id,
             "args": validated_args,
             "warnings": warnings,
             "result": normalized_result,
@@ -592,24 +702,49 @@ class ToolExecutor:
     
     # Tool implementation methods
     async def _search_memory(self, query: str, limit: int = 5, modality: str = "all") -> Dict[str, Any]:
-        """Search memory for relevant past interactions."""
+        """Search memory for relevant past interactions using semantic search."""
         if not self.llm.memory or not self.llm.memory.enabled:
             return {"found": 0, "results": [], "message": "Memory system not available"}
         
         try:
-            # Get nodes and edges from memory
-            nodes, edges = await self.llm.memory.load_graph()
+            # Try semantic search first if embeddings are available
+            semantic_results = await self.llm.memory.semantic_search(
+                query,
+                limit=limit,
+                similarity_threshold=0.6
+            )
             
-            # Simple text search through nodes
+            if semantic_results:
+                # Format semantic search results
+                results = []
+                for result in semantic_results:
+                    if modality != "all" and result.get("kind") != modality:
+                        continue
+                    
+                    results.append({
+                        "type": result.get("kind"),
+                        "content": result.get("description") or result.get("label"),
+                        "source": result.get("text", ""),
+                        "timestamp": result.get("timestamp"),
+                        "relevance": result.get("similarity", 0.0)
+                    })
+                
+                return {
+                    "found": len(results),
+                    "results": results[:limit],
+                    "query": query,
+                    "method": "semantic_search"
+                }
+            
+            # Fallback to basic text search if no embeddings
+            nodes, edges = await self.llm.memory.load_graph()
             query_lower = query.lower()
             results = []
             
             for node in nodes:
-                # Filter by modality if specified
                 if modality != "all" and node.get("source") != modality:
                     continue
                 
-                # Search in label and description
                 label = (node.get("label") or "").lower()
                 desc = (node.get("description") or "").lower()
                 
@@ -622,14 +757,13 @@ class ToolExecutor:
                         "relevance": 1.0 if query_lower in label else 0.5
                     })
             
-            # Sort by relevance and limit
             results.sort(key=lambda x: x["relevance"], reverse=True)
-            results = results[:limit]
             
             return {
-                "found": len(results),
-                "results": results,
-                "query": query
+                "found": len(results[:limit]),
+                "results": results[:limit],
+                "query": query,
+                "method": "keyword_search"
             }
         except Exception as e:
             logger.error(f"Memory search failed: {e}")
@@ -995,6 +1129,312 @@ class ToolExecutor:
             "average_duration_ms": round(average_duration, 2),
             "recent_failures": recent_failures
         }
+
+    # ------------------------------------------------------------------
+    # Entity Memory Tools
+    # ------------------------------------------------------------------
+    async def _remember_person(
+        self,
+        name: str,
+        context: Optional[str] = None,
+        relationship: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Remember a person and their details."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available"}
+        
+        # Validate inputs
+        if not name or not name.strip():
+            return {"success": False, "error": "Name cannot be empty"}
+        
+        name = name.strip()
+        
+        try:
+            properties = {}
+            if relationship:
+                properties["relationship"] = relationship.strip()
+            if context:
+                properties["context"] = context.strip()
+            
+            entity_id = await self.llm.memory.store_entity(
+                entity_type="person",
+                name=name,
+                description=context or f"Person: {name}",
+                properties=properties
+            )
+            
+            return {
+                "success": True,
+                "entity_id": entity_id,
+                "name": name,
+                "type": "person",
+                "message": f"I'll remember that {name}" + (f" ({relationship})" if relationship else "")
+            }
+        except Exception as e:
+            logger.error(f"Failed to remember person '{name}': {e}", exc_info=True)
+            return {"success": False, "error": f"Failed to store person: {str(e)}"}
+    
+    async def _remember_place(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        layout: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Remember a place or location."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available"}
+        
+        # Validate inputs
+        if not name or not name.strip():
+            return {"success": False, "error": "Place name cannot be empty"}
+        
+        name = name.strip()
+        
+        try:
+            properties = {}
+            if layout:
+                properties["layout"] = layout.strip()
+            
+            entity_id = await self.llm.memory.store_entity(
+                entity_type="place",
+                name=name,
+                description=description or f"Place: {name}",
+                properties=properties
+            )
+            
+            return {
+                "success": True,
+                "entity_id": entity_id,
+                "name": name,
+                "type": "place",
+                "message": f"I'll remember the place: {name}"
+            }
+        except Exception as e:
+            logger.error(f"Failed to remember place '{name}': {e}", exc_info=True)
+            return {"success": False, "error": f"Failed to store place: {str(e)}"}
+    
+    async def _remember_object(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        location: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Remember an object or item."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available"}
+        
+        # Validate inputs
+        if not name or not name.strip():
+            return {"success": False, "error": "Object name cannot be empty"}
+        
+        name = name.strip()
+        
+        try:
+            properties = {}
+            if location:
+                properties["location"] = location.strip()
+            
+            entity_id = await self.llm.memory.store_entity(
+                entity_type="object",
+                name=name,
+                description=description or f"Object: {name}",
+                properties=properties
+            )
+            
+            return {
+                "success": True,
+                "entity_id": entity_id,
+                "name": name,
+                "type": "object",
+                "message": f"I'll remember the object: {name}"
+            }
+        except Exception as e:
+            logger.error(f"Failed to remember object '{name}': {e}", exc_info=True)
+            return {"success": False, "error": f"Failed to store object: {str(e)}"}
+    
+    async def _remember_fact(
+        self,
+        category: str = "fact",
+        content: str = "",
+        importance: int = 5
+    ) -> Dict[str, Any]:
+        """Remember a general fact, password, instruction, or important information."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available"}
+        
+        # Validate inputs
+        if not content or not content.strip():
+            return {"success": False, "error": "Content cannot be empty"}
+        
+        content = content.strip()
+        category = category.strip().lower() if category else "fact"
+        
+        # Clamp importance
+        importance = max(1, min(10, importance))
+        
+        try:
+            # Create a descriptive name for the entity
+            # For passwords/secrets, use a generic name; for others, use content snippet
+            if category in ("password", "secret"):
+                name = f"{category.title()}"
+                description = f"{category.title()}: {content}"
+            else:
+                # Use first few words as name
+                words = content.split()
+                name = " ".join(words[:5]) if len(words) > 5 else content
+                description = content
+            
+            properties = {
+                "category": category,
+                "importance": importance,
+                "full_content": content,
+                "timestamp": time.time()
+            }
+            
+            # Store as an entity so it appears in the Memory tab
+            entity_id = await self.llm.memory.store_entity(
+                entity_type=category,  # Will show up categorized by type
+                name=name,
+                description=description,
+                properties=properties
+            )
+            
+            # Also record as interaction for context
+            tags = [f"importance_{importance}", f"category_{category}", "fact"]
+            await self.llm.memory.record_interaction(
+                modality="fact",
+                stimulus=f"[{category.upper()}] {content}",
+                response=f"Fact recorded (importance: {importance}/10)",
+                tags=tags
+            )
+            
+            return {
+                "success": True,
+                "entity_id": entity_id,
+                "category": category,
+                "importance": importance,
+                "name": name,
+                "message": f"I've stored this {category}: {content[:50]}{'...' if len(content) > 50 else ''}"
+            }
+        except Exception as e:
+            logger.error(f"Failed to remember fact: {e}", exc_info=True)
+            return {"success": False, "error": f"Storage failed: {str(e)}"}
+    
+    async def _learn_preference(
+        self,
+        preference: str,
+        strength: int = 5,
+        context: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Learn a user preference."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available"}
+        
+        try:
+            properties = {
+                "strength": strength,
+                "context": context or ""
+            }
+            
+            entity_id = await self.llm.memory.store_entity(
+                entity_type="preference",
+                name=preference,
+                description=context or f"User preference: {preference}",
+                properties=properties
+            )
+            
+            sentiment = "likes" if strength > 0 else "dislikes" if strength < 0 else "is neutral about"
+            
+            return {
+                "success": True,
+                "entity_id": entity_id,
+                "preference": preference,
+                "strength": strength,
+                "message": f"I understand you {sentiment}: {preference}"
+            }
+        except Exception as e:
+            logger.error(f"Failed to learn preference: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def _recall_entity(
+        self,
+        query: str,
+        entity_type: str = "all"
+    ) -> Dict[str, Any]:
+        """Recall entities using semantic search."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available", "results": []}
+        
+        try:
+            # Use semantic search
+            results = await self.llm.memory.semantic_search(query, limit=10)
+            
+            # Filter by entity type if specified
+            if entity_type != "all":
+                results = [r for r in results if entity_type in r.get("text", "").lower()]
+            
+            # Also get entities directly
+            entities = await self.llm.memory.get_entities(
+                entity_type=entity_type if entity_type != "all" else None
+            )
+            
+            # Combine and format results
+            formatted_results = []
+            for result in results[:5]:
+                formatted_results.append({
+                    "id": result.get("node_id"),
+                    "label": result.get("label"),
+                    "description": result.get("description"),
+                    "kind": result.get("kind"),
+                    "similarity": round(result.get("similarity", 0), 3),
+                    "timestamp": result.get("timestamp")
+                })
+            
+            for entity in entities[:3]:
+                if not any(r["id"] == entity["id"] for r in formatted_results):
+                    formatted_results.append({
+                        "id": entity["id"],
+                        "label": entity["name"],
+                        "description": entity.get("description"),
+                        "kind": entity["entity_type"],
+                        "occurrences": entity.get("occurrence_count", 1),
+                        "last_seen": entity.get("last_seen")
+                    })
+            
+            return {
+                "success": True,
+                "query": query,
+                "found": len(formatted_results),
+                "results": formatted_results
+            }
+        except Exception as e:
+            logger.error(f"Failed to recall entity: {e}")
+            return {"success": False, "error": str(e), "results": []}
+    
+    async def _get_learning_progress(
+        self,
+        entity: Optional[str] = None,
+        limit: int = 20
+    ) -> Dict[str, Any]:
+        """Get learning timeline showing knowledge evolution."""
+        if not self.llm.memory or not self.llm.memory.enabled:
+            return {"success": False, "message": "Memory system not available", "timeline": []}
+        
+        try:
+            # Get timeline events
+            timeline = await self.llm.memory.get_learning_timeline(
+                entity_id=entity,
+                limit=limit
+            )
+            
+            return {
+                "success": True,
+                "event_count": len(timeline),
+                "timeline": timeline
+            }
+        except Exception as e:
+            logger.error(f"Failed to get learning progress: {e}")
+            return {"success": False, "error": str(e), "timeline": []}
 
 
 __all__ = ["Tool", "ToolParameter", "ToolExecutor"]

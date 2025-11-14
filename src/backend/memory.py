@@ -2,7 +2,7 @@
 # Path: backend/memory.py
 # Purpose: Persist AI memories to SQLite and broadcast them to the UI with diagnostics.
 
-"""Memory persistence and broadcasting utilities."""
+"""Memory persistence and broadcasting utilities with vector embeddings."""
 
 from __future__ import annotations
 
@@ -10,12 +10,18 @@ import asyncio
 import json
 import logging
 import sqlite3
+import numpy as np
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Iterable, Sequence
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
+
+try:
+    from llama_cpp import Llama
+except ImportError:
+    Llama = None  # type: ignore
 
 from .behavior import BehaviorLearner, BehaviorDirective
 from .protocol import msg_event, msg_memory
@@ -24,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryStore:
-    """Persist conversational memories in SQLite and broadcast updates."""
+    """Persist conversational memories in SQLite with vector embeddings and semantic search."""
 
     def __init__(self, cfg: Dict[str, Any], bridge):
         memory_cfg = (cfg or {}).get("memory", {})
@@ -33,6 +39,8 @@ class MemoryStore:
         self._lock = asyncio.Lock()
         self._conn: Optional[sqlite3.Connection] = None
         self._behavior = BehaviorLearner()
+        self._embed_model: Optional[Llama] = None
+        self._embed_dim = 384  # bge-small-en-v1.5 dimension
 
         if not self.enabled:
             logger.info("Memory store disabled via configuration")
@@ -64,18 +72,68 @@ class MemoryStore:
         try:
             self._setup()
             self._ensure_identity_node()
+            self._init_embedding_model(cfg)
         except Exception:
             logger.exception("Failed to initialise memory schema")
             raise
 
-        logger.info("Memory store ready")
+        logger.info("Memory store ready with vector embeddings enabled" if self._embed_model else "Memory store ready")
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _init_embedding_model(self, cfg: Dict[str, Any]) -> None:
+        """Initialize the embedding model for semantic search."""
+        if not Llama:
+            logger.warning("llama-cpp-python not available, vector embeddings disabled")
+            return
+        
+        paths_cfg = cfg.get("paths", {})
+        embed_path = paths_cfg.get("embed_gguf_path")
+        
+        if not embed_path:
+            logger.warning("No embedding model path configured, semantic search disabled")
+            return
+        
+        embed_path = Path(embed_path)
+        if not embed_path.is_absolute():
+            root = Path(__file__).resolve().parent.parent.parent
+            embed_path = root / embed_path
+        
+        if not embed_path.exists():
+            logger.warning("Embedding model not found at %s", embed_path)
+            return
+        
+        try:
+            logger.info("Loading embedding model from %s", embed_path)
+            self._embed_model = Llama(
+                model_path=str(embed_path),
+                embedding=True,
+                n_ctx=512,
+                n_batch=512,
+                verbose=False
+            )
+            logger.info("Embedding model loaded successfully")
+        except Exception as exc:
+            logger.error("Failed to load embedding model: %s", exc)
+            self._embed_model = None
+    
+    def _generate_embedding(self, text: str) -> Optional[List[float]]:
+        """Generate vector embedding for text."""
+        if not self._embed_model or not text.strip():
+            return None
+        
+        try:
+            embedding = self._embed_model.embed(text.strip())
+            return embedding if isinstance(embedding, list) else embedding.tolist()
+        except Exception as exc:
+            logger.error("Failed to generate embedding: %s", exc)
+            return None
+
     def _setup(self) -> None:
         assert self._conn is not None
         with closing(self._conn.cursor()) as cur:
+            # Core memory nodes table
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_nodes (
@@ -92,6 +150,8 @@ class MemoryStore:
                 )
                 """
             )
+            
+            # Memory edges table
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_edges (
@@ -106,8 +166,59 @@ class MemoryStore:
                 )
                 """
             )
+            
+            # Vector embeddings table for semantic search
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_embeddings (
+                    node_id TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(node_id) REFERENCES memory_nodes(id) ON DELETE CASCADE
+                )
+                """
+            )
+            
+            # Entity table for people, places, objects
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_entities (
+                    id TEXT PRIMARY KEY,
+                    entity_type TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    properties TEXT,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    occurrence_count INTEGER DEFAULT 1,
+                    importance REAL DEFAULT 0.5,
+                    UNIQUE(entity_type, name)
+                )
+                """
+            )
+            
+            # Learning timeline for tracking evolution
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learning_timeline (
+                    id TEXT PRIMARY KEY,
+                    entity_id TEXT,
+                    event_type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    metadata TEXT,
+                    timestamp TEXT NOT NULL,
+                    FOREIGN KEY(entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE
+                )
+                """
+            )
+            
             cur.execute("CREATE INDEX IF NOT EXISTS idx_memory_edges_from ON memory_edges(from_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_memory_edges_to ON memory_edges(to_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON memory_entities(entity_type)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON memory_entities(name)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_timeline_entity ON learning_timeline(entity_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_timeline_timestamp ON learning_timeline(timestamp)")
             self._conn.commit()
 
         self._migrate_schema()
@@ -697,6 +808,33 @@ class MemoryStore:
             self._ensure_edge(cur, stim_id, resp_id, 1.0, "interaction", interaction_context, now)
 
             behavior_results = self._apply_behaviors(cur, behaviors, stim_id, resp_id, now)
+            
+            # Generate and store embeddings for semantic search
+            if self._embed_model:
+                # Embed stimulus
+                stim_embedding = self._generate_embedding(stim_description)
+                if stim_embedding:
+                    embedding_blob = np.array(stim_embedding, dtype=np.float32).tobytes()
+                    cur.execute(
+                        """
+                        INSERT INTO memory_embeddings(node_id, embedding, text, created_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (stim_id, embedding_blob, stim_description, now)
+                    )
+                
+                # Embed response
+                if response:
+                    resp_embedding = self._generate_embedding(resp_description)
+                    if resp_embedding:
+                        embedding_blob = np.array(resp_embedding, dtype=np.float32).tobytes()
+                        cur.execute(
+                            """
+                            INSERT INTO memory_embeddings(node_id, embedding, text, created_at)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (resp_id, embedding_blob, resp_description, now)
+                        )
 
             self._conn.commit()
 
@@ -777,6 +915,332 @@ class MemoryStore:
                 )
 
         return nodes, edges
+
+    # ------------------------------------------------------------------
+    # Semantic Search & Entity Management
+    # ------------------------------------------------------------------
+    async def semantic_search(
+        self,
+        query: str,
+        limit: int = 10,
+        similarity_threshold: float = 0.7
+    ) -> List[Dict[str, Any]]:
+        """Perform semantic similarity search using vector embeddings."""
+        if not self.enabled or not self._conn or not self._embed_model:
+            return []
+        
+        query_embedding = self._generate_embedding(query)
+        if not query_embedding:
+            return []
+        
+        async with self._lock:
+            results = await asyncio.to_thread(
+                self._semantic_search_sync,
+                query_embedding,
+                limit,
+                similarity_threshold
+            )
+        
+        return results
+    
+    def _semantic_search_sync(
+        self,
+        query_embedding: List[float],
+        limit: int,
+        threshold: float
+    ) -> List[Dict[str, Any]]:
+        """Synchronous semantic search implementation."""
+        assert self._conn is not None
+        
+        query_vec = np.array(query_embedding, dtype=np.float32)
+        results = []
+        
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                """
+                SELECT 
+                    e.node_id,
+                    e.text,
+                    e.embedding,
+                    n.label,
+                    n.description,
+                    n.kind,
+                    n.timestamp,
+                    n.importance
+                FROM memory_embeddings e
+                JOIN memory_nodes n ON n.id = e.node_id
+                """
+            )
+            
+            for row in cur.fetchall():
+                stored_vec = np.frombuffer(row["embedding"], dtype=np.float32)
+                
+                # Cosine similarity
+                similarity = np.dot(query_vec, stored_vec) / (
+                    np.linalg.norm(query_vec) * np.linalg.norm(stored_vec)
+                )
+                
+                if similarity >= threshold:
+                    results.append({
+                        "node_id": row["node_id"],
+                        "text": row["text"],
+                        "label": row["label"],
+                        "description": row["description"],
+                        "kind": row["kind"],
+                        "timestamp": row["timestamp"],
+                        "importance": row["importance"],
+                        "similarity": float(similarity)
+                    })
+            
+            # Sort by similarity and limit
+            results.sort(key=lambda x: x["similarity"], reverse=True)
+            return results[:limit]
+    
+    async def store_entity(
+        self,
+        entity_type: str,
+        name: str,
+        description: Optional[str] = None,
+        properties: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Store or update an entity (person, place, object)."""
+        if not self.enabled or not self._conn:
+            return ""
+        
+        async with self._lock:
+            entity_id = await asyncio.to_thread(
+                self._store_entity_sync,
+                entity_type,
+                name,
+                description,
+                properties
+            )
+        
+        await self.publish_graph()
+        return entity_id
+    
+    def _store_entity_sync(
+        self,
+        entity_type: str,
+        name: str,
+        description: Optional[str],
+        properties: Optional[Dict[str, Any]]
+    ) -> str:
+        """Synchronous entity storage."""
+        assert self._conn is not None
+        
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        props_json = json.dumps(properties or {}, ensure_ascii=False)
+        
+        with closing(self._conn.cursor()) as cur:
+            # Check if entity exists
+            cur.execute(
+                "SELECT id, occurrence_count FROM memory_entities WHERE entity_type = ? AND name = ?",
+                (entity_type, name)
+            )
+            row = cur.fetchone()
+            
+            if row:
+                # Update existing entity
+                entity_id = row["id"]
+                count = row["occurrence_count"] + 1
+                cur.execute(
+                    """
+                    UPDATE memory_entities
+                    SET description = COALESCE(?, description),
+                        properties = ?,
+                        last_seen = ?,
+                        occurrence_count = ?
+                    WHERE id = ?
+                    """,
+                    (description, props_json, now, count, entity_id)
+                )
+                
+                # Add to learning timeline
+                cur.execute(
+                    """
+                    INSERT INTO learning_timeline(id, entity_id, event_type, description, timestamp)
+                    VALUES (?, ?, 'reinforcement', ?, ?)
+                    """,
+                    (f"timeline:{uuid4().hex[:12]}", entity_id, f"Encountered '{name}' again (count: {count})", now)
+                )
+            else:
+                # Create new entity
+                entity_id = f"entity:{entity_type}:{uuid4().hex[:10]}"
+                cur.execute(
+                    """
+                    INSERT INTO memory_entities(id, entity_type, name, description, properties, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (entity_id, entity_type, name, description, props_json, now, now)
+                )
+                
+                # Add to learning timeline
+                cur.execute(
+                    """
+                    INSERT INTO learning_timeline(id, entity_id, event_type, description, timestamp)
+                    VALUES (?, ?, 'discovery', ?, ?)
+                    """,
+                    (f"timeline:{uuid4().hex[:12]}", entity_id, f"First encounter with '{name}'", now)
+                )
+                
+                # Create memory node for this entity
+                cur.execute(
+                    """
+                    INSERT INTO memory_nodes(
+                        id, label, kind, strength, description, source, timestamp,
+                        meaning, category, importance, created_at, updated_at, last_accessed
+                    )
+                    VALUES (?, ?, 'event', 1.5, ?, 'entity_recognition', ?, ?, ?, 0.7, ?, ?, ?)
+                    """,
+                    (
+                        entity_id,
+                        name,
+                        description or f"{entity_type.title()}: {name}",
+                        now,
+                        f"Recognized {entity_type}: {name}",
+                        entity_type,
+                        now,
+                        now,
+                        now
+                    )
+                )
+                
+                # Generate and store embedding
+                if self._embed_model:
+                    text = f"{entity_type} {name} {description or ''}".strip()
+                    embedding = self._generate_embedding(text)
+                    if embedding:
+                        embedding_blob = np.array(embedding, dtype=np.float32).tobytes()
+                        cur.execute(
+                            """
+                            INSERT INTO memory_embeddings(node_id, embedding, text, created_at)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (entity_id, embedding_blob, text, now)
+                        )
+            
+            self._conn.commit()
+            return entity_id
+    
+    async def get_entities(
+        self,
+        entity_type: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Retrieve all entities, optionally filtered by type."""
+        if not self.enabled or not self._conn:
+            return []
+        
+        async with self._lock:
+            entities = await asyncio.to_thread(self._get_entities_sync, entity_type, limit)
+        
+        return entities
+    
+    def _get_entities_sync(self, entity_type: Optional[str], limit: int) -> List[Dict[str, Any]]:
+        """Synchronous entity retrieval."""
+        assert self._conn is not None
+        
+        with closing(self._conn.cursor()) as cur:
+            if entity_type:
+                cur.execute(
+                    """
+                    SELECT * FROM memory_entities
+                    WHERE entity_type = ?
+                    ORDER BY importance DESC, last_seen DESC
+                    LIMIT ?
+                    """,
+                    (entity_type, limit)
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT * FROM memory_entities
+                    ORDER BY importance DESC, last_seen DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                )
+            
+            entities = []
+            for row in cur.fetchall():
+                props = json.loads(row["properties"]) if row["properties"] else {}
+                entities.append({
+                    "id": row["id"],
+                    "entity_type": row["entity_type"],
+                    "name": row["name"],
+                    "description": row["description"],
+                    "properties": props,
+                    "first_seen": row["first_seen"],
+                    "last_seen": row["last_seen"],
+                    "occurrence_count": row["occurrence_count"],
+                    "importance": row["importance"]
+                })
+            
+            return entities
+    
+    async def get_learning_timeline(
+        self,
+        entity_id: Optional[str] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get learning timeline events."""
+        if not self.enabled or not self._conn:
+            return []
+        
+        async with self._lock:
+            timeline = await asyncio.to_thread(self._get_timeline_sync, entity_id, limit)
+        
+        return timeline
+    
+    def _get_timeline_sync(
+        self,
+        entity_id: Optional[str],
+        limit: int
+    ) -> List[Dict[str, Any]]:
+        """Synchronous timeline retrieval."""
+        assert self._conn is not None
+        
+        with closing(self._conn.cursor()) as cur:
+            if entity_id:
+                cur.execute(
+                    """
+                    SELECT t.*, e.name, e.entity_type
+                    FROM learning_timeline t
+                    LEFT JOIN memory_entities e ON e.id = t.entity_id
+                    WHERE t.entity_id = ?
+                    ORDER BY datetime(t.timestamp) DESC
+                    LIMIT ?
+                    """,
+                    (entity_id, limit)
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT t.*, e.name, e.entity_type
+                    FROM learning_timeline t
+                    LEFT JOIN memory_entities e ON e.id = t.entity_id
+                    ORDER BY datetime(t.timestamp) DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                )
+            
+            timeline = []
+            for row in cur.fetchall():
+                metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+                timeline.append({
+                    "id": row["id"],
+                    "entity_id": row["entity_id"],
+                    "entity_name": row["name"],
+                    "entity_type": row["entity_type"],
+                    "event_type": row["event_type"],
+                    "description": row["description"],
+                    "metadata": metadata,
+                    "timestamp": row["timestamp"]
+                })
+            
+            return timeline
 
 
 __all__ = ["MemoryStore"]

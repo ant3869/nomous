@@ -49,3 +49,43 @@ export interface MemoryEdge {
   /** When the association was last strengthened */
   lastStrengthChange?: string;
 }
+
+// Enhanced memory types for entity and timeline tracking
+export type EntityType = "person" | "place" | "object" | "preference";
+
+export interface Entity {
+  id: string;
+  entity_type: EntityType;
+  name: string;
+  description?: string;
+  properties: Record<string, unknown>;
+  first_seen: string; // ISO timestamp
+  last_seen: string; // ISO timestamp
+  occurrence_count: number;
+  importance: number; // 0-1
+  similarity?: number; // For search results
+}
+
+export type EventType = "discovery" | "reinforcement" | "update" | "forget";
+
+export interface TimelineEvent {
+  id: string;
+  entity_id: string;
+  entity_name: string;
+  entity_type: EntityType;
+  event_type: EventType;
+  description: string;
+  metadata: Record<string, unknown>;
+  timestamp: string; // ISO timestamp
+}
+
+export interface SemanticSearchResult {
+  node_id: string;
+  text: string;
+  label: string;
+  description?: string;
+  kind?: string;
+  timestamp?: string;
+  importance?: number;
+  similarity: number;
+}
