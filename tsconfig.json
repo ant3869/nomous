@@ -17,13 +17,12 @@
     },
     "allowJs": true,
     "esModuleInterop": true,
-    "strict": true,
-    "types": ["vite/client", "vitest"],
-    "typeRoots": ["node_modules/@types", "src/frontend/components/ui"]
+    "strict": true
   },
   "include": [
     "src/frontend/**/*",
     "src/frontend/components/ui/**/*",
+    "src/frontend/vite-env.d.ts",
     "vite.config.ts"
   ],
   "exclude": ["node_modules"]

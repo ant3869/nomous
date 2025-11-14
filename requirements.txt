@@ -1,6 +1,6 @@
 # core
 websockets
-numpy
+numpy<2.3.0
 opencv-contrib-python     # or swap to opencv-python if you don't need contrib
 Pillow
 PyYAML
@@ -9,7 +9,7 @@ diskcache
 Jinja2
 psutil
 rich
-torch
+# torch - install with CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pynvml
 
 # audio / vad / asr

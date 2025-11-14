@@ -14,9 +14,10 @@ from llama_cpp import Llama
 
 from .memory import MemoryStore
 from .protocol import msg_metrics
-from .system import detect_compute_device
+from .system import detect_compute_device, TORCH_AVAILABLE
 from .utils import msg_event, msg_token, msg_speak, msg_status
 from .tools import ToolExecutor
+from .gpu_profiler import profiler as gpu_profiler
 
 logger = logging.getLogger(__name__)
 
@@ -297,7 +298,30 @@ class LocalLLM:
             return True
 
         try:
-            return _instantiate(n_gpu_layers)
+            model = _instantiate(n_gpu_layers)
+            
+            # GPU memory optimization
+            if n_gpu_layers != 0 and TORCH_AVAILABLE:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        # Enable TF32 for better performance on Ampere GPUs
+                        torch.backends.cuda.matmul.allow_tf32 = True
+                        torch.backends.cudnn.allow_tf32 = True
+                        
+                        # Set memory growth to avoid fragmentation
+                        torch.cuda.empty_cache()
+                        
+                        gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                        logger.info(f"GPU memory: {gpu_mem:.2f} GB available")
+                        
+                        self._schedule_bridge_post(
+                            msg_event(f"GPU initialized: {gpu_mem:.2f} GB VRAM")
+                        )
+                except Exception as gpu_exc:
+                    logger.warning(f"GPU optimization failed: {gpu_exc}")
+            
+            return model
         except Exception as exc:
             if n_gpu_layers != 0:
                 logger.warning("GPU initialization failed (%s); retrying on CPU", exc)
@@ -680,15 +704,18 @@ class LocalLLM:
         return self._apply_prompt_template(system_text, scenario)
 
     async def _generate(self, prompt: str, max_tokens: int | None = None, min_tokens: int = 10) -> str:
-        """Generate response from model with token streaming."""
+        """Generate response from model with token streaming and GPU optimization."""
         if self.model is None:
             raise RuntimeError("LLM model not loaded")
+
+        # Start GPU profiling
+        start_time = gpu_profiler.start_inference()
 
         try:
             await self.bridge.post(msg_status("thinking", "Processing..."))
 
             # Send thinking process to UI without exposing the raw prompt
-            await self.bridge.post({"type": "thought", "text": "Preparing response..."})
+            await self.bridge.post({"type": "thought", "text": "Analyzing input and preparing response..."})
 
             requested_tokens: int | None = None
             if max_tokens is not None:
@@ -713,9 +740,7 @@ class LocalLLM:
             )
 
             tokens = []
-            pending_thought = ""
             total_tokens = 0
-            spoken_segments: list[str] = []
 
             for chunk in stream:
                 if chunk and "choices" in chunk and len(chunk["choices"]) > 0:
@@ -730,41 +755,12 @@ class LocalLLM:
                         total_tokens += max(1, len(text) // 4)
                         await self.bridge.post(msg_token(total_tokens))
 
-                        # Accumulate thought updates and emit complete sentences
-                        pending_thought += re.sub(r'\s+', ' ', text)
-
-                        # Only process sentence detection if buffer is large enough or contains a terminator
-                        if (
-                            len(pending_thought) >= 40 or
-                            re.search(r"[.!?\n]", pending_thought)
-                        ):
-                            while True:
-                                match = re.search(r"(.+?)([.!?\n])", pending_thought, re.DOTALL)
-                                if not match:
-                                    break
-
-                                sentence_body, terminator = match.groups()
-                                candidate = sentence_body.strip()
-                                if terminator != "\n":
-                                    candidate = f"{candidate}{terminator}".strip()
-
-                                if candidate:
-                                    spoken_segments.append(candidate)
-                                    await self.bridge.post({
-                                        "type": "thought",
-                                        "text": f"Generating: {candidate}",
-                                    })
-
-                                pending_thought = pending_thought[match.end():].lstrip()
-
-                        if len(pending_thought.strip()) > 200:
-                            candidate = pending_thought.strip()
-                            spoken_segments.append(candidate)
+                        # Show progress without exposing raw generation
+                        if total_tokens % 10 == 0:  # Update every 10 tokens
                             await self.bridge.post({
                                 "type": "thought",
-                                "text": f"Generating: {candidate}",
+                                "text": f"Processing... ({total_tokens} tokens)",
                             })
-                            pending_thought = ""
 
                         if total_tokens >= failsafe_limit:
                             logger.warning(
@@ -778,22 +774,21 @@ class LocalLLM:
                             )
                             break
 
-            if pending_thought.strip():
-                final_candidate = pending_thought.strip()
-                spoken_segments.append(final_candidate)
-                await self.bridge.post({
-                    "type": "thought",
-                    "text": f"Generating: {final_candidate}",
-                })
-
-            response = "".join(tokens).strip()
+            # Build full response from tokens
+            raw_response = "".join(tokens).strip()
+            
+            # Show the raw thinking process (before sanitization)
+            await self.bridge.post({
+                "type": "thought",
+                "text": f"Raw output: {raw_response[:150]}{'...' if len(raw_response) > 150 else ''}",
+            })
 
             # Remove any role-play artifacts
-            response = response.replace("You:", "").replace("Person:", "").strip()
+            raw_response = raw_response.replace("You:", "").replace("Person:", "").strip()
 
             # Process tool calls if enabled
-            if self.tools_enabled and "TOOL_CALL:" in response:
-                tool_calls = self.tools.parse_tool_calls(response)
+            if self.tools_enabled and "TOOL_CALL:" in raw_response:
+                tool_calls = self.tools.parse_tool_calls(raw_response)
                 if tool_calls:
                     logger.info(f"Found {len(tool_calls)} tool call(s) in response")
                     await self.bridge.post({"type": "thought", "text": f"Executing {len(tool_calls)} tool(s)..."})
@@ -813,20 +808,18 @@ class LocalLLM:
                     
                     # Remove tool calls from response for speaking
                     response_lines = []
-                    for line in response.split('\n'):
+                    for line in raw_response.split('\n'):
                         if 'TOOL_CALL:' not in line:
                             response_lines.append(line)
-                    response = '\n'.join(response_lines).strip()
+                    raw_response = '\n'.join(response_lines).strip()
 
-            sanitized = self._sanitize_response(response)
-            if not sanitized and spoken_segments:
-                fallback = " ".join(segment.strip() for segment in spoken_segments if segment.strip())
-                sanitized = self._sanitize_response(fallback) or fallback.strip()
-            if sanitized:
-                response = sanitized
+            # Sanitize for final output (this is what gets spoken)
+            final_response = self._sanitize_response(raw_response)
+            if not final_response:
+                final_response = raw_response  # Fallback to raw if sanitization removes everything
 
-            if len(response) < 3 and total_tokens < min_tokens:
-                logger.warning(f"Response too short ({len(response)} chars, {total_tokens} tokens), regenerating...")
+            if len(final_response) < 3 and total_tokens < min_tokens:
+                logger.warning(f"Response too short ({len(final_response)} chars, {total_tokens} tokens), regenerating...")
                 # Ensure failsafe_tokens is always used if both requested_tokens and self.max_tokens are None
                 if requested_tokens is None and self.max_tokens is None:
                     return await self._generate(
@@ -841,16 +834,39 @@ class LocalLLM:
                         min_tokens=0
                     )
 
-            logger.info(f"Generated ({total_tokens} tokens): {response[:100]}")
-            await self.bridge.post({"type": "thought", "text": "Final response ready."})
+            logger.info(f"Generated ({total_tokens} tokens): {final_response[:100]}")
+            
+            # Collect and log GPU metrics
+            gpu_metrics = gpu_profiler.end_inference(start_time)
+            gpu_profiler.log_metrics(gpu_metrics)
+            
+            # Send GPU performance metrics to UI
+            if gpu_metrics.memory_allocated_mb > 0:
+                await self.bridge.post({
+                    "type": "thought",
+                    "text": f"GPU: {gpu_metrics.memory_allocated_mb:.0f}MB used, {gpu_metrics.inference_time_ms:.0f}ms",
+                })
+            
+            # Send final thought showing what will be spoken
+            await self.bridge.post({
+                "type": "thought",
+                "text": f"Final response ready: {final_response[:100]}{'...' if len(final_response) > 100 else ''}",
+            })
+
+            # Clean up GPU memory after generation
+            gpu_profiler.optimize_memory()
 
             await self.bridge.post(msg_status("idle", "Ready"))
-            return response
+            return final_response
             
         except Exception as e:
             logger.error(f"Error generating response: {e}", exc_info=True)
             await self.bridge.post(msg_event(f"llm error: {str(e)}"))
             await self.bridge.post(msg_status("idle", "Error"))
+            
+            # Clean up GPU memory even on error
+            gpu_profiler.optimize_memory()
+            
             return ""
 
     async def chat(self, user_text: str):
