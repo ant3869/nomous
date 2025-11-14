@@ -650,9 +650,10 @@ class LocalLLM:
                 "\n**IMPORTANT - Memory Storage**: When users share information about themselves (names, preferences, passwords, facts), "
                 "ALWAYS use the appropriate memory tool (remember_person, remember_fact, learn_user_preference, etc.) "
                 "to store it immediately. Don't just acknowledge - actually use the tool!"
-                "\n\n**IMPORTANT - Memory Recall**: When users ask you to remember, recall, or retrieve past information "
-                "(e.g., 'what did I tell you?', 'do you remember...?', 'what was that word?'), "
-                "ALWAYS use recall_entity with a semantic search query. Don't guess or say you don't remember - use the tool to search!"
+                "\n\n**CRITICAL - Memory Recall**: When users ask 'what did I tell you?', 'do you remember...?', 'what was my name/password/word?', "
+                "you MUST use the 'recall_entity' tool (NOT recall_recent_context). "
+                "recall_entity searches ALL stored memories. recall_recent_context only sees the last few minutes. "
+                "Example: User asks 'what was that word?' → use recall_entity with query='word I asked you to remember'"
             )
 
         final_instruction = (

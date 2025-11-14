@@ -795,13 +795,17 @@ function useNomousBridge() {
   const fetchEntities = useCallback((entityType?: string) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === 1) {
+      console.log("[Memory] Requesting entities from backend...");
       ws.send(JSON.stringify({ type: "get_entities", entity_type: entityType, limit: 100 }));
+    } else {
+      console.log("[Memory] Cannot fetch entities - WebSocket not ready:", ws?.readyState);
     }
   }, []);
 
   const fetchTimeline = useCallback((entityId?: string) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === 1) {
+      console.log("[Memory] Requesting timeline from backend...");
       ws.send(JSON.stringify({ type: "get_timeline", entity_id: entityId, limit: 50 }));
     }
   }, []);
