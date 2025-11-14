@@ -10,7 +10,7 @@ import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Activity, AlertTriangle, AudioWaveform, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Speaker, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
-import type { MemoryEdge, MemoryNode, MemoryNodeKind } from "./types/memory";
+import type { MemoryEdge, MemoryNode, MemoryNodeKind, Entity, EntityType, TimelineEvent, SemanticSearchResult } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
 import type { BehaviorStats } from "./types/behavior";
 import { EMPTY_BEHAVIOR_STATS } from "./types/behavior";
@@ -21,6 +21,9 @@ import { normaliseVoiceFilename, readJson, writeJson } from "./utils/storage";
 import { ToolActivity, ToolStats } from "./components/ToolActivity";
 import type { ToolResult } from "./components/ToolActivity";
 import { SystemUsageCard } from "./components/SystemUsageCard";
+import { EntityBrowser } from "./components/EntityBrowser";
+import { LearningTimeline } from "./components/LearningTimeline";
+import { SemanticSearch } from "./components/SemanticSearch";
 
 const DEFAULT_SYSTEM_PROMPT =
   "You are Nomous, an autonomous multimodal AI orchestrator. Support the operator with concise, confident guidance, coordinate sensors and tools, and narrate decisions with a collaborative tone.";
@@ -78,6 +81,23 @@ interface WSMessage {
   error?: string | null;
   system_prompt?: string;
   thinking_prompt?: string;
+  payload?: any;
+  entities?: Entity[];
+  events?: TimelineEvent[];
+  results?: SemanticSearchResult[];
+  count?: number;
+  tool?: string;
+  display_name?: string;
+  category?: string;
+  description?: string;
+  args?: Record<string, unknown>;
+  result?: Record<string, unknown> | unknown;
+  success?: boolean;
+  summary?: string;
+  warnings?: string[];
+  timestamp?: number;
+  duration_ms?: number;
+  durationMs?: number;
 }
 
 interface STTEventMessage extends WSMessage {
@@ -671,6 +691,13 @@ function useNomousBridge() {
   const thoughtAccumulatorRef = useRef<ThoughtAccumulator | null>(null);
   const sttFinalRef = useRef<SttFinalRecord | null>(null);
 
+  // Enhanced memory system state
+  const [entities, setEntities] = useState<Entity[]>([]);
+  const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
+  const [searchResults, setSearchResults] = useState<SemanticSearchResult[]>([]);
+  const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+
   useEffect(() => {
     const el = chatScrollRef.current;
     if (el) {
@@ -764,6 +791,29 @@ function useNomousBridge() {
     setChatInput("");
   }, [log, push]);
 
+  // Enhanced memory system WebSocket helpers
+  const fetchEntities = useCallback((entityType?: string) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "get_entities", entity_type: entityType, limit: 100 }));
+    }
+  }, []);
+
+  const fetchTimeline = useCallback((entityId?: string) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "get_timeline", entity_id: entityId, limit: 50 }));
+    }
+  }, []);
+
+  const performSearch = useCallback((query: string, options: { limit: number; threshold: number; entityType?: string }) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === 1) {
+      setIsSearching(true);
+      ws.send(JSON.stringify({ type: "semantic_search", query, ...options }));
+    }
+  }, []);
+
   const handleChatSubmit = useCallback((event?: React.FormEvent<HTMLFormElement>) => {
     if (event) {
       event.preventDefault();
@@ -808,9 +858,15 @@ function useNomousBridge() {
               ? [`${stamp} ${value.toUpperCase()} → ${statusDetail}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
               : p.systemLines;
 
+            // Ensure status is a valid NomousStatus
+            const validStatuses: NomousStatus[] = ["idle", "thinking", "speaking", "noticing", "learning", "error"];
+            const normalizedStatus: NomousStatus = validStatuses.includes(value as NomousStatus) 
+              ? (value as NomousStatus) 
+              : "idle";
+
             return {
               ...p,
-              status: value,
+              status: normalizedStatus,
               statusDetail,
               systemLines,
               speechLines,
@@ -915,7 +971,8 @@ function useNomousBridge() {
               const entry = `${stamp} Captured: ${normalizedText}${suffix}`;
               nextLines = [entry, ...trimmedHistory];
               sttFinalRef.current = { text: normalizedText, stamp };
-            } else if (phase === "forwarded") {
+            } else {
+              // phase === "forwarded"
               const reference = sttFinalRef.current;
               if (reference && reference.text === normalizedText) {
                 const [, ...rest] = filtered;
@@ -927,10 +984,6 @@ function useNomousBridge() {
                 nextLines = [entry, ...trimmedHistory];
               }
               sttFinalRef.current = null;
-            } else {
-              const title = phase.charAt(0).toUpperCase() + phase.slice(1);
-              const entry = `${stamp} ${title}: ${normalizedText}`;
-              nextLines = [entry, ...trimmedHistory];
             }
 
             return { ...p, sttLines: nextLines };
@@ -952,6 +1005,21 @@ function useNomousBridge() {
           break;
         }
         case "memory": setState(p => ({ ...p, memory: { nodes: msg.nodes ?? p.memory.nodes, edges: msg.edges ?? p.memory.edges } })); break;
+        case "entities": {
+          console.log("[Memory] Received entities:", msg.entities?.length || 0, msg.entities);
+          setEntities(msg.entities || []);
+          break;
+        }
+        case "timeline": {
+          console.log("[Memory] Received timeline events:", msg.events?.length || 0);
+          setTimeline(msg.events || []);
+          break;
+        }
+        case "search_results": {
+          setSearchResults(msg.results || []);
+          setIsSearching(false);
+          break;
+        }
         case "tool_result": {
           const timestamp = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
           const rawDuration = typeof msg.duration_ms === "number" ? msg.duration_ms : Number(msg.durationMs ?? 0);
@@ -1087,7 +1155,15 @@ function useNomousBridge() {
       };
       ws.onerror = () => { log("ws error"); };
     } catch (e: any) { log(`connect error: ${e?.message}`); }
-  }, [handleMessage, log, push, state.url]);
+  }, [handleMessage, log, push, state.url, fetchEntities, fetchTimeline]);
+
+  // Fetch initial entity and timeline data when connected
+  useEffect(() => {
+    if (state.connected && wsRef.current && wsRef.current.readyState === 1) {
+      fetchEntities();
+      fetchTimeline();
+    }
+  }, [state.connected, fetchEntities, fetchTimeline]);
 
   const stopMic = useCallback(() => {
     const chain = micRef.current;
@@ -1251,6 +1327,20 @@ function useNomousBridge() {
     deleteMemoryNode,
     createMemoryLink,
     deleteMemoryEdge,
+    // Enhanced memory system
+    entities,
+    setEntities,
+    timeline,
+    setTimeline,
+    searchResults,
+    setSearchResults,
+    selectedEntityId,
+    setSelectedEntityId,
+    isSearching,
+    setIsSearching,
+    fetchEntities,
+    fetchTimeline,
+    performSearch,
   };
 }
 
@@ -1444,6 +1534,20 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect, zoom = 1 }: Memor
     behavior: "fill-teal-400",
   };
 
+  // Get occurrence count for entity-linked nodes
+  const getOccurrenceCount = (node: MemoryNode): number | undefined => {
+    // If node has metadata with occurrence_count or entity_occurrence
+    if (node.metadata) {
+      if (typeof node.metadata.occurrence_count === 'number') {
+        return node.metadata.occurrence_count;
+      }
+      if (typeof node.metadata.entity_occurrence === 'number') {
+        return node.metadata.entity_occurrence;
+      }
+    }
+    return undefined;
+  };
+
   return (
     <div className="mt-4">
       <div className="max-h-[420px] overflow-auto rounded-xl border border-zinc-800/60 bg-zinc-950/40">
@@ -1523,6 +1627,23 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect, zoom = 1 }: Memor
               const stroke = isSelected ? "#34d399" : isConnected ? "#818cf8" : "#1f1f23";
               const strokeWidth = isSelected ? 3.2 : isConnected ? 2.2 : 1.2;
               const labelY = position.y - (radius + 12);
+              const occurrenceCount = getOccurrenceCount(node);
+              
+              // Check if node has entity_type metadata for custom styling
+              const entityType = node.metadata?.entity_type as EntityType | undefined;
+              let fillClass = nodeFillClass[node.kind];
+              
+              // Override fill color if entity_type is specified
+              if (entityType === "person") {
+                fillClass = "fill-emerald-400";
+              } else if (entityType === "place") {
+                fillClass = "fill-cyan-400";
+              } else if (entityType === "object") {
+                fillClass = "fill-amber-400";
+              } else if (entityType === "preference") {
+                fillClass = "fill-purple-400";
+              }
+              
               return (
                 <g
                   key={node.id}
@@ -1537,11 +1658,35 @@ function MemoryGraph({ nodes, edges, selectedNodeId, onSelect, zoom = 1 }: Memor
                     cx={position.x}
                     cy={position.y}
                     r={radius}
-                    className={nodeFillClass[node.kind]}
+                    className={fillClass}
                     opacity={0.95}
                     stroke={stroke}
                     strokeWidth={strokeWidth}
                   />
+                  
+                  {/* Occurrence count badge */}
+                  {occurrenceCount !== undefined && occurrenceCount > 1 && (
+                    <>
+                      <circle
+                        cx={position.x + radius * 0.6}
+                        cy={position.y - radius * 0.6}
+                        r={Math.min(10, radius * 0.35)}
+                        className="fill-zinc-900"
+                        stroke="#34d399"
+                        strokeWidth={1.5}
+                      />
+                      <text
+                        x={position.x + radius * 0.6}
+                        y={position.y - radius * 0.6}
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        className="fill-emerald-400 text-[9px] font-semibold"
+                      >
+                        {occurrenceCount > 99 ? "99+" : occurrenceCount}
+                      </text>
+                    </>
+                  )}
+                  
                   <text
                     x={position.x}
                     y={labelY}
@@ -2411,7 +2556,7 @@ function MemoryDetailCard({ detail, onUpdate, onDelete, onCreateLink }: MemoryDe
                   <div className="flex items-center justify-between gap-2 text-sm text-zinc-100">
                     <span className="font-medium">{relation.label}</span>
                     <span className="text-[11px] text-zinc-400">
-                      {relation.relationship ? relation.relationship.replaceAll("_", " ") : relation.direction === "outbound" ? "influences" : "influenced by"}
+                      {relation.relationship ? relation.relationship.replace(/_/g, " ") : relation.direction === "outbound" ? "influences" : "influenced by"}
                     </span>
                   </div>
                   <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-400">
@@ -2743,6 +2888,8 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
 
   const sliderKey = (label: string, value: number) => `${label}-${value}`;
 
+  if (!open) return null;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4 py-6">
       <div className="relative w-full max-w-5xl max-h-[90vh] overflow-hidden rounded-3xl border border-zinc-800/70 bg-zinc-950/95 shadow-[0_30px_120px_rgba(0,0,0,0.45)] flex flex-col">
@@ -2758,9 +2905,9 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
           value={activeTab}
           onValueChange={setActiveTab}
           defaultValue="runtime"
-          className="flex h-full flex-col gap-4 px-6 pb-6 pt-4"
+          className="flex h-full flex-col px-6 pb-6 pt-4"
         >
-          <TabsList className="w-full justify-start">
+          <TabsList className="w-full justify-start flex-shrink-0 mb-4 gap-2">
             <TabsTrigger value="runtime" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Runtime</TabsTrigger>
             <TabsTrigger value="prompts" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Prompts</TabsTrigger>
             <TabsTrigger value="devices" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Devices</TabsTrigger>
@@ -2768,7 +2915,7 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
             <TabsTrigger value="vision" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Vision</TabsTrigger>
             <TabsTrigger value="models" className="rounded-full border border-zinc-800/60 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 data-[state=active]:border-emerald-500/40 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200">Models</TabsTrigger>
           </TabsList>
-          <div className="flex-1 overflow-hidden">
+          <div className="flex-1 overflow-hidden min-h-0">
             <TabsContent value="runtime" className="h-full overflow-y-auto">
               <div className="space-y-6 pb-8 pr-1">
                 <section>
@@ -2818,6 +2965,7 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
                 </section>
               </div>
             </TabsContent>
+
             <TabsContent value="prompts" className="h-full overflow-y-auto">
               <div className="space-y-6 pb-8 pr-1">
                 <section>
@@ -3240,6 +3388,20 @@ export default function App(){
     updateMemoryNode,
     deleteMemoryNode,
     createMemoryLink,
+    deleteMemoryEdge,
+    entities,
+    setEntities,
+    timeline,
+    setTimeline,
+    searchResults,
+    setSearchResults,
+    selectedEntityId,
+    setSelectedEntityId,
+    isSearching,
+    setIsSearching,
+    fetchEntities,
+    fetchTimeline,
+    performSearch,
   } = useNomousBridge();
   const st = statusMap[state.status];
   const tokenTotal = state.tokenWindow.reduce((a, p) => a + p.inTok + p.outTok, 0);
@@ -3275,6 +3437,7 @@ export default function App(){
   const memoryInsights = useMemo(() => computeMemoryInsights(state.memory.nodes, state.memory.edges), [state.memory.nodes, state.memory.edges]);
   const [memoryKindFilter, setMemoryKindFilter] = useState<Set<MemoryNodeKind>>(() => new Set<MemoryNodeKind>(["stimulus", "concept", "event", "behavior", "self"]));
   const [memoryZoom, setMemoryZoom] = useState(1);
+  
   const memoryKindOptions = useMemo(
     () => [
       { kind: "stimulus" as MemoryNodeKind, label: "Stimuli", className: "border-amber-500/60 bg-amber-500/10 text-amber-200" },
@@ -3588,8 +3751,8 @@ export default function App(){
                 <TabsTrigger value="conversation">Conversation</TabsTrigger>
                 <TabsTrigger value="behavior">Behavior</TabsTrigger>
                 <TabsTrigger value="tokens">Tokens</TabsTrigger>
-                <TabsTrigger value="memory">Memory</TabsTrigger>
                 <TabsTrigger value="tools">Tools</TabsTrigger>
+                <TabsTrigger value="memory">Memory</TabsTrigger>
               </TabsList>
 
               <TabsContent value="overview" className="pt-4">
@@ -3693,7 +3856,7 @@ export default function App(){
                 <div className="grid gap-4 xl:grid-cols-[7fr_5fr]">
                   <div className="space-y-4">
                     <Card className="bg-zinc-900/70 border-zinc-800/60">
-                      <CardContent className="flex min-h-[28rem] flex-1 flex-col gap-4 p-4">
+                      <CardContent className="flex h-[32rem] flex-col gap-4 p-4">
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div className="flex items-center gap-3 text-zinc-200">
                             <div className="grid h-10 w-10 place-items-center rounded-xl border border-zinc-800/70 bg-black/50">
@@ -3710,7 +3873,7 @@ export default function App(){
                         </div>
 
                         <div className="flex-1 overflow-hidden rounded-xl border border-zinc-800/60 bg-black/50">
-                          <div className="h-full overflow-y-auto p-4" ref={chatScrollRef}>
+                          <div className="h-full overflow-y-auto p-4 scroll-smooth" ref={chatScrollRef}>
                             <div className="flex flex-col gap-3">
                               {state.chatMessages.length === 0 ? (
                                 <div className="text-sm text-zinc-400">
@@ -3889,116 +4052,6 @@ export default function App(){
                 </div>
               </TabsContent>
 
-              <TabsContent value="memory" className="pt-4">
-                <div className="grid gap-4 xl:grid-cols-[1.7fr_1fr]">
-                  <Card className="bg-zinc-900/70 border-zinc-800/60">
-                    <CardContent className="space-y-4 p-4 text-zinc-200">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <Brain className="h-4 w-4" />
-                          <span className="font-semibold">Memory Intelligence</span>
-                        </div>
-                        <Badge className="bg-zinc-800/80 text-zinc-100 border border-zinc-700/60">
-                          Nodes {memoryInsights.summary.totalNodes}
-                        </Badge>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-                        <MemorySummaryStat label="Memories" value={`${memoryInsights.summary.totalNodes}`} helper="Graph nodes" />
-                        <MemorySummaryStat label="Associations" value={`${memoryInsights.summary.totalEdges}`} helper="Synapses" />
-                        <MemorySummaryStat label="Behavior Rules" value={`${memoryInsights.summary.behaviorCount}`} helper="Social directives" />
-                        <MemorySummaryStat label="Avg Strength" value={memoryInsights.summary.averageStrength.toFixed(2)} helper="Mean weight" />
-                        <MemorySummaryStat label="Avg Importance" value={`${(memoryInsights.summary.averageImportance * 100).toFixed(0)}%`} helper="Mean priority" />
-                        <MemorySummaryStat label="Density" value={`${(memoryInsights.summary.density * 100).toFixed(1)}%`} helper="Connection coverage" />
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Filter</span>
-                        {memoryKindOptions.map(option => {
-                          const active = memoryKindFilter.has(option.kind);
-                          return (
-                            <button
-                              key={option.kind}
-                              type="button"
-                              onClick={() => toggleMemoryKind(option.kind)}
-                              className={`rounded-full border px-3 py-1 transition ${
-                                active ? option.className : "border-zinc-700 text-zinc-400 hover:border-zinc-600"
-                              }`}
-                            >
-                              {option.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
-                        <span className="text-[10px] uppercase tracking-[0.3em] text-zinc-500">Scale</span>
-                        <span className="font-mono text-[11px] text-zinc-400">{Math.round(memoryZoom * 100)}%</span>
-                        <div className="min-w-[200px] flex-1 md:flex-none">
-                          <Slider
-                            key={`memory-zoom-${Math.round(memoryZoom * 100)}`}
-                            defaultValue={[Math.round(memoryZoom * 100)]}
-                            min={60}
-                            max={180}
-                            step={10}
-                            onValueChange={value => {
-                              const next = value[0] ?? 100;
-                              setMemoryZoom(next / 100);
-                            }}
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setMemoryZoom(1)}
-                          className="rounded-full border border-zinc-800/80 px-3 py-1 text-[11px] text-zinc-400 transition hover:border-emerald-500/40 hover:text-emerald-200"
-                        >
-                          Reset
-                        </button>
-                      </div>
-
-                      <MemoryGraph
-                        nodes={filteredMemoryNodes}
-                        edges={filteredMemoryEdges}
-                        selectedNodeId={selectedMemoryId}
-                        onSelect={id => setSelectedMemoryId(id)}
-                        zoom={memoryZoom}
-                      />
-
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <MemoryList
-                          title="Major Milestones"
-                          icon={<Flag className="h-4 w-4 text-emerald-300" />}
-                          entries={memoryInsights.milestones}
-                          emptyLabel="No milestone memories reported yet."
-                          selectedId={selectedMemoryId}
-                          onSelect={id => setSelectedMemoryId(id)}
-                        />
-                        <MemoryList
-                          title="Data Entry Points"
-                          icon={<Database className="h-4 w-4 text-cyan-300" />}
-                          entries={memoryInsights.dataEntries}
-                          emptyLabel="No sensory inputs stored yet."
-                          selectedId={selectedMemoryId}
-                          onSelect={id => setSelectedMemoryId(id)}
-                        />
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  <MemoryDetailCard
-                    detail={selectedMemoryDetail}
-                    onUpdate={(id, patch) => updateMemoryNode(id, patch)}
-                    onDelete={id => {
-                      deleteMemoryNode(id);
-                      setSelectedMemoryId(prev => (prev === id ? null : prev));
-                    }}
-                    onCreateLink={(fromId, toId, weight, relationship, context) =>
-                      createMemoryLink(fromId, toId, { weight, relationship, context })
-                    }
-                  />
-                </div>
-              </TabsContent>
-
               <TabsContent value="tools" className="pt-4">
                 <div className="grid gap-4 lg:grid-cols-3">
                   <div className="lg:col-span-2">
@@ -4019,6 +4072,61 @@ export default function App(){
                         </p>
                       </CardContent>
                     </Card>
+                  </div>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="memory" className="pt-4">
+                <div className="space-y-6">
+                  <div className="mb-4">
+                    <h3 className="text-lg font-semibold text-zinc-100">Memory System</h3>
+                    <p className="text-xs text-zinc-400">Semantic search, entity tracking, and learning timeline</p>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                    {/* Left Column: Search and Entities */}
+                    <div className="space-y-6">
+                      <SemanticSearch
+                        onSearch={performSearch}
+                        results={searchResults}
+                        isSearching={isSearching}
+                        onSelectResult={(nodeId) => {
+                          const entity = entities.find(e => e.id === nodeId);
+                          if (entity) setSelectedEntityId(nodeId);
+                        }}
+                        selectedResultId={selectedEntityId}
+                      />
+                      <EntityBrowser
+                        entities={entities}
+                        selectedEntityId={selectedEntityId}
+                        onSelect={setSelectedEntityId}
+                        onEdit={(entity) => {
+                          console.log("Edit entity:", entity);
+                        }}
+                        onDelete={(entityId) => {
+                          console.log("Delete entity:", entityId);
+                        }}
+                        onSearch={(query) => {
+                          if (query.trim()) {
+                            const filtered = entities.filter(e => 
+                              e.name.toLowerCase().includes(query.toLowerCase()) ||
+                              e.description?.toLowerCase().includes(query.toLowerCase())
+                            );
+                            console.log("Filtered entities:", filtered.length);
+                          }
+                        }}
+                      />
+                    </div>
+                    
+                    {/* Right Column: Timeline */}
+                    <div>
+                      <LearningTimeline
+                        events={timeline}
+                        selectedEntityId={selectedEntityId}
+                        onSelectEntity={setSelectedEntityId}
+                        limit={50}
+                      />
+                    </div>
                   </div>
                 </div>
               </TabsContent>

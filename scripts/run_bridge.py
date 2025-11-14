@@ -19,6 +19,7 @@ sys.path.insert(0, project_root)
 from src.backend.analytics import ConversationAnalytics
 from src.backend.config import load_config
 from src.backend.utils import Bridge, msg_status, msg_event
+from src.backend.protocol import msg_entities, msg_timeline, msg_search_results
 from src.backend.video import CameraLoop
 from src.backend.audio import AudioSTT
 from src.backend.llm import LocalLLM
@@ -512,6 +513,35 @@ class Server:
                         directory = msg.get("directory", "")
                         logger.info(f"Scanning model directory: {directory}")
                         await self.handle_scan_models(directory)
+                    
+                    elif msg_type == "get_entities":
+                        if self.memory and self.memory.enabled:
+                            entity_type = msg.get("entity_type")
+                            limit = msg.get("limit", 100)
+                            entities = await self.memory.get_entities(entity_type=entity_type, limit=limit)
+                            await self.bridge.post(msg_entities(entities))
+                        else:
+                            logger.warning("Memory not initialized, ignoring get_entities")
+                    
+                    elif msg_type == "get_timeline":
+                        if self.memory and self.memory.enabled:
+                            entity_id = msg.get("entity_id")
+                            limit = msg.get("limit", 50)
+                            events = await self.memory.get_learning_timeline(entity_id=entity_id, limit=limit)
+                            await self.bridge.post(msg_timeline(events))
+                        else:
+                            logger.warning("Memory not initialized, ignoring get_timeline")
+                    
+                    elif msg_type == "semantic_search":
+                        if self.memory and self.memory.enabled:
+                            query = msg.get("query", "")
+                            limit = msg.get("limit", 10)
+                            threshold = msg.get("threshold", 0.3)
+                            entity_type = msg.get("entity_type")
+                            results = await self.memory.semantic_search(query, limit=limit, threshold=threshold)
+                            await self.bridge.post(msg_search_results(results))
+                        else:
+                            logger.warning("Memory not initialized, ignoring semantic_search")
 
                     else:
                         logger.warning(f"Unknown message type from {client_id}: {msg_type}")

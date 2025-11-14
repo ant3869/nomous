@@ -7,8 +7,9 @@ import json, asyncio
 from .audio import STTEngine
 from .tts import PiperTTS
 from .llm import LocalLLM
-from .protocol import msg_event, msg_status, msg_metrics, msg_pong
+from .protocol import msg_event, msg_status, msg_metrics, msg_pong, msg_entities, msg_timeline, msg_search_results
 from .analytics import ConversationAnalytics
+from .memory import MemoryStore
 
 class Runtime:
     def __init__(self, broadcaster):
@@ -18,6 +19,8 @@ class Runtime:
         self.llm = LocalLLM(broadcaster)
         # Advanced conversation analytics engine
         self.analytics = ConversationAnalytics()
+        # Enhanced memory system with RAG
+        self.memory = MemoryStore()
 
     async def handle(self, ws, data: dict):
         t = data.get("type")
@@ -42,5 +45,31 @@ class Runtime:
             delta = float(data.get("delta", 0))
             metrics = self.analytics.apply_reward(delta)
             self.bc.send(msg_metrics(metrics))
+        elif t == "get_entities":
+            # Fetch entities from memory system
+            entity_type = data.get("entity_type")  # Optional filter
+            limit = data.get("limit", 100)
+            entities = self.memory.get_entities(entity_type=entity_type, limit=limit)
+            self.bc.send(msg_entities(entities))
+        elif t == "get_timeline":
+            # Fetch learning timeline events
+            entity_id = data.get("entity_id")  # Optional filter
+            limit = data.get("limit", 50)
+            events = self.memory.get_learning_timeline(entity_id=entity_id, limit=limit)
+            self.bc.send(msg_timeline(events))
+        elif t == "semantic_search":
+            # Perform semantic search on memory
+            query = data.get("query", "")
+            limit = data.get("limit", 10)
+            threshold = data.get("threshold", 0.7)
+            entity_type = data.get("entity_type")  # Optional filter
+            if query:
+                results = self.memory.semantic_search(query, limit=limit, threshold=threshold)
+                # Filter by entity type if specified
+                if entity_type and entity_type != "all":
+                    results = [r for r in results if r.get("kind") == entity_type]
+                self.bc.send(msg_search_results(results))
+            else:
+                self.bc.send(msg_search_results([]))
         else:
             self.bc.send(msg_event(f"unknown inbound: {data}"))

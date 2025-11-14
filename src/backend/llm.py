@@ -3,6 +3,7 @@
 # Purpose: Autonomous LLM that processes text, vision, and speaks unprompted
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -599,9 +600,10 @@ class LocalLLM:
 
         if template == "llama-3-chat":
             # Llama 3 chat expects explicit header tokens around each role.
+            # Note: llama.cpp automatically adds <|begin_of_text|>, so we don't need to
             system_section = system_text.strip()
             user_section = user_text.strip()
-            parts: list[str] = ["<|begin_of_text|>"]
+            parts: list[str] = []
             if system_section:
                 parts.append(
                     "".join(
@@ -643,20 +645,14 @@ class LocalLLM:
 
         tools_instructions = ""
         if include_tools and self.tools_enabled:
-            tools_instructions = (
-                "AVAILABLE TOOLS:\n"
-                "You can use tools to enhance your capabilities. Available tools:\n"
-                "- search_memory: Search past interactions and memories\n"
-                "- recall_recent_context: Get recent conversation history\n"
-                "- record_observation: Save important observations\n"
-                "- evaluate_interaction: Self-evaluate your responses\n"
-                "- identify_pattern: Record patterns you notice\n"
-                "- analyze_sentiment: Understand emotional tone\n"
-                "- check_appropriate_response: Verify response appropriateness\n"
-                "- track_milestone: Record achievements\n"
-                "- get_current_capabilities: Review your abilities\n\n"
-                "To use a tool, include: TOOL_CALL: {\"tool\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n"
-                "Use tools when they help you be more helpful, remember better, or improve yourself."
+            tools_instructions = self.tools.get_tools_prompt()
+            tools_instructions += (
+                "\n**IMPORTANT - Memory Storage**: When users share information about themselves (names, preferences, passwords, facts), "
+                "ALWAYS use the appropriate memory tool (remember_person, remember_fact, learn_user_preference, etc.) "
+                "to store it immediately. Don't just acknowledge - actually use the tool!"
+                "\n\n**IMPORTANT - Memory Recall**: When users ask you to remember, recall, or retrieve past information "
+                "(e.g., 'what did I tell you?', 'do you remember...?', 'what was that word?'), "
+                "ALWAYS use recall_entity with a semantic search query. Don't guess or say you don't remember - use the tool to search!"
             )
 
         final_instruction = (
@@ -703,7 +699,7 @@ class LocalLLM:
 
         return self._apply_prompt_template(system_text, scenario)
 
-    async def _generate(self, prompt: str, max_tokens: int | None = None, min_tokens: int = 10) -> str:
+    async def _generate(self, prompt: str, max_tokens: int | None = None, min_tokens: int = 10, allow_tool_calls: bool = True, user_text: str | None = None) -> str:
         """Generate response from model with token streaming and GPU optimization."""
         if self.model is None:
             raise RuntimeError("LLM model not loaded")
@@ -787,7 +783,7 @@ class LocalLLM:
             raw_response = raw_response.replace("You:", "").replace("Person:", "").strip()
 
             # Process tool calls if enabled
-            if self.tools_enabled and "TOOL_CALL:" in raw_response:
+            if allow_tool_calls and self.tools_enabled and "TOOL_CALL:" in raw_response:
                 tool_calls = self.tools.parse_tool_calls(raw_response)
                 if tool_calls:
                     logger.info(f"Found {len(tool_calls)} tool call(s) in response")
@@ -806,12 +802,63 @@ class LocalLLM:
                             **execution
                         })
                     
-                    # Remove tool calls from response for speaking
-                    response_lines = []
-                    for line in raw_response.split('\n'):
-                        if 'TOOL_CALL:' not in line:
-                            response_lines.append(line)
-                    raw_response = '\n'.join(response_lines).strip()
+                    # Generate follow-up response incorporating tool results
+                    await self.bridge.post({"type": "thought", "text": "Processing tool results..."})
+                    
+                    # Build concise summary of tool results
+                    tool_summaries = []
+                    for result in tool_results:
+                        tool_name = result.get("tool", "unknown")
+                        if result.get("success"):
+                            result_data = result.get("result", {})
+                            
+                            # Summarize based on tool type
+                            if tool_name == "recall_entity":
+                                found = result_data.get("found", 0)
+                                results_list = result_data.get("results", [])
+                                if found > 0:
+                                    items = []
+                                    for item in results_list[:5]:  # Limit to 5 items
+                                        label = item.get("label", "Unknown")
+                                        kind = item.get("kind", "item")
+                                        desc = item.get("description", "")[:100]  # Truncate description
+                                        items.append(f"- {label} ({kind}): {desc}")
+                                    summary = f"Found {found} items:\n" + "\n".join(items)
+                                else:
+                                    summary = "No matching items found"
+                            else:
+                                # Generic summary for other tools
+                                summary = json.dumps(result_data, indent=2)[:500]  # Limit to 500 chars
+                            
+                            tool_summaries.append(f"{tool_name}: {summary}")
+                        else:
+                            error_msg = result.get("error", "Unknown error")
+                            tool_summaries.append(f"{tool_name}: Error - {error_msg}")
+                    
+                    tool_context = "\n\n".join(tool_summaries)
+                    
+                    # Build a compact follow-up prompt with just the essentials
+                    user_question = user_text if user_text else "your question"
+                    
+                    followup_prompt = (
+                        f"User asked: {user_question}\n\n"
+                        f"Tool Results:\n{tool_context}\n\n"
+                        f"Based on these results, provide a brief, natural response to the user. "
+                        f"Be specific about what you found."
+                    )
+                    
+                    # Generate new response with tool results (disable tool calls to prevent recursion)
+                    logger.info("Generating follow-up response with tool results")
+                    logger.info(f"Follow-up prompt length: {len(followup_prompt)} chars")
+                    return await self._generate(followup_prompt, max_tokens=requested_tokens or 150, min_tokens=min_tokens, allow_tool_calls=False, user_text=user_text)
+                    
+            # Remove any remaining tool calls from response for speaking
+            if "TOOL_CALL:" in raw_response:
+                response_lines = []
+                for line in raw_response.split('\n'):
+                    if 'TOOL_CALL:' not in line:
+                        response_lines.append(line)
+                raw_response = '\n'.join(response_lines).strip()
 
             # Sanitize for final output (this is what gets spoken)
             final_response = self._sanitize_response(raw_response)
@@ -885,7 +932,7 @@ class LocalLLM:
                 self.analytics.observe_user_message(user_text)
 
             prompt = self._build_prompt(user_text, "text")
-            response = await self._generate(prompt)
+            response = await self._generate(prompt, user_text=user_text)
 
             if response:
                 self._add_context("assistant", response)
@@ -1031,7 +1078,9 @@ class LocalLLM:
             if response and len(response) > 3:
                 self._add_context("assistant_autonomous", response)
                 await self.bridge.post({"type": "thought", "text": response})
-                if self.memory:
+                # Only record substantial autonomous thoughts to memory (>15 chars)
+                # Skip recording trivial outputs or silence decisions
+                if self.memory and len(response) > 15:
                     await self.memory.record_interaction("autonomous", "internal_reflection", response)
             else:
                 logger.info("Autonomous thought: no output")
