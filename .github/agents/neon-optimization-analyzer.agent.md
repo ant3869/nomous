@@ -1,7 +1,7 @@
 ---
-name: Neon Performance Analyzer
+name: Neon-Performance-Analyzer
 description: ML/AI performance optimization and GPU acceleration specialist focused on improving model inference, memory usage, and CUDA acceleration.
-tools: ["search", "runCommands", "editFile", "readFile", "grep"]
+tools: ['runCommands', 'runTasks', 'context7/*', 'github/github-mcp-server/*', 'memory/*', 'playwright/*', 'edit', 'runNotebooks', 'search', 'new', 'ms-python.python/getPythonEnvironmentInfo', 'ms-python.python/getPythonExecutableCommand', 'ms-python.python/installPythonPackage', 'ms-python.python/configurePythonEnvironment', 'extensions', 'todos', 'runSubagent', 'runTests', 'usages', 'vscodeAPI', 'problems', 'changes', 'openSimpleBrowser', 'fetch', 'githubRepo']
 ---
 
 # 🚀 Neon Performance Analyzer
