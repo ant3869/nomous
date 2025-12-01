@@ -158,7 +158,7 @@ class ToolExecutor:
         self.register_tool(Tool(
             name="analyze_sentiment",
             display_name="Analyze Sentiment",
-            description="Analyze the sentiment or emotional tone of recent interactions. Use this to understand how people are feeling and respond appropriately.",
+            description="ONLY use when the user explicitly asks about emotions, feelings, or mood. NOT for regular conversation.",
             parameters=[
                 ToolParameter("context", "string", "What to analyze (leave empty for recent)", required=False)
             ],
@@ -170,7 +170,7 @@ class ToolExecutor:
         self.register_tool(Tool(
             name="check_appropriate_response",
             display_name="Check Response Appropriateness",
-            description="Before responding, check if a response is appropriate given the context and social norms. Helps avoid mistakes.",
+            description="RARELY needed. Only use for sensitive topics (death, illness, conflict). NOT for greetings or casual chat.",
             parameters=[
                 ToolParameter("proposed_response", "string", "What you're thinking of saying", required=True),
                 ToolParameter("context", "string", "Current situation context", required=False)
@@ -298,7 +298,7 @@ class ToolExecutor:
         self.register_tool(Tool(
             name="get_current_capabilities",
             display_name="Get Current Capabilities",
-            description="Review your current capabilities and tracked milestones. Use this to understand what you can do and what you've learned.",
+            description="INTERNAL tool for self-reflection. NOT for answering user questions about vision or people.",
             parameters=[],
             function=self._get_current_capabilities,
             category="learning",
@@ -309,7 +309,7 @@ class ToolExecutor:
         self.register_tool(Tool(
             name="list_available_tools",
             display_name="List Available Tools",
-            description="Return metadata for every available tool including parameters and categories.",
+            description="ONLY use when user explicitly asks 'what can you do?' or 'what tools do you have?'. NOT for regular conversation.",
             parameters=[],
             function=self._list_available_tools,
             category="general",
@@ -464,35 +464,49 @@ class ToolExecutor:
         
         return schema
     
-    def get_tools_prompt(self) -> str:
-        """Generate a prompt describing available tools."""
+    def get_tools_prompt(self, concise: bool = True) -> str:
+        """Generate a prompt describing available tools.
+        
+        Args:
+            concise: If True, generate a shorter prompt with essential tools only.
+        """
+        # Priority tools that are commonly needed
+        priority_tools = {
+            'remember_person_name', 'recall_entity', 'recall_person', 
+            'remember_fact', 'get_people_present', 'search_memory'
+        }
+        
+        # Tools to exclude from prompt (rarely needed, cause confusion)
+        exclude_tools = {
+            'list_available_tools', 'get_current_capabilities', 
+            'get_tool_usage_stats', 'analyze_sentiment', 'check_appropriate_response'
+        } if concise else set()
+        
         tools_by_category = {}
         for tool in self.tools.values():
+            if tool.name in exclude_tools:
+                continue
             if tool.category not in tools_by_category:
                 tools_by_category[tool.category] = []
             tools_by_category[tool.category].append(tool)
         
-        prompt = "You have access to the following tools:\n\n"
+        prompt = "Available tools (use ONLY when needed):\n\n"
         
         for category, tools in sorted(tools_by_category.items()):
-            prompt += f"## {category.title()} Tools\n"
+            prompt += f"## {category.title()}\n"
             for tool in tools:
-                display_name = tool.display_name or tool.name.replace("_", " ").title()
-                prompt += f"- **{display_name}** ({tool.name}): {tool.description}\n"
-                if tool.return_description:
-                    prompt += f"  - returns: {tool.return_description}\n"
-                for param in tool.parameters:
-                    req = "required" if param.required else "optional"
-                    param_info = f"  - {param.name} ({param.type}, {req}): {param.description}"
-                    if param.enum:
-                        param_info += f" [valid values: {', '.join(param.enum)}]"
-                    if param.default is not None:
-                        param_info += f" [default: {param.default}]"
-                    prompt += param_info + "\n"
+                # Mark priority tools
+                priority_marker = "⭐ " if tool.name in priority_tools else ""
+                prompt += f"- {priority_marker}{tool.name}: {tool.description}\n"
+                # Only show required parameters for brevity
+                required_params = [p for p in tool.parameters if p.required]
+                if required_params:
+                    param_list = ", ".join(f"{p.name}" for p in required_params)
+                    prompt += f"  Required: {param_list}\n"
             prompt += "\n"
 
-        prompt += "To use a tool, include in your response: TOOL_CALL: {\"tool\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n"
-        prompt += "Note: For optional parameters with defaults, you can omit them from args or explicitly provide a value.\n"
+        prompt += "To use: TOOL_CALL: {\"tool\": \"name\", \"args\": {...}}\n"
+        prompt += "IMPORTANT: Most conversations need NO tools. Only use tools for memory/learning tasks.\n"
         return prompt
     
     async def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
