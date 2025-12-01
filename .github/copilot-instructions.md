@@ -4,6 +4,8 @@ description: 'Repository-wide Copilot instructions for the Nomous project'
 
 # Nomous Project Guidelines
 
+> **For comprehensive technical context, see [AGENT_CONTEXT.md](./AGENT_CONTEXT.md)**
+
 ## Project Overview
 
 Nomous is an offline-first WebSocket bridge that connects a React dashboard to local AI capabilities including:
@@ -11,6 +13,7 @@ Nomous is an offline-first WebSocket bridge that connects a React dashboard to l
 - Speech recognition via Vosk
 - Text-to-speech via Piper
 - Computer vision via OpenCV
+- **Person identity tracking** for relationship building across sessions
 
 ## Technology Stack
 

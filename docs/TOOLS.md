@@ -244,6 +244,137 @@ TOOL_CALL: {"tool": "check_appropriate_response", "args": {
 - Avoiding mistakes
 - Professional communication
 
+### Person Tracking & Identity Tools
+
+These tools enable the LLM to recognize and remember individual people across sessions, building relationships over time.
+
+#### remember_person_name
+When someone tells you their name, use this to associate their name with their identity.
+
+**Parameters:**
+- `name` (string, required): The person's name (e.g., "Joe", "Anthony")
+- `description` (string, optional): Physical description to help identify them
+- `person_id` (string, optional): The person_id if known from vision tracking
+
+**Example:**
+```json
+TOOL_CALL: {"tool": "remember_person_name", "args": {
+    "name": "Anthony",
+    "description": "tall with long dark hair"
+}}
+```
+
+**Use Cases:**
+- Learning someone's name when they introduce themselves
+- Associating names with visual appearances
+- Building personal relationships
+
+#### describe_person_appearance
+Record distinguishing visual features of a person you see.
+
+**Parameters:**
+- `description` (string, required): Visual description (e.g., "has a beard", "curly red hair")
+- `person_id` (string, optional): The person_id from vision tracking
+
+**Example:**
+```json
+TOOL_CALL: {"tool": "describe_person_appearance", "args": {
+    "description": "wearing glasses, short brown hair"
+}}
+```
+
+**Use Cases:**
+- Noting visual features to recognize someone later
+- Building visual profiles without knowing names
+- Distinguishing between multiple people
+
+#### recall_person
+Look up information about a person you've met before.
+
+**Parameters:**
+- `name` (string, optional): The person's name to look up
+- `description` (string, optional): Physical description to match
+- `person_id` (string, optional): Direct person_id lookup
+
+**Example:**
+```json
+TOOL_CALL: {"tool": "recall_person", "args": {"name": "Anthony"}}
+```
+
+**Returns:**
+- Person's identity information
+- Familiarity score
+- Conversation history summary
+- Interests and behaviors observed
+- Time spent together
+
+**Use Cases:**
+- Remembering previous conversations with someone
+- Recalling someone's interests or preferences
+- Checking relationship history
+
+#### get_people_present
+See who is currently visible through the camera.
+
+**Parameters:** None
+
+**Example:**
+```json
+TOOL_CALL: {"tool": "get_people_present", "args": {}}
+```
+
+**Returns:**
+- Count of visible people
+- List with names (if known), familiarity levels
+- Suggestions for asking names
+
+**Use Cases:**
+- Understanding who is in the scene
+- Identifying known vs unknown people
+- Deciding who to address
+
+#### note_person_behavior
+Record something interesting a person did.
+
+**Parameters:**
+- `behavior` (string, required): What they did (e.g., "waved hello", "laughed")
+- `person_id` (string, optional): The person_id, or omit to use current speaker
+- `name` (string, optional): The person's name if known
+
+**Example:**
+```json
+TOOL_CALL: {"tool": "note_person_behavior", "args": {
+    "behavior": "smiled when I mentioned music",
+    "name": "Anthony"
+}}
+```
+
+**Use Cases:**
+- Building behavioral profiles
+- Noting reactions and preferences
+- Understanding personality over time
+
+#### add_person_note
+Add a personal note or observation about someone.
+
+**Parameters:**
+- `note` (string, required): Your observation about the person
+- `person_id` (string, optional): The person_id, or omit to use current speaker
+- `name` (string, optional): The person's name if known
+
+**Example:**
+```json
+TOOL_CALL: {"tool": "add_person_note", "args": {
+    "note": "Seems interested in AI and technology topics",
+    "name": "Anthony"
+}}
+```
+
+**Use Cases:**
+- Recording insights about someone
+- Noting preferences mentioned in conversation
+- Building relationship understanding
+
 ## Configuration
 
 Enable/disable tools in `config.yaml`:

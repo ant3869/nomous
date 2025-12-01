@@ -57,6 +57,7 @@ class Server:
         self.memory: Optional[MemoryStore] = None
         self.system_monitor: Optional[SystemMonitor] = None
         self.analytics: Optional[ConversationAnalytics] = None
+        self._audio_chunk_count = 0  # Track audio chunks received
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -230,6 +231,11 @@ class Server:
             self.cam.set_llm(self.llm)  # Camera can trigger vision analysis
             self.cam.start()
             logger.info("Camera -> LLM connection established")
+            
+            # Connect person tracker from camera to LLM for identity tools
+            if hasattr(self.cam, 'person_tracker') and self.cam.person_tracker:
+                self.llm.set_person_tracker(self.cam.person_tracker)
+                logger.info("Person tracker connected to LLM")
 
             self.system_monitor = SystemMonitor(self.bridge)
             await self.system_monitor.start()
@@ -420,7 +426,14 @@ class Server:
                         if self.stt:
                             pcm = msg.get("pcm16", "")
                             rate = int(msg.get("rate", 16000))
-                            await self.stt.feed_base64_pcm(pcm, rate)
+                            if pcm:
+                                self._audio_chunk_count += 1
+                                if self._audio_chunk_count == 1:
+                                    logger.info("🎤 First audio chunk received from frontend - STT processing started")
+                                    await self.bridge.post(msg_event("🎤 Audio streaming active"))
+                                elif self._audio_chunk_count % 100 == 0:
+                                    logger.debug(f"Audio chunks processed: {self._audio_chunk_count}")
+                                await self.stt.feed_base64_pcm(pcm, rate)
                         else:
                             logger.warning("STT not initialized, ignoring audio")
                     
@@ -477,6 +490,18 @@ class Server:
                         success = await self.memory.delete_node(str(node_id))
                         if success:
                             await self.bridge.post(msg_event(f"memory node removed → {node_id}"))
+
+                    elif msg_type == "memory_create":
+                        if not self.memory:
+                            logger.warning("Memory not initialized, ignoring memory_create")
+                            continue
+                        node_payload = msg.get("node") or msg.get("payload") or {}
+                        if not isinstance(node_payload, dict):
+                            logger.warning("Invalid memory_create payload: %s", msg)
+                            continue
+                        node_id = await self.memory.create_node(node_payload)
+                        if node_id:
+                            await self.bridge.post(msg_event(f"memory node added → {node_id}"))
 
                     elif msg_type == "memory_link":
                         if not self.memory:

@@ -8,7 +8,8 @@ import { FilePathInput } from "./components/FilePathInput";
 import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { Activity, AlertTriangle, AudioWaveform, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Speaker, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench } from "lucide-react";
+import { Input } from "./components/ui/input";
+import { Activity, AlertTriangle, AudioWaveform, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Speaker, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench, Network, CirclePlus, Trash2 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode, MemoryNodeKind, Entity, EntityType, TimelineEvent, SemanticSearchResult } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
@@ -24,6 +25,8 @@ import { SystemUsageCard } from "./components/SystemUsageCard";
 import { EntityBrowser } from "./components/EntityBrowser";
 import { LearningTimeline } from "./components/LearningTimeline";
 import { SemanticSearch } from "./components/SemanticSearch";
+import { TimelinePerspective } from "./components/TimelinePerspective";
+import { GenerationProgress } from "./components/GenerationProgress";
 
 const DEFAULT_SYSTEM_PROMPT =
   "You are Nomous, an autonomous multimodal AI orchestrator. Support the operator with concise, confident guidance, coordinate sensors and tools, and narrate decisions with a collaborative tone.";
@@ -144,7 +147,7 @@ interface DashboardState {
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
   speechLines: string[]; systemLines: string[]; sttLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
   settings: ControlSettings; loadingOverlay: LoadingOverlay | null; modelCatalog: ModelCatalogEntry[]; modelCatalogError: string | null;
-  promptReloadRequired: boolean;
+  promptReloadRequired: boolean; generationProgress: { active: boolean; text: string; tokens: number } | null;
 }
 
 interface LoadingOverlay {
@@ -577,6 +580,7 @@ function createInitialState(): DashboardState {
     modelCatalog: [],
     modelCatalogError: null,
     promptReloadRequired: false,
+    generationProgress: null,
   };
 }
 
@@ -589,6 +593,7 @@ interface MicChain {
   gain: GainNode;
   raf?: number;
   residual?: Float32Array;
+  temporarilyMuted?: boolean;
 }
 
 function concatFloat32(a: Float32Array | undefined, b: Float32Array): Float32Array {
@@ -746,16 +751,21 @@ function useNomousBridge() {
     push({ type: "memory_delete", id });
   }, [push]);
 
+  const createMemoryNode = useCallback((draft: ManualMemoryNodeDraft) => {
+    if (!draft || typeof draft !== "object") return;
+    push({ type: "memory_create", node: draft });
+  }, [push]);
+
   const createMemoryLink = useCallback(
-    (fromId: string, toId: string, options?: { weight?: number; relationship?: string; context?: Record<string, unknown> }) => {
+    (fromId: string, toId: string, weight: number, relationship?: string, context?: Record<string, unknown>) => {
       if (!fromId || !toId) return;
       push({
         type: "memory_link",
         from: fromId,
         to: toId,
-        weight: options?.weight ?? 1,
-        relationship: options?.relationship,
-        context: options?.context,
+        weight,
+        relationship,
+        context,
       });
     },
     [push],
@@ -899,12 +909,32 @@ function useNomousBridge() {
           }
           const stamp = `[${new Date().toLocaleTimeString()}]`;
           log(`speak → ${speechText}`);
+          
+          // Temporarily mute microphone to prevent feedback during TTS
+          const mic = micRef.current;
+          if (mic) {
+            mic.temporarilyMuted = true;
+            log("🔇 Microphone temporarily muted during TTS playback");
+            
+            // Estimate TTS duration (rough approximation: 150 words per minute)
+            const wordCount = speechText.split(/\s+/).length;
+            const durationMs = Math.max(2000, (wordCount / 150) * 60 * 1000 + 500);
+            
+            setTimeout(() => {
+              if (micRef.current === mic) {
+                mic.temporarilyMuted = false;
+                log("🔊 Microphone unmuted after TTS playback");
+              }
+            }, durationMs);
+          }
+          
           setState(p => ({
             ...p,
             status: "speaking",
             statusDetail: speechText,
             speechLines: mergeSpeechLines(p.speechLines, stamp, speechText),
             chatMessages: mergeAssistantChatMessages(p.chatMessages, speechText),
+            generationProgress: null,
           }));
           break;
         }
@@ -920,8 +950,27 @@ function useNomousBridge() {
             break;
           }
 
+          // Extract token count for progress tracking
+          const tokenMatch = detail.match(/(\d+)\s+tokens?/i);
+          const tokens = tokenMatch ? parseInt(tokenMatch[1], 10) : 0;
+          const isProcessing = detail.toLowerCase().includes("processing");
+
+          // Check if this is a token processing message (should show in progress bar, not thought stream)
+          const isTokenProcessingMessage = isProcessing && tokens > 0;
+
           const now = Date.now();
           setState(p => {
+            // Update generation progress for token processing messages
+            const generationProgress = isTokenProcessingMessage
+              ? { active: true, text: detail, tokens }
+              : p.generationProgress;
+
+            // Skip adding token processing messages to the thought stream
+            // They will be shown as a progress bar instead
+            if (isTokenProcessingMessage) {
+              return { ...p, generationProgress };
+            }
+
             const prevAccumulator = thoughtAccumulatorRef.current;
             let nextLines = p.thoughtLines;
 
@@ -943,7 +992,7 @@ function useNomousBridge() {
               thoughtAccumulatorRef.current = { prefix, stamp, content: detail, updatedAt: now };
             }
 
-            return { ...p, thoughtLines: nextLines };
+            return { ...p, thoughtLines: nextLines, generationProgress };
           });
           break;
         }
@@ -976,7 +1025,7 @@ function useNomousBridge() {
               nextLines = [entry, ...trimmedHistory];
               sttFinalRef.current = { text: normalizedText, stamp };
             } else {
-              // phase === "forwarded"
+              // phase === "forwarded" - Add user message to chat
               const reference = sttFinalRef.current;
               if (reference && reference.text === normalizedText) {
                 const [, ...rest] = filtered;
@@ -988,6 +1037,14 @@ function useNomousBridge() {
                 nextLines = [entry, ...trimmedHistory];
               }
               sttFinalRef.current = null;
+
+              // Add user message to chat when speech is forwarded to LLM
+              const userMessage = createChatMessage("user", normalizedText);
+              return {
+                ...p,
+                sttLines: nextLines,
+                chatMessages: [...p.chatMessages, userMessage].slice(-MAX_CHAT_HISTORY),
+              };
             }
 
             return { ...p, sttLines: nextLines };
@@ -1198,9 +1255,12 @@ function useNomousBridge() {
 
   const setMic = useCallback(async (on: boolean) => {
     if (!on) {
+      log("🎤 Microphone disabled");
       stopMic();
       return;
     }
+
+    log("🎤 Microphone activation requested...");
 
     if (typeof window === "undefined" || typeof navigator === "undefined") {
       log("mic error: unavailable in this environment");
@@ -1208,12 +1268,13 @@ function useNomousBridge() {
     }
 
     if (micRef.current) {
+      log("🎤 Microphone already active");
       return;
     }
 
     const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
     if (!AudioContextClass) {
-      log("mic error: AudioContext unsupported");
+      log("❌ mic error: AudioContext unsupported in this browser");
       return;
     }
 
@@ -1221,19 +1282,24 @@ function useNomousBridge() {
     let ctx: AudioContext | null = null;
 
     try {
+      log("🎤 Requesting microphone permission...");
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, sampleRate: TARGET_SAMPLE_RATE, echoCancellation: true, noiseSuppression: true },
         video: false,
       });
+      log("✅ Microphone permission granted");
 
+      log("🔊 Creating audio context...");
       ctx = new AudioContextClass({ sampleRate: TARGET_SAMPLE_RATE }) as AudioContext;
       await ctx.resume();
       const inputSampleRate = ctx.sampleRate;
+      log(`🔊 Audio context created (sample rate: ${inputSampleRate}Hz)`);
 
       if (typeof ctx.createScriptProcessor !== "function") {
         throw new Error("ScriptProcessorNode not supported in this browser");
       }
 
+      log("🎙️ Setting up audio processing pipeline...");
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
@@ -1266,19 +1332,40 @@ function useNomousBridge() {
       };
       tick();
 
+      let chunkCount = 0;
       processor.onaudioprocess = (event) => {
         if (micRef.current !== chain) {
+          return;
+        }
+        // Don't process audio if temporarily muted (TTS is speaking)
+        if (chain.temporarilyMuted) {
           return;
         }
         const channelData = event.inputBuffer.getChannelData(0);
         const encoded = encodeAudioChunk(chain, channelData, inputSampleRate);
         if (encoded) {
+          chunkCount++;
+          if (chunkCount === 1) {
+            log("🎵 Audio streaming started - speaking into microphone...");
+          }
           push({ type: "audio", rate: TARGET_SAMPLE_RATE, pcm16: encoded });
         }
       };
 
       setState(p => ({ ...p, micOn: true }));
+      log("✅ Microphone is now ACTIVE and listening");
     } catch (e: any) {
+      const errorMsg = e?.message ?? String(e);
+      if (errorMsg.includes("Permission denied") || errorMsg.includes("NotAllowedError")) {
+        log("❌ Microphone permission denied - please allow microphone access in your browser");
+      } else if (errorMsg.includes("NotFoundError") || errorMsg.includes("not found")) {
+        log("❌ No microphone found - please connect a microphone device");
+      } else if (errorMsg.includes("NotReadableError")) {
+        log("❌ Microphone is busy or being used by another application");
+      } else {
+        log(`❌ Microphone error: ${errorMsg}`);
+      }
+      
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
@@ -1287,7 +1374,6 @@ function useNomousBridge() {
       }
       micRef.current = null;
       setState(p => ({ ...p, micOn: false, settings: mergeSettings(p.settings, { microphoneEnabled: false }), vu: 0 }));
-      log(`mic error: ${e?.message ?? e}`);
     }
   }, [log, push, setState, stopMic]);
 
@@ -1295,6 +1381,17 @@ function useNomousBridge() {
     stopMic();
     wsRef.current?.close(); wsRef.current = null;
   }, [stopMic]);
+
+  // Auto-start microphone when microphoneEnabled is true and connected
+  useEffect(() => {
+    if (state.connected && state.settings.microphoneEnabled && !state.micOn) {
+      log("🎤 Auto-starting microphone (enabled in settings)...");
+      setMic(true);
+    } else if (!state.settings.microphoneEnabled && state.micOn) {
+      log("🎤 Auto-stopping microphone (disabled in settings)...");
+      setMic(false);
+    }
+  }, [state.connected, state.settings.microphoneEnabled, state.micOn, log, setMic]);
 
   const updateSettings = useCallback((patch: Partial<ControlSettings>) => {
     setState(prev => {
@@ -1329,6 +1426,7 @@ function useNomousBridge() {
     handleChatKeyDown,
     updateMemoryNode,
     deleteMemoryNode,
+    createMemoryNode,
     createMemoryLink,
     deleteMemoryEdge,
     // Enhanced memory system
@@ -1785,6 +1883,344 @@ function MemoryList({ title, icon, entries, emptyLabel, selectedId, onSelect }: 
   );
 }
 
+interface ManualMemoryNodeDraft {
+  id?: string;
+  label: string;
+  kind: MemoryNodeKind;
+  description?: string;
+  meaning?: string;
+  tags?: string[];
+  category?: string;
+  source?: string;
+  valence?: string;
+  importance?: number;
+  milestone?: boolean;
+  strength?: number;
+  confidence?: number;
+  timestamp?: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface ManualMemoryControlsProps {
+  onCreate: (draft: ManualMemoryNodeDraft) => void;
+  onDelete: (id: string) => void;
+}
+
+function ManualMemoryControls({ onCreate, onDelete }: ManualMemoryControlsProps) {
+  const [form, setForm] = useState({
+    id: "",
+    label: "",
+    kind: "concept" as MemoryNodeKind,
+    description: "",
+    meaning: "",
+    tags: "",
+    category: "",
+    source: "manual_entry",
+    valence: "",
+    importance: 0.5,
+    strength: 1,
+    milestone: false,
+    timestamp: "",
+    confidence: 0.75,
+    note: "",
+  });
+  const [deleteId, setDeleteId] = useState("");
+  const [status, setStatus] = useState<{ tone: "success" | "warn"; message: string } | null>(null);
+
+  const handleFieldChange = useCallback((key: keyof typeof form, value: any) => {
+    setForm(prev => ({ ...prev, [key]: value }));
+  }, []);
+
+  const handleCreate = useCallback(() => {
+    if (!form.label.trim()) {
+      setStatus({ tone: "warn", message: "Provide a label before recording a manual memory." });
+      return;
+    }
+
+    const tags = form.tags
+      .split(",")
+      .map(tag => tag.trim())
+      .filter(Boolean);
+
+    const payload: ManualMemoryNodeDraft = {
+      id: form.id.trim() ? form.id.trim() : undefined,
+      label: form.label.trim(),
+      kind: form.kind,
+      description: form.description.trim() || undefined,
+      meaning: form.meaning.trim() || undefined,
+      tags: tags.length ? tags : undefined,
+      category: form.category.trim() || undefined,
+      source: form.source.trim() || undefined,
+      valence: form.valence.trim() || undefined,
+      importance: form.importance,
+      strength: form.strength,
+      milestone: form.milestone,
+      confidence: form.confidence,
+      metadata: form.note.trim() ? { note: form.note.trim(), created_via: "ui_manual" } : undefined,
+    };
+
+    if (form.timestamp.trim()) {
+      const parsed = new Date(form.timestamp);
+      if (!Number.isNaN(parsed.getTime())) {
+        payload.timestamp = parsed.toISOString();
+      }
+    }
+
+    onCreate(payload);
+    setStatus({ tone: "success", message: `Manual memory "${form.label.trim()}" queued for creation.` });
+    setForm(prev => ({
+      ...prev,
+      id: "",
+      label: "",
+      description: "",
+      meaning: "",
+      tags: "",
+      valence: "",
+      note: "",
+    }));
+  }, [form, onCreate]);
+
+  const handleManualDelete = useCallback(() => {
+    const trimmed = deleteId.trim();
+    if (!trimmed) {
+      setStatus({ tone: "warn", message: "Enter a node ID to delete manually." });
+      return;
+    }
+    onDelete(trimmed);
+    setDeleteId("");
+    setStatus({ tone: "success", message: `Delete requested for ${trimmed}.` });
+  }, [deleteId, onDelete]);
+
+  return (
+    <Card className="border-zinc-800/60 bg-black/40">
+      <CardContent className="space-y-4 p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+          <CirclePlus className="h-4 w-4 text-emerald-400" />
+          Manual Memory Controls
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Label</span>
+            <Input
+              value={form.label}
+              onChange={event => handleFieldChange("label", event.target.value)}
+              placeholder="Memory summary"
+              className="bg-zinc-950/70"
+            />
+          </label>
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Memory type</span>
+            <select
+              value={form.kind}
+              onChange={event => handleFieldChange("kind", event.target.value as MemoryNodeKind)}
+              className="w-full rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+            >
+              <option value="stimulus">Stimulus</option>
+              <option value="concept">Concept</option>
+              <option value="event">Event</option>
+              <option value="behavior">Behavior</option>
+              <option value="self">Identity</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Custom node ID (optional)</span>
+            <Input
+              value={form.id}
+              onChange={event => handleFieldChange("id", event.target.value)}
+              placeholder="node:manual:xyz"
+              className="bg-zinc-950/70"
+            />
+          </label>
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Source</span>
+            <Input
+              value={form.source}
+              onChange={event => handleFieldChange("source", event.target.value)}
+              placeholder="manual_entry"
+              className="bg-zinc-950/70"
+            />
+          </label>
+        </div>
+
+        <div className="space-y-2">
+          <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Description</span>
+          <textarea
+            value={form.description}
+            onChange={event => handleFieldChange("description", event.target.value)}
+            rows={2}
+            placeholder="How should the runtime remember this?"
+            className="w-full rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Meaning / insight</span>
+          <textarea
+            value={form.meaning}
+            onChange={event => handleFieldChange("meaning", event.target.value)}
+            rows={2}
+            placeholder="Semantic takeaway..."
+            className="w-full rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+          />
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Tags</span>
+            <Input
+              value={form.tags}
+              onChange={event => handleFieldChange("tags", event.target.value)}
+              placeholder="context, location"
+              className="bg-zinc-950/70"
+            />
+          </label>
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Category</span>
+            <Input
+              value={form.category}
+              onChange={event => handleFieldChange("category", event.target.value)}
+              placeholder="safety, user, workflow..."
+              className="bg-zinc-950/70"
+            />
+          </label>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Valence</span>
+            <Input
+              value={form.valence}
+              onChange={event => handleFieldChange("valence", event.target.value)}
+              placeholder="positive, neutral..."
+              className="bg-zinc-950/70"
+            />
+          </label>
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Timestamp</span>
+            <Input
+              type="datetime-local"
+              value={form.timestamp}
+              onChange={event => handleFieldChange("timestamp", event.target.value)}
+              className="bg-zinc-950/70"
+            />
+          </label>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-zinc-400">
+              <span>Importance</span>
+              <span className="font-mono text-emerald-300">{Math.round(form.importance * 100)}%</span>
+            </div>
+            <Slider
+              defaultValue={[Math.round(form.importance * 100)]}
+              onValueChange={value => handleFieldChange("importance", value[0] / 100)}
+              min={0}
+              max={100}
+              step={5}
+            />
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-zinc-400">
+              <span>Strength</span>
+              <span className="font-mono text-cyan-300">{form.strength.toFixed(1)}</span>
+            </div>
+            <Slider
+              defaultValue={[Math.round(form.strength * 10)]}
+              onValueChange={value => handleFieldChange("strength", value[0] / 10)}
+              min={2}
+              max={50}
+              step={1}
+            />
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1 text-sm text-zinc-300">
+            <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Confidence</span>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={form.confidence}
+              onChange={event => handleFieldChange("confidence", Math.max(0, Math.min(1, Number(event.target.value))))}
+              className="bg-zinc-950/70"
+            />
+          </label>
+          <label className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800/60 bg-black/30 px-3 py-2 text-sm text-zinc-200">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Milestone</div>
+              <div className="text-xs text-zinc-400">Surface prominently in graph</div>
+            </div>
+            <Switch checked={form.milestone} onCheckedChange={value => handleFieldChange("milestone", value)} />
+          </label>
+        </div>
+
+        <div className="space-y-1">
+          <span className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Context note</span>
+          <textarea
+            value={form.note}
+            onChange={event => handleFieldChange("note", event.target.value)}
+            rows={2}
+            placeholder="Any JSON-safe note will be attached to metadata."
+            className="w-full rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+          />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={handleCreate} disabled={!form.label.trim()} className="bg-emerald-600/90 text-white hover:bg-emerald-500/90 disabled:opacity-50">
+            <CirclePlus className="mr-2 h-4 w-4" />
+            Record memory
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setForm(prev => ({ ...prev, label: "", description: "", meaning: "", tags: "", valence: "", note: "", id: "" }))}
+            className="text-xs text-zinc-300"
+          >
+            Clear fields
+          </Button>
+        </div>
+
+        <div className="rounded-lg border border-zinc-800/60 bg-zinc-950/50 p-3 space-y-2">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.3em] text-zinc-500">
+            <Trash2 className="h-3.5 w-3.5 text-red-400" />
+            Manual delete
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              value={deleteId}
+              onChange={event => setDeleteId(event.target.value)}
+              placeholder="memory node id"
+              className="bg-zinc-950/70"
+            />
+            <Button type="button" variant="secondary" onClick={handleManualDelete} className="bg-red-600/80 text-white hover:bg-red-500/80">
+              Delete node
+            </Button>
+          </div>
+        </div>
+
+        {status ? (
+          <div
+            className={`rounded-md border px-3 py-2 text-xs ${
+              status.tone === "success"
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                : "border-amber-500/40 bg-amber-500/10 text-amber-100"
+            }`}
+          >
+            {status.message}
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 type StreamView = "thoughts" | "speech" | "signals";
 
 interface ConversationStreamPanelProps {
@@ -1958,6 +2394,16 @@ function SttMonitorCard({ lines, micOn, micStatus, micStatusLabel, micSensitivit
         </div>
 
         <div className="rounded-xl border border-zinc-800/60 bg-black/60">
+          {!sttEnabled && (
+            <div className="border-b border-zinc-800/60 bg-amber-500/10 px-4 py-2 text-xs text-amber-200">
+              ⚠️ STT is disabled. Enable it in the Devices tab to transcribe speech.
+            </div>
+          )}
+          {!micOn && sttEnabled && (
+            <div className="border-b border-zinc-800/60 bg-sky-500/10 px-4 py-2 text-xs text-sky-200">
+              🎤 Click "Enable Mic" above to start capturing audio.
+            </div>
+          )}
           <div className="h-48 overflow-y-auto p-4 font-mono text-xs leading-relaxed text-zinc-100/95 whitespace-pre-wrap">
             {lines.length > 0 ? (
               lines.map((line, index) => (
@@ -3391,6 +3837,7 @@ export default function App(){
     handleChatKeyDown,
     updateMemoryNode,
     deleteMemoryNode,
+    createMemoryNode,
     createMemoryLink,
     deleteMemoryEdge,
     entities,
@@ -3559,6 +4006,13 @@ export default function App(){
       setSelectedMemoryId(null);
     }
   }, [selectedMemoryId, memoryInsights, memoryKindFilter]);
+
+  useEffect(() => {
+    if (!state.connected) {
+      return;
+    }
+    fetchTimeline(selectedEntityId ?? undefined);
+  }, [selectedEntityId, state.connected, fetchTimeline]);
 
   useEffect(() => {
     if (selectedMemoryId || filteredMemoryNodes.length === 0) {
@@ -3888,6 +4342,12 @@ export default function App(){
                                   <ChatBubble key={message.id} message={message} />
                                 ))
                               )}
+                              {state.generationProgress?.active && (
+                                <GenerationProgress
+                                  text={state.generationProgress.text}
+                                  tokens={state.generationProgress.tokens}
+                                />
+                              )}
                             </div>
                           </div>
                         </div>
@@ -4081,29 +4541,30 @@ export default function App(){
               </TabsContent>
 
               <TabsContent value="memory" className="pt-4">
-                <div className="space-y-6">
-                  <div className="mb-4">
-                    <h3 className="text-lg font-semibold text-zinc-100">Memory System</h3>
-                    <p className="text-xs text-zinc-400">Semantic search, entity tracking, and learning timeline</p>
-                  </div>
-                  
-                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                    {/* Left Column: Search and Entities */}
-                    <div className="space-y-6">
+                <div className="space-y-4">
+                  {/* Simplified two-column layout */}
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <div className="space-y-4">
                       <SemanticSearch
                         onSearch={performSearch}
                         results={searchResults}
                         isSearching={isSearching}
                         onSelectResult={(nodeId) => {
+                          setSelectedMemoryId(nodeId);
                           const entity = entities.find(e => e.id === nodeId);
-                          if (entity) setSelectedEntityId(nodeId);
+                          if (entity) {
+                            setSelectedEntityId(nodeId);
+                          }
                         }}
-                        selectedResultId={selectedEntityId}
+                        selectedResultId={selectedMemoryId}
                       />
                       <EntityBrowser
                         entities={entities}
                         selectedEntityId={selectedEntityId}
-                        onSelect={setSelectedEntityId}
+                        onSelect={(entityId) => {
+                          setSelectedEntityId(entityId);
+                          setSelectedMemoryId(entityId);
+                        }}
                         onEdit={(entity) => {
                           console.log("Edit entity:", entity);
                         }}
@@ -4122,15 +4583,99 @@ export default function App(){
                       />
                     </div>
                     
-                    {/* Right Column: Timeline */}
-                    <div>
+                    <div className="space-y-4">
                       <LearningTimeline
                         events={timeline}
                         selectedEntityId={selectedEntityId}
-                        onSelectEntity={setSelectedEntityId}
+                        onSelectEntity={(entityId) => {
+                          setSelectedEntityId(entityId);
+                          if (entityId) {
+                            setSelectedMemoryId(entityId);
+                          }
+                        }}
                         limit={50}
                       />
+                      <TimelinePerspective events={timeline} />
                     </div>
+                  </div>
+
+                  <div className="grid gap-4 xl:grid-cols-[3fr_2fr]">
+                    <Card className="border-zinc-800/60 bg-black/40">
+                      <CardContent className="space-y-4 p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+                            <map className="h-4 w-4 text-cyan-400" />
+                            Memory Graph Workbench
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.3em] text-zinc-500">
+                            Filters
+                            <div className="flex flex-wrap gap-2">
+                              {memoryKindOptions.map(option => {
+                                const active = memoryKindFilter.has(option.kind);
+                                return (
+                                  <button
+                                    key={option.kind}
+                                    type="button"
+                                    onClick={() => toggleMemoryKind(option.kind)}
+                                    className={`rounded-full border px-3 py-1 text-[11px] transition ${
+                                      active
+                                        ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-200"
+                                        : "border-zinc-800/60 bg-black/30 text-zinc-400 hover:border-zinc-700/60"
+                                    }`}
+                                  >
+                                    {option.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
+                          <div className="flex items-center gap-2">
+                            <span className="uppercase tracking-[0.3em]">Zoom</span>
+                            <span className="font-mono text-zinc-100">{Math.round(memoryZoom * 100)}%</span>
+                          </div>
+                          <div className="w-full max-w-xs">
+                            <Slider
+                              defaultValue={[Math.round(memoryZoom * 100)]}
+                              onValueChange={value => setMemoryZoom(value[0] / 100)}
+                              min={60}
+                              max={160}
+                              step={5}
+                            />
+                          </div>
+                          <Button type="button" variant="secondary" onClick={() => setMemoryZoom(1)} className="text-xs text-zinc-300">
+                            Reset
+                          </Button>
+                        </div>
+
+                        <div className="rounded-xl border border-zinc-800/60 bg-zinc-950/40">
+                          {filteredMemoryNodes.length === 0 ? (
+                            <div className="p-6 text-center text-sm text-zinc-500">No memory nodes match the current filters.</div>
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <MemoryGraph
+                                nodes={filteredMemoryNodes}
+                                edges={filteredMemoryEdges}
+                                selectedNodeId={selectedMemoryId}
+                                onSelect={setSelectedMemoryId}
+                                zoom={memoryZoom}
+                              />
+                            </div>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-zinc-500">
+                          Click nodes to inspect associations. Zoom adjusts column spacing so you can focus on dense concepts without hiding existing context.
+                        </p>
+                      </CardContent>
+                    </Card>
+                    <MemoryDetailCard
+                      detail={selectedMemoryDetail}
+                      onUpdate={updateMemoryNode}
+                      onDelete={deleteMemoryNode}
+                      onCreateLink={createMemoryLink}
+                    />
                   </div>
                 </div>
               </TabsContent>

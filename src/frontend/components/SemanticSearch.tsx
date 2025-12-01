@@ -113,12 +113,12 @@ export function SemanticSearch({
   };
 
   return (
-    <Card className="border-zinc-800/60 bg-black/40">
+    <Card className="border-zinc-800/60 bg-zinc-950/40">
       <CardContent className="p-4">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <Brain className="w-5 h-5 text-purple-400" />
-            <h3 className="font-semibold text-zinc-100">Semantic Search</h3>
+            <Brain className="w-4 h-4 text-purple-400" />
+            <h3 className="text-sm font-semibold text-zinc-100">Search Memories</h3>
           </div>
           <Button
             variant="secondary"

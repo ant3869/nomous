@@ -112,10 +112,11 @@ class AudioSTT:
     async def feed_base64_pcm(self, b64: str, rate: int):
         """Process audio chunk and automatically trigger LLM on speech."""
         if not self.enabled:
+            logger.debug("STT is disabled, skipping audio chunk")
             return
 
         if not self.model or not self.rec:
-            logger.debug("STT feed skipped: model not loaded")
+            logger.warning("STT feed skipped: Vosk model not loaded. Check model path in config.")
             return
 
         if rate != self.rate:
