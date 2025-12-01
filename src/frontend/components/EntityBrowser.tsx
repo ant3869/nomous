@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Users, MapPin, Package, Search, X, Edit2, Trash2, Star } from "lucide-react";
+import { Users, MapPin, Package, Search, X, Edit2, Trash2, Star, Database } from "lucide-react";
 import { Card, CardContent } from "./ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Button } from "./ui/button";
@@ -135,20 +135,20 @@ export function EntityBrowser({
   };
 
   return (
-    <Card className="border-zinc-800/60 bg-black/40">
+    <Card className="border-zinc-800/60 bg-zinc-950/40">
       <CardContent className="p-4">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <Users className="w-5 h-5 text-emerald-400" />
-            <h3 className="font-semibold text-zinc-100">Entity Memory</h3>
+            <Database className="w-4 h-4 text-emerald-400" />
+            <h3 className="text-sm font-semibold text-zinc-100">Memory Store</h3>
           </div>
-          <Badge className="bg-zinc-900/60 text-zinc-300 border border-zinc-700">
-            {entities.length} {entities.length === 1 ? "entity" : "entities"}
+          <Badge className="bg-zinc-900/60 text-zinc-400 border border-zinc-800 text-xs">
+            {entities.length}
           </Badge>
         </div>
 
         {/* Search Bar */}
-        <form onSubmit={handleSearchSubmit} className="mb-4">
+        <form onSubmit={handleSearchSubmit} className="mb-3">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
             <Input
@@ -156,7 +156,7 @@ export function EntityBrowser({
               placeholder="Search entities..."
               value={searchQuery}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value)}
-              className="pl-10 pr-10 bg-zinc-900/60 border-zinc-800 text-zinc-100 placeholder:text-zinc-500"
+              className="pl-10 pr-10 bg-zinc-900/60 border-zinc-800 text-zinc-100 placeholder:text-zinc-500 h-9"
             />
             {searchQuery && (
               <button
@@ -172,30 +172,26 @@ export function EntityBrowser({
 
         {/* Entity Type Tabs */}
         <Tabs defaultValue={activeTab} value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)} className="w-full">
-          <TabsList className="grid w-full grid-cols-5 bg-zinc-900/60 border border-zinc-800">
-            <TabsTrigger value="all" className="text-xs">
+          <TabsList className="grid w-full grid-cols-5 bg-zinc-900/60 border border-zinc-800 h-9">
+            <TabsTrigger value="all" className="text-[11px]">
               All ({entities.length})
             </TabsTrigger>
-            <TabsTrigger value="person" className="text-xs">
-              <Users className="w-3 h-3 mr-1" />
-              {entityCounts.person}
+            <TabsTrigger value="person" className="text-[11px]">
+              <Users className="w-3 h-3" />
             </TabsTrigger>
-            <TabsTrigger value="place" className="text-xs">
-              <MapPin className="w-3 h-3 mr-1" />
-              {entityCounts.place}
+            <TabsTrigger value="place" className="text-[11px]">
+              <MapPin className="w-3 h-3" />
             </TabsTrigger>
-            <TabsTrigger value="object" className="text-xs">
-              <Package className="w-3 h-3 mr-1" />
-              {entityCounts.object}
+            <TabsTrigger value="object" className="text-[11px]">
+              <Package className="w-3 h-3" />
             </TabsTrigger>
-            <TabsTrigger value="preference" className="text-xs">
-              <Star className="w-3 h-3 mr-1" />
-              {entityCounts.preference}
+            <TabsTrigger value="preference" className="text-[11px]">
+              <Star className="w-3 h-3" />
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value={activeTab} className="mt-4">
-            <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2">
+          <TabsContent value={activeTab} className="mt-3">
+            <div className="space-y-2 max-h-[380px] overflow-y-auto pr-2">
               <AnimatePresence mode="popLayout">
                 {filteredEntities.length === 0 ? (
                   <motion.div

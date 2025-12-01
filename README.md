@@ -14,11 +14,13 @@ Nomous is an offline-first WebSocket bridge that connects a TypeScript React das
 - 👁️ **Computer Vision** capture with MediaPipe gesture detection, motion-aware frame streaming, and autonomous vision prompts for the LLM【F:src/backend/video.py†L1-L176】【F:src/backend/video.py†L360-L437】
 - 📈 **System telemetry** that surfaces CPU/GPU utilisation and memory pressure inside the dashboard UI【F:src/backend/system.py†L1-L152】【F:src/frontend/components/SystemUsageCard.tsx†L1-L83】
 - 📚 **Persistent memory graph & tool system** that lets the model store observations, run self-evaluations, and surface tool activity in the UI【F:src/backend/memory.py†L1-L170】【F:src/backend/tools.py†L1-L146】【F:src/frontend/App.tsx†L376-L430】
+- 👤 **Person identity tracking** that recognizes individuals, learns names, associates conversations, and builds relationships across sessions【F:src/backend/person_tracker.py†L1-L620】
 
 ## Feature Highlights
 - ✨ Real-time token streaming, load overlays, and chat playback for every assistant response【F:src/backend/llm.py†L116-L212】【F:src/frontend/App.tsx†L330-L401】
-- 🛠️ **Nine built-in LLM tools** covering memory search, observation logging, learning, and social safeguards with UI visualisation of tool usage and stats【F:src/backend/tools.py†L32-L187】【F:src/frontend/components/ToolActivity.tsx†L6-L213】
-- 📹 Live camera preview with motion thresholds, gesture detection, and configurable debounce/cooldown windows【F:src/backend/video.py†L28-L123】【F:src/backend/video.py†L360-L437】
+- 🛠️ **25+ built-in LLM tools** covering memory search, observation logging, learning, social safeguards, and person tracking with UI visualisation of tool usage and stats【F:src/backend/tools.py†L32-L187】【F:src/frontend/components/ToolActivity.tsx†L6-L213】
+- 👤 **Person identity tracking** with visual signature matching, automatic name detection, conversation binding, and relationship building【F:src/backend/person_tracker.py†L1-L620】
+- 📹 Live camera preview with motion thresholds, gesture detection, face detection, and configurable debounce/cooldown windows【F:src/backend/video.py†L28-L123】【F:src/backend/video.py†L360-L437】
 - 🎙️ Browser microphone streaming (PCM16) with automatic speech detection and configurable sensitivity【F:src/backend/audio.py†L33-L118】
 - 🔊 Optional Piper TTS synthesis with per-session toggles for enablement, auto playback, volume, and voice selection【F:src/backend/tts.py†L19-L138】【F:scripts/run_bridge.py†L72-L154】
 - 🧠 Persistent memory graph with SQLite backing plus front-end visualisation and analytics helpers【F:src/backend/memory.py†L13-L167】【F:src/frontend/App.tsx†L403-L430】

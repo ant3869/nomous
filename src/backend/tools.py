@@ -328,6 +328,86 @@ class ToolExecutor:
             return_description="Aggregated counters, success rate, and recent executions."
         ))
 
+        # Person tracking tools - for recognizing and remembering individuals
+        self.register_tool(Tool(
+            name="remember_person_name",
+            display_name="Remember Person's Name",
+            description="When someone tells you their name, use this to associate their name with their identity. This allows you to recognize them in the future and remember your conversations.",
+            parameters=[
+                ToolParameter("name", "string", "The person's name (e.g., 'Joe', 'Anthony')", required=True),
+                ToolParameter("description", "string", "Physical description to help identify them (e.g., 'tall with long dark hair', 'wearing glasses')", required=False),
+                ToolParameter("person_id", "string", "The person_id if known from vision tracking", required=False)
+            ],
+            function=self._remember_person_name,
+            category="social",
+            return_description="Confirmation that the person's identity has been stored."
+        ))
+
+        self.register_tool(Tool(
+            name="describe_person_appearance",
+            display_name="Describe Person's Appearance", 
+            description="Record distinguishing visual features of a person you see. This helps you recognize them later even if they don't give their name.",
+            parameters=[
+                ToolParameter("description", "string", "Visual description (e.g., 'has a beard', 'curly red hair', 'tall and thin')", required=True),
+                ToolParameter("person_id", "string", "The person_id from vision tracking", required=False)
+            ],
+            function=self._describe_person_appearance,
+            category="social",
+            return_description="Confirmation of the description being recorded."
+        ))
+
+        self.register_tool(Tool(
+            name="recall_person",
+            display_name="Recall Person",
+            description="Look up information about a person you've met before. Search by name or physical description to recall your history with them.",
+            parameters=[
+                ToolParameter("name", "string", "The person's name to look up", required=False),
+                ToolParameter("description", "string", "Physical description to match", required=False),
+                ToolParameter("person_id", "string", "Direct person_id lookup", required=False)
+            ],
+            function=self._recall_person,
+            category="social",
+            return_description="History with this person including conversations, behaviors, and notes."
+        ))
+
+        self.register_tool(Tool(
+            name="get_people_present",
+            display_name="Get People Present",
+            description="See who is currently visible. Returns information about all people you can see, including whether you know their names and your familiarity level.",
+            parameters=[],
+            function=self._get_people_present,
+            category="social",
+            return_description="List of currently visible people with identity information."
+        ))
+
+        self.register_tool(Tool(
+            name="note_person_behavior",
+            display_name="Note Person Behavior",
+            description="Record something interesting a person did. This builds up a history of their behaviors and helps you understand them better.",
+            parameters=[
+                ToolParameter("behavior", "string", "What they did (e.g., 'waved hello', 'looked thoughtful', 'laughed at my joke')", required=True),
+                ToolParameter("person_id", "string", "The person_id, or omit to use current speaker", required=False),
+                ToolParameter("name", "string", "The person's name if known", required=False)
+            ],
+            function=self._note_person_behavior,
+            category="social",
+            return_description="Confirmation the behavior was recorded."
+        ))
+
+        self.register_tool(Tool(
+            name="add_person_note",
+            display_name="Add Note About Person",
+            description="Add a personal note or observation about someone. Use this to record insights, preferences they've mentioned, or things you want to remember about them.",
+            parameters=[
+                ToolParameter("note", "string", "Your observation or note about the person", required=True),
+                ToolParameter("person_id", "string", "The person_id, or omit to use current speaker", required=False),
+                ToolParameter("name", "string", "The person's name if known", required=False)
+            ],
+            function=self._add_person_note,
+            category="social",
+            return_description="Confirmation the note was saved."
+        ))
+
         categories = sorted({tool.category for tool in self.tools.values()})
         logger.info(
             "Registered %s built-in tools across categories: %s",
@@ -1435,6 +1515,192 @@ class ToolExecutor:
         except Exception as e:
             logger.error(f"Failed to get learning progress: {e}")
             return {"success": False, "error": str(e), "timeline": []}
+
+    # Person tracking tool implementations
+    async def _remember_person_name(
+        self,
+        name: str,
+        description: str = "",
+        person_id: str = ""
+    ) -> Dict[str, Any]:
+        """Remember a person's name and associate it with their identity."""
+        person_tracker = getattr(self.llm, 'person_tracker', None)
+        if not person_tracker:
+            return {"success": False, "error": "Person tracking not available"}
+        
+        try:
+            # If no person_id, try to find by description or use current speaker
+            if not person_id:
+                speaker = await person_tracker.get_current_speaker()
+                if speaker:
+                    person_id = speaker.get("person_id", "")
+            
+            if not person_id and not description:
+                # Create a new person entry
+                present = await person_tracker.get_all_present()
+                if present:
+                    # Use the first unnamed present person
+                    for p in present:
+                        if not p.get("name"):
+                            person_id = p.get("person_id", "")
+                            break
+            
+            result = await person_tracker.set_person_name(
+                person_id=person_id,
+                name=name,
+                description=description
+            )
+            
+            if result.get("success"):
+                logger.info(f"Remembered person name: {name}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to remember person name: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _describe_person_appearance(
+        self,
+        description: str,
+        person_id: str = ""
+    ) -> Dict[str, Any]:
+        """Record distinguishing visual features of a person."""
+        person_tracker = getattr(self.llm, 'person_tracker', None)
+        if not person_tracker:
+            return {"success": False, "error": "Person tracking not available"}
+        
+        try:
+            # If no person_id, use current speaker
+            if not person_id:
+                speaker = await person_tracker.get_current_speaker()
+                if speaker:
+                    person_id = speaker.get("person_id", "")
+            
+            if not person_id:
+                # Use most recent present person
+                present = await person_tracker.get_all_present()
+                if present:
+                    person_id = present[0].get("person_id", "")
+            
+            if not person_id:
+                return {"success": False, "error": "No person to describe - no one is visible"}
+            
+            result = await person_tracker.describe_person(person_id, description)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to describe person: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _recall_person(
+        self,
+        name: str = "",
+        description: str = "",
+        person_id: str = ""
+    ) -> Dict[str, Any]:
+        """Look up information about a person you've met."""
+        person_tracker = getattr(self.llm, 'person_tracker', None)
+        if not person_tracker:
+            return {"success": False, "error": "Person tracking not available"}
+        
+        try:
+            result = await person_tracker.get_person_history(
+                person_id=person_id,
+                name=name,
+                description=description
+            )
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to recall person: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _get_people_present(self) -> Dict[str, Any]:
+        """Get information about all people currently visible."""
+        person_tracker = getattr(self.llm, 'person_tracker', None)
+        if not person_tracker:
+            return {"success": False, "error": "Person tracking not available", "people": []}
+        
+        try:
+            present = await person_tracker.get_all_present()
+            
+            return {
+                "success": True,
+                "count": len(present),
+                "people": present,
+                "message": f"I can see {len(present)} {'person' if len(present) == 1 else 'people'}" if present else "No one is visible right now"
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get people present: {e}")
+            return {"success": False, "error": str(e), "people": []}
+
+    async def _note_person_behavior(
+        self,
+        behavior: str,
+        person_id: str = "",
+        name: str = ""
+    ) -> Dict[str, Any]:
+        """Record an observed behavior for a person."""
+        person_tracker = getattr(self.llm, 'person_tracker', None)
+        if not person_tracker:
+            return {"success": False, "error": "Person tracking not available"}
+        
+        try:
+            # Resolve person_id
+            if not person_id:
+                if name:
+                    history = await person_tracker.get_person_history(name=name)
+                    if history.get("success"):
+                        person_id = history.get("person_id", "")
+                else:
+                    speaker = await person_tracker.get_current_speaker()
+                    if speaker:
+                        person_id = speaker.get("person_id", "")
+            
+            if not person_id:
+                return {"success": False, "error": "Could not identify which person to record behavior for"}
+            
+            result = await person_tracker.record_behavior(person_id, behavior)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to note behavior: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _add_person_note(
+        self,
+        note: str,
+        person_id: str = "",
+        name: str = ""
+    ) -> Dict[str, Any]:
+        """Add a personal note about someone."""
+        person_tracker = getattr(self.llm, 'person_tracker', None)
+        if not person_tracker:
+            return {"success": False, "error": "Person tracking not available"}
+        
+        try:
+            # Resolve person_id
+            if not person_id:
+                if name:
+                    history = await person_tracker.get_person_history(name=name)
+                    if history.get("success"):
+                        person_id = history.get("person_id", "")
+                else:
+                    speaker = await person_tracker.get_current_speaker()
+                    if speaker:
+                        person_id = speaker.get("person_id", "")
+            
+            if not person_id:
+                return {"success": False, "error": "Could not identify which person to add note for"}
+            
+            result = await person_tracker.add_person_note(person_id, note)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to add person note: {e}")
+            return {"success": False, "error": str(e)}
 
 
 __all__ = ["Tool", "ToolParameter", "ToolExecutor"]

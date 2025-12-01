@@ -11,6 +11,7 @@ from pathlib import Path
 from queue import SimpleQueue, Empty
 from typing import Optional
 from .utils import to_data_url, msg_event, msg_image
+from .person_tracker import PersonTracker
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,12 @@ class CameraLoop:
             logger.warning(f"Could not load face detection: {e}")
             self.face_cascade = None
         
+        # Person tracking for persistent recognition
+        self.person_tracker = PersonTracker()
+        self._last_person_count = 0
+        self._last_person_update = 0
+        self._person_tracking_cooldown = 5.0  # Seconds between person tracking updates
+        
         logger.info(f"Video optimization: {self.capture_width}x{self.capture_height} capture, "
                    f"{self.process_width}x{self.process_height} processing, "
                    f"frame_skip={self.frame_skip}")
@@ -124,6 +131,13 @@ class CameraLoop:
     def set_llm(self, llm):
         """Set LLM reference for vision analysis."""
         self.llm = llm
+        # Also set memory reference for person tracking
+        if llm and hasattr(llm, 'memory') and llm.memory:
+            self.person_tracker.memory = llm.memory
+            asyncio.run_coroutine_threadsafe(
+                self.person_tracker.load_from_memory(),
+                self.loop
+            )
         logger.info("LLM reference set for vision analysis")
 
     def set_enabled(self, value: bool):
@@ -346,24 +360,87 @@ class CameraLoop:
         else:
             activity = "very still"
         
-        # Face detection
+        # Face detection with person tracking
+        face_count = 0
         face_info = ""
+        person_tracking_update = None
+        faces_list = []
+        
         if self.face_cascade is not None:
             try:
                 faces = self.face_cascade.detectMultiScale(
                     gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
                 )
-                if len(faces) > 0:
-                    face_info = f"I see {len(faces)} {'person' if len(faces) == 1 else 'people'}"
+                face_count = len(faces)
+                
+                # Convert faces to list of tuples for person tracker
+                faces_list = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+                
+                # Update person tracker if count changed or enough time passed
+                now = time.time()
+                should_update_tracking = (
+                    face_count != self._last_person_count or 
+                    now - self._last_person_update > self._person_tracking_cooldown
+                )
+                
+                if should_update_tracking:
+                    self._last_person_count = face_count
+                    self._last_person_update = now
+                    
+                    # Get tracking status using new process_frame API
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.person_tracker.process_frame(
+                                faces_list, 
+                                self.process_width, 
+                                self.process_height
+                            ),
+                            self.loop
+                        )
+                        person_tracking_update = future.result(timeout=0.5)
+                    except Exception as e:
+                        logger.debug(f"Person tracking update failed: {e}")
+                
+                # Generate face info based on tracking status
+                if person_tracking_update and person_tracking_update.get("status"):
+                    face_info = person_tracking_update["status"]
+                elif face_count > 0:
+                    face_info = f"I see {face_count} {'person' if face_count == 1 else 'people'}"
+                    
             except Exception as e:
                 logger.debug(f"Face detection error: {e}")
         
         complexity = self._analyze_complexity(gray)
 
-        # Construct description
+        # Construct description - prioritize meaningful changes
         description_bits = []
+        
+        # Check if there's an interesting change to report (new API uses "new_arrivals" and "departures")
+        has_arrival = person_tracking_update and person_tracking_update.get("new_arrivals")
+        has_departure = person_tracking_update and person_tracking_update.get("departures")
+        should_announce = person_tracking_update and person_tracking_update.get("should_announce")
 
-        if face_info:
+        if has_arrival and should_announce:
+            arrivals = person_tracking_update["new_arrivals"]  # Now a list of display names
+            if len(arrivals) == 1:
+                name = arrivals[0]
+                if name and not name.startswith("person #"):
+                    description_bits.append(f"{name} has arrived")
+                else:
+                    description_bits.append("Someone new has entered the scene")
+            else:
+                description_bits.append(f"{len(arrivals)} new people have arrived")
+        elif has_departure and should_announce:
+            departures = person_tracking_update["departures"]  # Now a list of display names
+            if len(departures) == 1:
+                name = departures[0]
+                if name and not name.startswith("person #"):
+                    description_bits.append(f"{name} has left")
+                else:
+                    description_bits.append("Someone has left the scene")
+            else:
+                description_bits.append(f"{len(departures)} people have left")
+        elif face_info:
             description_bits.append(face_info)
             description_bits.append(f"in a {light} environment")
         else:

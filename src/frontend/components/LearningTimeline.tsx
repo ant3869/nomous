@@ -144,22 +144,22 @@ export function LearningTimeline({ events, selectedEntityId, onSelectEntity, lim
   };
 
   return (
-    <Card className="border-zinc-800/60 bg-black/40">
+    <Card className="border-zinc-800/60 bg-zinc-950/40">
       <CardContent className="p-4">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <Clock className="w-5 h-5 text-cyan-400" />
-            <h3 className="font-semibold text-zinc-100">Learning Timeline</h3>
+            <Clock className="w-4 h-4 text-cyan-400" />
+            <h3 className="text-sm font-semibold text-zinc-100">Timeline</h3>
           </div>
-          <Badge className="bg-zinc-900/60 text-zinc-300 border border-zinc-700">
-            {filteredEvents.length} {filteredEvents.length === 1 ? "event" : "events"}
+          <Badge className="bg-zinc-900/60 text-zinc-400 border border-zinc-800 text-xs">
+            {filteredEvents.length}
           </Badge>
         </div>
 
         {/* Filters */}
-        <div className="flex items-center gap-2 mb-4">
+        <div className="flex items-center gap-2 mb-3">
           <Select value={filterType} onValueChange={setFilterType}>
-            <SelectTrigger className="w-[140px] h-8 text-xs bg-zinc-900/60 border-zinc-800">
+            <SelectTrigger className="w-[130px] h-8 text-[11px] bg-zinc-900/60 border-zinc-800">
               <SelectValue placeholder="Event type" />
             </SelectTrigger>
             <SelectContent>
@@ -172,7 +172,7 @@ export function LearningTimeline({ events, selectedEntityId, onSelectEntity, lim
           </Select>
 
           <Select value={filterEntity} onValueChange={setFilterEntity}>
-            <SelectTrigger className="w-[140px] h-8 text-xs bg-zinc-900/60 border-zinc-800">
+            <SelectTrigger className="w-[130px] h-8 text-[11px] bg-zinc-900/60 border-zinc-800">
               <SelectValue placeholder="Entity type" />
             </SelectTrigger>
             <SelectContent>
@@ -188,7 +188,7 @@ export function LearningTimeline({ events, selectedEntityId, onSelectEntity, lim
           {(filterType !== "all" || filterEntity !== "all") && (
             <Button
               variant="secondary"
-              className="h-8 px-2 text-xs text-zinc-400 hover:text-zinc-100"
+              className="h-8 px-2 text-[11px] text-zinc-400 hover:text-zinc-100"
               onClick={() => {
                 setFilterType("all");
                 setFilterEntity("all");

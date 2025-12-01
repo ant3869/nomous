@@ -333,3 +333,71 @@ The agent can now:
 - Provide chronological learning history
 
 **Status: ✅ FULLY IMPLEMENTED AND TESTED**
+
+---
+
+## Person Identity Tracking System (December 2025)
+
+### Overview
+Building on the entity memory system, a comprehensive person identity tracking system was added to enable the LLM to recognize, remember, and build relationships with specific individuals across sessions.
+
+### Key Features
+1. **Visual Identity Recognition** - Match people using face position, size, and visual descriptions
+2. **Automatic Name Learning** - Detect patterns like "My name is Joe" in speech
+3. **Conversation Binding** - Associate conversations with specific individuals
+4. **Relationship Building** - Track familiarity scores that increase with interaction
+5. **Behavior & Interest Tracking** - Note actions and derive interests from conversations
+
+### New Components
+
+#### PersonTracker (src/backend/person_tracker.py)
+Core classes:
+- `TrackedPerson` - Full identity with name, visual signature, conversations, behaviors
+- `VisualSignature` - Face position, size average, hair description, features
+- `ConversationMemory` - Timestamped conversations with topics
+
+#### Person Tracking Tools (src/backend/tools.py)
+6 new tools added:
+1. `remember_person_name` - Store name when someone introduces themselves
+2. `describe_person_appearance` - Record visual features for recognition
+3. `recall_person` - Look up history with a person
+4. `get_people_present` - See who is currently visible
+5. `note_person_behavior` - Record actions/reactions
+6. `add_person_note` - Add observations about someone
+
+#### LLM Integration
+- Enhanced `process_vision()` includes person context
+- `process_audio()` binds conversations to current speaker
+- Auto-detection of name introductions in speech
+- Updated system prompt for relationship building
+
+### Data Flow
+```
+Camera → Face Detection → PersonTracker.process_frame()
+                                  ↓
+                         Match to TrackedPerson
+                                  ↓
+                         Update visual signature
+                                  ↓
+                    LLM sees person context in vision
+                                  ↓
+                    Conversation bound to speaker
+```
+
+### Integration with Entity Memory
+The PersonTracker uses the existing `memory.store_entity()` API to persist person data:
+```python
+await self.memory.store_entity(
+    entity_type="person",
+    name=person.name or person.person_id,
+    description=f"Tracked person: {person.get_display_name()}",
+    properties=person.to_memory_dict()
+)
+```
+
+This means persons are stored in `memory_entities` table and can be queried with existing tools like `recall_entity`.
+
+### See Also
+- `.github/AGENT_CONTEXT.md` - Full technical context for coding agents
+- `docs/TOOLS.md` - Complete tool documentation including person tracking tools
+

@@ -58,9 +58,16 @@ LOG_DIR = PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "nomous.log"
 
-# Clear the log file on startup
+# Clear the log file on startup (handle locked file gracefully)
 if LOG_FILE.exists():
-    LOG_FILE.unlink()
+    try:
+        LOG_FILE.unlink()
+    except PermissionError:
+        # File is locked by another process, truncate instead
+        try:
+            LOG_FILE.write_text("")
+        except PermissionError:
+            pass  # File is fully locked, skip clearing
 
 logger = logging.getLogger("nomous.start")
 logger.setLevel(logging.INFO)
@@ -276,7 +283,8 @@ def ensure_python_environment() -> Optional[PythonEnvironment]:
     if not env_root.exists():
         print_status("Creating virtual environment...")
         try:
-            venv.create(env_root, with_pip=True, system_site_packages=True)
+            # Use system_site_packages=False to avoid path pollution from conda/miniconda
+            venv.create(env_root, with_pip=True, system_site_packages=False)
             created = True
             logger.info("Created new virtual environment at %s", env_root)
         except Exception as exc:
@@ -325,6 +333,35 @@ def run_command(command, cwd=None, shell=True):
         if stderr:
             logger.error("Command stderr: %s", stderr)
         return False, e.stderr
+
+
+def run_command_streaming(command, cwd=None, shell=True, timeout=600):
+    """Run a command allowing output to stream to console (for pip install, etc.)
+    
+    Uses subprocess.run without capture to avoid blocking issues on Windows.
+    """
+    logger.info("Running command (streaming): %s", command)
+    try:
+        # Don't capture output - let it stream to console naturally
+        # This avoids all the buffering issues on Windows
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            shell=shell,
+            timeout=timeout
+        )
+        
+        if result.returncode == 0:
+            return True, ""
+        else:
+            logger.error("Command failed with return code %s", result.returncode)
+            return False, f"Exit code: {result.returncode}"
+    except subprocess.TimeoutExpired:
+        logger.error("Command timed out after %s seconds", timeout)
+        return False, "Timeout"
+    except Exception as e:
+        logger.error("Command execution error: %s", e)
+        return False, str(e)
 
 def detect_system_cuda_version() -> str:
     """Detect system CUDA toolkit version using nvidia-smi.
@@ -376,10 +413,76 @@ def detect_system_cuda_version() -> str:
     # Default to CUDA 12.1 if detection fails
     return 'cu121'
 
-def check_compute_backend() -> "ComputeDeviceInfo":
-    """Check CUDA availability and provide a compute device summary."""
+def check_compute_backend(python_exe: Optional[Path] = None) -> "ComputeDeviceInfo":
+    """Check CUDA availability and provide a compute device summary.
+    
+    Args:
+        python_exe: Path to Python executable to use for detection.
+                   If provided, runs detection in a subprocess using that Python.
+                   If None, uses in-process detection (may fail if wrong Python).
+    """
+    from src.backend.system import ComputeDeviceInfo
+    
+    # If a specific Python is provided, run detection in subprocess
+    # This avoids issues when start.py runs under miniconda but venv has torch
+    if python_exe and python_exe.exists():
+        try:
+            # Run a subprocess to detect CUDA using the venv's Python
+            detect_script = '''
+import json
+try:
     from src.backend.system import detect_compute_device
-
+    info = detect_compute_device()
+    print(json.dumps({
+        "backend": info.backend,
+        "name": info.name,
+        "reason": info.reason,
+        "cuda_version": info.cuda_version,
+        "gpu_count": info.gpu_count,
+        "cuda_ready": info.cuda_ready
+    }))
+except Exception as e:
+    print(json.dumps({"error": str(e)}))
+'''
+            result = subprocess.run(
+                [str(python_exe), "-c", detect_script],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=PROJECT_ROOT
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                import json
+                data = json.loads(result.stdout.strip())
+                if "error" not in data:
+                    info = ComputeDeviceInfo(
+                        backend=data["backend"],
+                        name=data["name"],
+                        reason=data["reason"],
+                        cuda_version=data.get("cuda_version"),
+                        gpu_count=data.get("gpu_count", 0),
+                        cuda_ready=data.get("cuda_ready", False)
+                    )
+                    if info.is_gpu and info.cuda_ready:
+                        print_success(
+                            f"CUDA is available! Found {info.gpu_count} device(s): {info.name}"
+                        )
+                        if info.cuda_version:
+                            print_success(f"CUDA version: {info.cuda_version}")
+                    elif info.is_gpu:
+                        print_warning(
+                            "GPU detected but CUDA runtime is unavailable. Falling back to CPU execution."
+                        )
+                        print_warning(info.reason)
+                    else:
+                        print_warning("CUDA is not available. Using CPU mode")
+                        print_warning(info.reason)
+                    return info
+        except Exception as e:
+            logger.debug("Subprocess CUDA detection failed: %s", e)
+    
+    # Fallback to in-process detection
+    from src.backend.system import detect_compute_device
     info = detect_compute_device()
     if info.is_gpu and info.cuda_ready:
         print_success(
@@ -397,9 +500,8 @@ def check_compute_backend() -> "ComputeDeviceInfo":
         print_warning(info.reason)
     return info
 
-def ensure_gpu_support(pip_cmd: str, info: "ComputeDeviceInfo") -> "ComputeDeviceInfo":
+def ensure_gpu_support(pip_cmd: str, info: "ComputeDeviceInfo", python_exe: Optional[Path] = None) -> "ComputeDeviceInfo":
     """Attempt to install GPU-accelerated wheels when CUDA hardware is detected."""
-    from src.backend.system import detect_compute_device
 
     if info.is_gpu and info.cuda_ready:
         return info
@@ -440,8 +542,9 @@ def ensure_gpu_support(pip_cmd: str, info: "ComputeDeviceInfo") -> "ComputeDevic
             print_warning(f"Failed to install {label}: {trimmed or 'check logs for details'}")
 
     print_status("Re-checking CUDA availability...", style="bold cyan")
-    refreshed = detect_compute_device()
-    if refreshed.is_gpu:
+    # Use subprocess detection with the venv Python
+    refreshed = check_compute_backend(python_exe)
+    if refreshed.is_gpu and refreshed.cuda_ready:
         print_success(
             f"GPU acceleration enabled: {refreshed.name} (CUDA {refreshed.cuda_version or 'unknown'})"
         )
@@ -483,8 +586,8 @@ def check_and_install_dependencies() -> Tuple[bool, Optional[PythonEnvironment]]
     # Install Python requirements if new venv or requirements changed
     if env_info.created or not env_info.marker_path.exists():
         print_status("Installing Python dependencies...")
-        # Install project requirements
-        success, output = run_command(f'{pip_cmd} install -r requirements.txt')
+        # Install project requirements (use streaming to avoid hanging)
+        success, output = run_command_streaming(f'{pip_cmd} install -r requirements.txt')
         if success:
             # Create marker file to track installation
             try:
@@ -672,8 +775,9 @@ def main():
         return 1
 
     # Check CUDA availability and attempt to enable GPU acceleration
-    device_info = check_compute_backend()
-    device_info = ensure_gpu_support(env_info.pip_command, device_info)
+    # Use the venv's Python for detection to avoid issues with miniconda's numpy
+    device_info = check_compute_backend(env_info.python_executable)
+    device_info = ensure_gpu_support(env_info.pip_command, device_info, env_info.python_executable)
     update_config_for_gpu(device_info.is_gpu)
     
     device_label = f"{device_info.backend} ({device_info.name})"

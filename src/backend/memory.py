@@ -538,6 +538,109 @@ class MemoryStore:
             self._conn.commit()
             return cur.rowcount > 0
 
+    def _create_node_sync(self, payload: Dict[str, Any]) -> Optional[str]:
+        assert self._conn is not None
+        label = (payload.get("label") or "").strip()
+        if not label:
+            return None
+
+        raw_kind = (payload.get("kind") or "concept").strip().lower()
+        allowed_kinds = {"stimulus", "concept", "event", "self", "behavior"}
+        kind = raw_kind if raw_kind in allowed_kinds else "concept"
+        node_id = str(payload.get("id") or f"manual:{kind}:{uuid4().hex[:8]}")
+
+        description = (payload.get("description") or "").strip() or None
+        meaning = (payload.get("meaning") or description or label).strip()
+        category = (payload.get("category") or kind).strip()
+        source = (payload.get("source") or "manual_entry").strip()
+        valence = (payload.get("valence") or "").strip() or None
+
+        def clamp(value: Any, minimum: float, maximum: float, default: float) -> float:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, numeric))
+
+        strength = clamp(payload.get("strength", 1.0), 0.1, 5.0, 1.0)
+        importance = clamp(payload.get("importance", 0.5), 0.0, 1.0, 0.5)
+        confidence = clamp(payload.get("confidence", 0.75), 0.0, 1.0, 0.75)
+        milestone = 1 if bool(payload.get("milestone")) else 0
+
+        tags_raw = payload.get("tags")
+        if isinstance(tags_raw, str):
+            split_tags = [part.strip() for part in tags_raw.split(",")]
+        elif isinstance(tags_raw, Iterable):
+            split_tags = [str(tag).strip() for tag in tags_raw]
+        else:
+            split_tags = []
+        normalised_tags = self._normalise_tags(split_tags)
+        tags_json = json.dumps(normalised_tags, ensure_ascii=False) if normalised_tags else None
+
+        metadata_value = payload.get("metadata")
+        metadata_json = json.dumps(metadata_value, ensure_ascii=False) if isinstance(metadata_value, (dict, list)) else None
+
+        timestamp = payload.get("timestamp")
+        if isinstance(timestamp, str) and timestamp.strip():
+            stamp_value = timestamp.strip()
+        else:
+            stamp_value = datetime.utcnow().isoformat(timespec="seconds")
+
+        created_at = stamp_value
+        updated_at = datetime.utcnow().isoformat(timespec="seconds")
+
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                """
+                INSERT INTO memory_nodes(
+                    id, label, kind, strength, description, tags, milestone, source,
+                    timestamp, confidence, meaning, category, importance, valence,
+                    created_at, updated_at, last_accessed, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    node_id,
+                    label,
+                    kind,
+                    strength,
+                    description,
+                    tags_json,
+                    milestone,
+                    source,
+                    stamp_value,
+                    confidence,
+                    meaning,
+                    category,
+                    importance,
+                    valence,
+                    created_at,
+                    updated_at,
+                    updated_at,
+                    metadata_json,
+                ),
+            )
+
+            if self._embed_model:
+                text = " ".join(filter(None, [label, meaning, description]))
+                embedding = self._generate_embedding(text)
+                if embedding:
+                    embedding_blob = np.array(embedding, dtype=np.float32).tobytes()
+                    cur.execute(
+                        """
+                        INSERT INTO memory_embeddings(node_id, embedding, text, created_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(node_id) DO UPDATE SET
+                            embedding = excluded.embedding,
+                            text = excluded.text,
+                            created_at = excluded.created_at
+                        """,
+                        (node_id, embedding_blob, text, updated_at),
+                    )
+
+            self._conn.commit()
+            return node_id
+
     def _create_edge_sync(
         self,
         from_id: str,
@@ -666,6 +769,15 @@ class MemoryStore:
                 await self.bridge.post(
                     msg_event(f"behavior {status}: {label}")
                 )
+
+    async def create_node(self, payload: Dict[str, Any]) -> Optional[str]:
+        if not self.enabled or self._conn is None:
+            return None
+        async with self._lock:
+            node_id = await asyncio.to_thread(self._create_node_sync, payload)
+        if node_id:
+            await self.publish_graph()
+        return node_id
 
     async def update_node(self, node_id: str, changes: Dict[str, Any]) -> bool:
         if not self.enabled or self._conn is None or not node_id:
