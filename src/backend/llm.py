@@ -32,29 +32,32 @@ DEFAULT_SYSTEM_PROMPT = (
     "like a friendly colleague. Never explain your reasoning, analysis methods, or tool outputs - "
     "just give the human answer.\n\n"
     "CONVERSATION STYLE:\n"
-    "- For greetings like 'hello' or 'hi', just greet back warmly. No tools needed.\n"
+    "- For greetings like 'hello', 'hi', 'hey', 'what's up', 'well, yea': just respond conversationally. NO tools.\n"
     "- Be concise - one or two sentences is usually enough.\n"
     "- Never say things like 'I found a confidence level' or 'sentiment analysis shows' - "
     "these are internal processes, not conversation.\n"
+    "- Never list available tools unless the user specifically asks what you can do.\n"
     "- Don't describe what you see through the camera unless asked or it's relevant.\n\n"
     "REMEMBERING PEOPLE:\n"
-    "- When someone says 'my name is X' or 'I'm X', immediately use remember_person_name.\n"
+    "- When someone says 'my name is X' or 'I'm X', use remember_person_name.\n"
     "- Address people by name once you know it.\n"
     "- Build relationships through natural conversation, not analysis."
 )
 
 DEFAULT_THINKING_PROMPT = (
-    "TOOL SELECTION RULES:\n"
-    "- Simple greetings (hello, hi, hey): NO tools needed - just respond warmly.\n"
-    "- Name introductions ('my name is X', 'I'm X', 'call me X'): Use remember_person_name IMMEDIATELY.\n"
-    "- Questions about what you remember: Use recall_entity or recall_person.\n"
-    "- General conversation: Usually no tools needed - just talk naturally.\n"
-    "- analyze_sentiment: ONLY use when specifically asked about feelings/emotions.\n\n"
+    "CRITICAL TOOL SELECTION RULES:\n"
+    "- Simple greetings/affirmations (hello, hi, hey, yes, yeah, sure, well, okay): NO tools - just chat.\n"
+    "- Small talk and casual conversation: NO tools - just be friendly.\n"
+    "- Name introductions ('my name is X', 'I'm X', 'call me X'): Use remember_person_name.\n"
+    "- Questions about memories: Use recall_entity or recall_person.\n"
+    "- list_available_tools: ONLY if user asks 'what can you do?' or 'what tools do you have?'\n"
+    "- analyze_sentiment: NEVER use unless user explicitly asks about emotions/feelings.\n\n"
     "OUTPUT RULES:\n"
-    "- Never include tool result details in your spoken response.\n"
-    "- Never explain your analysis process.\n"
-    "- Just give the human-friendly answer.\n"
-    "- If a tool fails or returns nothing useful, respond naturally without mentioning the tool."
+    "- NEVER start your response with 'Response:', 'Answer:', or similar prefixes.\n"
+    "- NEVER include any code, JSON, brackets, or technical data in your spoken response.\n"
+    "- NEVER list tools unless the user explicitly asked for them.\n"
+    "- NEVER explain your analysis or mention tool names.\n"
+    "- Just speak naturally like a human would."
 )
 
 
@@ -131,7 +134,8 @@ class LocalLLM:
 
         # Context memory
         self.recent_context = []
-        self.max_context_items = 5
+        self.max_context_items = 8  # Increased for better context retention
+        self._last_vision_description = ""  # Track latest vision for context
 
         # Person tracking (set by camera loop)
         self.person_tracker = None
@@ -139,6 +143,22 @@ class LocalLLM:
         # Processing lock
         self._processing = False
         self._lock = asyncio.Lock()
+        
+        # Input classification patterns for adaptive behavior
+        self._greeting_patterns = {
+            'hello', 'hi', 'hey', 'howdy', 'greetings', 'sup', "what's up",
+            'good morning', 'good afternoon', 'good evening', 'yo', 'hiya'
+        }
+        self._affirmation_patterns = {
+            'yes', 'yeah', 'yea', 'yep', 'sure', 'okay', 'ok', 'right',
+            'cool', 'great', 'awesome', 'nice', 'good', 'fine', 'alright',
+            'well', 'well yea', 'well yeah', 'uh huh', 'mhm', 'yup'
+        }
+        self._vision_question_patterns = [
+            'can you see', 'do you see', 'what do you see', 'describe',
+            'who is', 'who do you see', 'looking at', 'in front of',
+            'the person', 'recognize', 'know who'
+        ]
         
         # Tool executor for function calling
         self.tools = ToolExecutor(self)
@@ -407,10 +427,28 @@ class LocalLLM:
         cleaned = re.sub(r"\[([^\]\n]{0,80})\]", _strip_stage, cleaned)
         cleaned = re.sub(r"(?i)\b(?:assistant|nomous|ai|system|bot)\s*:\s*", "", cleaned)
         
-        # Remove "Response:" prefix that sometimes appears
-        cleaned = re.sub(r"^(?:Response|Answer|Reply)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+        # Remove "Response:" prefix that sometimes appears (with flexible whitespace)
+        cleaned = re.sub(r'^\s*(?:Response|Answer|Reply|Output)\s*:\s*', "", cleaned, flags=re.IGNORECASE)
         # Remove quotes that wrap the entire response
         cleaned = re.sub(r'^["\'](.+)["\']$', r'\1', cleaned.strip())
+        
+        # Remove leaked prompt fragments
+        cleaned = re.sub(r'^(?:per response\.?|one sentence\.?|two sentences?\.?)\s*', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\bper response\.?\s*', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'(?:You said|I said|User said|Assistant said)\s*:\s*', '', cleaned, flags=re.IGNORECASE)
+        
+        # Remove any leaked code blocks (```python ... ```)
+        cleaned = re.sub(r'```(?:python|json|javascript|bash|sh)?\n?.*?```', '', cleaned, flags=re.DOTALL)
+        # Remove inline code that contains data structures
+        cleaned = re.sub(r'`[^`]*(?:[\[\]{}]|"[^"]+":)[^`]*`', '', cleaned)
+        # Remove JSON-like structures that leaked into text
+        cleaned = re.sub(r'\{[^{}]*"[^"]+"\s*:\s*[^{}]+\}', '', cleaned)
+        # Remove list/dict patterns like ['item', 'item'] or {"key": "value"}
+        cleaned = re.sub(r'\[[^\[\]]*(?:"[^"]*"|\'[^\']*\')[^\[\]]*\]', '', cleaned)
+        # Remove "I found X items:" followed by data dump
+        cleaned = re.sub(r'I found \d+ (?:items?|results?|conversations?)(?:\s*:)?\s*(?:\[.*?\]|\{.*?\})', '', cleaned, flags=re.DOTALL)
+        # Remove lines that look like debug output (starting with - followed by technical content)
+        cleaned = re.sub(r'^-\s+(?:conversation_|memory_|result_|item_)\w+.*$', '', cleaned, flags=re.MULTILINE)
 
         scheduling_pattern = re.compile(
             r"\brespond(?:[-_\s]?in)\s*(?:[:=]\s*|\s+)"
@@ -600,14 +638,87 @@ class LocalLLM:
             await self.bridge.post(msg_metrics(metrics_payload))
 
     def _add_context(self, context_type: str, content: str):
-        """Add to rolling context memory."""
-        self.recent_context.append({
+        """Add to rolling context memory with improved tracking."""
+        entry = {
             "type": context_type,
             "content": content,
             "timestamp": time.time()
-        })
+        }
+        self.recent_context.append(entry)
+        
+        # Keep track of latest vision for context
+        if context_type in ("vision", "vision_quiet"):
+            self._last_vision_description = content
+        
+        # Prioritize keeping diverse context types
         if len(self.recent_context) > self.max_context_items:
-            self.recent_context.pop(0)
+            # Remove oldest of the most common type rather than just oldest
+            type_counts = {}
+            for ctx in self.recent_context:
+                t = ctx["type"]
+                type_counts[t] = type_counts.get(t, 0) + 1
+            
+            # Find most common type
+            most_common = max(type_counts.keys(), key=lambda k: type_counts[k])
+            
+            # Remove oldest of that type
+            for i, ctx in enumerate(self.recent_context):
+                if ctx["type"] == most_common:
+                    self.recent_context.pop(i)
+                    break
+    
+    def _classify_input(self, text: str) -> dict:
+        """Classify user input to determine appropriate response strategy."""
+        text_lower = text.lower().strip()
+        words = set(text_lower.replace('?', '').replace('!', '').replace('.', '').split())
+        
+        classification = {
+            "is_greeting": False,
+            "is_affirmation": False,
+            "is_vision_question": False,
+            "is_memory_question": False,
+            "is_name_introduction": False,
+            "needs_tools": False,
+            "suggested_tokens": 64,  # Default for simple responses
+            "skip_tools": False
+        }
+        
+        # Check for greetings
+        if text_lower in self._greeting_patterns or words & self._greeting_patterns:
+            classification["is_greeting"] = True
+            classification["suggested_tokens"] = 32
+            classification["skip_tools"] = True
+        
+        # Check for affirmations
+        elif text_lower in self._affirmation_patterns or (len(words) <= 3 and words & self._affirmation_patterns):
+            classification["is_affirmation"] = True
+            classification["suggested_tokens"] = 48
+            classification["skip_tools"] = True
+        
+        # Check for vision questions
+        elif any(pattern in text_lower for pattern in self._vision_question_patterns):
+            classification["is_vision_question"] = True
+            classification["suggested_tokens"] = 80
+            classification["skip_tools"] = True  # Use vision context, not tools
+        
+        # Check for memory questions
+        elif any(kw in text_lower for kw in ['remember', 'recall', 'what did i', 'do you know', 'what was', 'my name']):
+            classification["is_memory_question"] = True
+            classification["needs_tools"] = True
+            classification["suggested_tokens"] = 100
+        
+        # Check for name introductions
+        elif any(pattern in text_lower for pattern in ["my name is", "i'm ", "i am ", "call me "]):
+            classification["is_name_introduction"] = True
+            classification["needs_tools"] = True
+            classification["suggested_tokens"] = 64
+        
+        # Complex questions get more tokens
+        elif '?' in text or len(words) > 10:
+            classification["suggested_tokens"] = 128
+            classification["needs_tools"] = True
+        
+        return classification
 
     async def set_system_prompt(self, prompt: str) -> None:
         self.system_prompt = str(prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
@@ -700,17 +811,39 @@ class LocalLLM:
             sections.append(user_text.strip())
         return "\n\n".join(sections)
 
-    def _build_prompt(self, user_input: str, context_type: str = "text", include_tools: bool = True) -> str:
+    def _build_prompt(self, user_input: str, context_type: str = "text", include_tools: bool = True, input_class: dict | None = None) -> str:
         """Build prompt with context, system persona, and tool instructions."""
 
+        # Build enhanced context summary
         context_lines = []
         if self.recent_context:
-            for ctx in self.recent_context[-2:]:
-                context_lines.append(f"{ctx['type']}: {ctx['content'][:80]}")
-        context_summary = "\n".join(context_lines) if context_lines else "No recent context recorded."
+            # Get more context entries for better continuity
+            for ctx in self.recent_context[-4:]:
+                ctx_type = ctx['type']
+                content = ctx['content'][:100]
+                # Format vision context specially
+                if ctx_type in ('vision', 'vision_quiet'):
+                    context_lines.append(f"[Vision] {content}")
+                elif ctx_type == 'user_text':
+                    context_lines.append(f"[User] {content}")
+                elif ctx_type == 'assistant':
+                    context_lines.append(f"[You said] {content}")
+                else:
+                    context_lines.append(f"[{ctx_type}] {content}")
+        context_summary = "\n".join(context_lines) if context_lines else "Starting fresh conversation."
+        
+        # Add current vision if this is a vision-related question
+        vision_context = ""
+        if input_class and input_class.get("is_vision_question") and self._last_vision_description:
+            vision_context = f"\n\nCurrent view: {self._last_vision_description}"
+
+        # Determine if we should include tools based on input classification
+        use_tools = include_tools and self.tools_enabled
+        if input_class and input_class.get("skip_tools"):
+            use_tools = False
 
         tools_instructions = ""
-        if include_tools and self.tools_enabled:
+        if use_tools:
             tools_instructions = self.tools.get_tools_prompt()
             tools_instructions += (
                 "\n**IMPORTANT - Memory Storage**: When users share information about themselves (names, preferences, passwords, facts), "
@@ -743,9 +876,29 @@ class LocalLLM:
                 f"Recent context:\n{context_summary}\n\n"
                 "Produce a short internal reflection or tool call that keeps momentum going."
             )
-        else:
+        elif input_class and input_class.get("is_greeting"):
+            # Simplified greeting scenario - no tools, no complexity
+            scenario = (
+                f"User just greeted you: \"{user_input}\"\n\n"
+                "Respond with a warm, friendly greeting. Just one sentence."
+            )
+        elif input_class and input_class.get("is_affirmation"):
+            # Simple affirmation - continue naturally
             scenario = (
                 f"Recent context:\n{context_summary}\n\n"
+                f"User said: \"{user_input}\"\n\n"
+                "This is a casual response. Continue the conversation naturally with 1-2 sentences."
+            )
+        elif input_class and input_class.get("is_vision_question"):
+            # Vision question - inject current view
+            scenario = (
+                f"Recent context:\n{context_summary}{vision_context}\n\n"
+                f"User asks: \"{user_input}\"\n\n"
+                "Answer based on what you can currently see. Describe the person/scene directly."
+            )
+        else:
+            scenario = (
+                f"Recent context:\n{context_summary}{vision_context}\n\n"
                 f"User message:\n{user_input}\n\n"
                 "Respond as an empathetic collaborator with concise, high-signal language."
             )
@@ -872,46 +1025,81 @@ class LocalLLM:
                     # Generate follow-up response incorporating tool results
                     await self.bridge.post({"type": "thought", "text": "Processing tool results..."})
                     
-                    # Build concise summary of tool results
+                    # Build HUMAN-READABLE summaries of tool results (NO JSON/code)
                     tool_summaries = []
                     for result in tool_results:
                         tool_name = result.get("tool", "unknown")
                         if result.get("success"):
                             result_data = result.get("result", {})
                             
-                            # Summarize based on tool type
+                            # Summarize based on tool type - produce NATURAL LANGUAGE only
                             if tool_name == "recall_entity":
                                 found = result_data.get("found", 0)
                                 results_list = result_data.get("results", [])
                                 if found > 0:
                                     items = []
-                                    for item in results_list[:5]:  # Limit to 5 items
-                                        label = item.get("label", "Unknown")
-                                        kind = item.get("kind", "item")
-                                        desc = item.get("description", "")[:100]  # Truncate description
-                                        items.append(f"- {label} ({kind}): {desc}")
-                                    summary = f"Found {found} items:\n" + "\n".join(items)
+                                    for item in results_list[:3]:  # Limit to 3 items
+                                        label = item.get("label", "something")
+                                        desc = item.get("description", "")[:80]
+                                        items.append(f"{label}: {desc}" if desc else label)
+                                    summary = f"Found {found} memories: " + "; ".join(items)
                                 else:
-                                    summary = "No matching items found"
+                                    summary = "No matching memories found"
+                            elif tool_name == "recall_recent_context":
+                                items = result_data.get("items", [])
+                                if items:
+                                    summary = f"Found {len(items)} recent conversation items"
+                                else:
+                                    summary = "No recent context found"
+                            elif tool_name == "analyze_sentiment":
+                                sentiment = result_data.get("sentiment", "neutral")
+                                confidence = result_data.get("confidence", 0)
+                                summary = f"Sentiment: {sentiment}"  # Don't include confidence
+                            elif tool_name == "remember_person_name":
+                                summary = f"Remembered name: {result_data.get('name', 'unknown')}"
+                            elif tool_name == "recall_person":
+                                if result_data.get("found"):
+                                    name = result_data.get("name", "this person")
+                                    summary = f"Found information about {name}"
+                                else:
+                                    summary = "No information found about this person"
+                            elif tool_name == "list_available_tools":
+                                tools_list = result_data.get("tools", [])
+                                summary = f"{len(tools_list)} tools available"  # Don't list them all
+                            elif tool_name in ("remember_fact", "record_observation", "learn_user_preference"):
+                                summary = "Information stored successfully"
                             else:
-                                # Generic summary for other tools
-                                summary = json.dumps(result_data, indent=2)[:500]  # Limit to 500 chars
+                                # Generic fallback - extract key info without JSON
+                                if isinstance(result_data, dict):
+                                    # Try to get a natural description
+                                    desc = result_data.get("description") or result_data.get("message") or result_data.get("status")
+                                    if desc:
+                                        summary = str(desc)[:100]
+                                    elif result_data.get("success"):
+                                        summary = "Action completed successfully"
+                                    else:
+                                        # Just note success, don't dump data
+                                        summary = "Tool completed"
+                                else:
+                                    summary = str(result_data)[:100] if result_data else "Done"
                             
-                            tool_summaries.append(f"{tool_name}: {summary}")
+                            tool_summaries.append(summary)
                         else:
                             error_msg = result.get("error", "Unknown error")
-                            tool_summaries.append(f"{tool_name}: Error - {error_msg}")
+                            tool_summaries.append(f"Could not complete: {error_msg}")
                     
-                    tool_context = "\n\n".join(tool_summaries)
+                    tool_context = " | ".join(tool_summaries)  # Compact format
                     
-                    # Build a compact follow-up prompt with just the essentials
+                    # Build follow-up prompt with STRICT instructions against data leaking
                     user_question = user_text if user_text else "your question"
                     
                     followup_prompt = (
-                        f"User asked: {user_question}\n\n"
-                        f"Tool Results:\n{tool_context}\n\n"
-                        f"Based on these results, provide a brief, natural response to the user. "
-                        f"Be specific about what you found."
+                        f"User said: \"{user_question}\"\n\n"
+                        f"Background info: {tool_context}\n\n"
+                        f"INSTRUCTIONS: Respond naturally as if talking to a friend. "
+                        f"DO NOT start with 'Response:' or quote the data. "
+                        f"DO NOT include any code, JSON, brackets, or technical details. "
+                        f"Just have a natural conversation - one or two sentences max."
                     )
                     
                     # Generate new response with tool results (disable tool calls to prevent recursion)
@@ -998,8 +1186,20 @@ class LocalLLM:
             if self.analytics:
                 self.analytics.observe_user_message(user_text)
 
-            prompt = self._build_prompt(user_text, "text")
-            response = await self._generate(prompt, user_text=user_text)
+            # Classify input to determine response strategy
+            input_class = self._classify_input(user_text)
+            logger.info(f"Input classified: greeting={input_class['is_greeting']}, affirmation={input_class['is_affirmation']}, vision={input_class['is_vision_question']}, skip_tools={input_class['skip_tools']}, tokens={input_class['suggested_tokens']}")
+            
+            # Build prompt with classification context
+            prompt = self._build_prompt(user_text, "text", include_tools=not input_class['skip_tools'], input_class=input_class)
+            
+            # Use adaptive token limit based on input type
+            response = await self._generate(
+                prompt, 
+                max_tokens=input_class['suggested_tokens'],
+                user_text=user_text,
+                allow_tool_calls=not input_class['skip_tools']
+            )
 
             if response:
                 self._add_context("assistant", response)
@@ -1059,8 +1259,16 @@ class LocalLLM:
             if self.analytics:
                 self.analytics.observe_user_message(transcribed_text)
 
-            prompt = self._build_prompt(transcribed_text, "audio")
-            response = await self._generate(prompt)
+            # Classify input for adaptive response
+            input_class = self._classify_input(transcribed_text)
+            logger.info(f"Audio input classified: greeting={input_class['is_greeting']}, skip_tools={input_class['skip_tools']}, tokens={input_class['suggested_tokens']}")
+            
+            prompt = self._build_prompt(transcribed_text, "audio", include_tools=not input_class['skip_tools'], input_class=input_class)
+            response = await self._generate(
+                prompt,
+                max_tokens=input_class['suggested_tokens'],
+                allow_tool_calls=not input_class['skip_tools']
+            )
 
             if response:
                 self._add_context("assistant", response)
