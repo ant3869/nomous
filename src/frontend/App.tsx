@@ -27,6 +27,7 @@ import { LearningTimeline } from "./components/LearningTimeline";
 import { SemanticSearch } from "./components/SemanticSearch";
 import { TimelinePerspective } from "./components/TimelinePerspective";
 import { GenerationProgress } from "./components/GenerationProgress";
+import { RuntimeStatusDisplay } from "./components/RuntimeStatusDisplay";
 
 const DEFAULT_SYSTEM_PROMPT =
   "You are Nomous, an autonomous multimodal AI orchestrator. Support the operator with concise, confident guidance, coordinate sensors and tools, and narrate decisions with a collaborative tone.";
@@ -3854,7 +3855,6 @@ export default function App(){
     fetchTimeline,
     performSearch,
   } = useNomousBridge();
-  const st = statusMap[state.status];
   const tokenTotal = state.tokenWindow.reduce((a, p) => a + p.inTok + p.outTok, 0);
   const totalInboundTokens = state.tokenWindow.reduce((acc, point) => acc + point.inTok, 0);
   const totalOutboundTokens = state.tokenWindow.reduce((acc, point) => acc + point.outTok, 0);
@@ -4135,17 +4135,8 @@ export default function App(){
               </div>
             ) : null}
 
-            <div className="grid gap-4 rounded-2xl border border-zinc-800/70 bg-zinc-950/70 px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] md:grid-cols-[1.1fr_auto]">
-              <div className="flex items-center gap-3">
-                <div className={`h-3 w-3 rounded-full ${st.color} shadow-[0_0_20px_rgba(34,197,94,0.35)]`} />
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.3em] text-zinc-500">Runtime Status</div>
-                  <div className="text-lg font-semibold text-zinc-100">
-                    {st.label}
-                    {state.statusDetail ? <span className="ml-2 text-sm text-zinc-300">{state.statusDetail}</span> : null}
-                  </div>
-                </div>
-              </div>
+            <div className="grid gap-4 md:grid-cols-[1.1fr_auto]">
+              <RuntimeStatusDisplay status={state.status} statusDetail={state.statusDetail} />
               <div className="flex flex-col items-start gap-3 text-xs text-zinc-400 md:items-end">
                 <div className="flex items-center gap-3 rounded-xl border border-zinc-800/70 bg-zinc-950/80 px-3 py-2 text-left text-zinc-100 md:text-right">
                   <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-500/40 bg-emerald-500/10">
