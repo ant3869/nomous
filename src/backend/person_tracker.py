@@ -547,31 +547,34 @@ class PersonTracker:
 
         # Embedding-first: a face embedding is a far stronger identity
         # signal than size/position. When the incoming face has one, the
-        # best cosine match above the threshold wins outright. When the
-        # best match is clearly a different face (below the veto bar), the
-        # embedding vetoes the heuristic too — two different faces in the
-        # same spot are two people, not one. In the ambiguous middle band
-        # the heuristic still decides, so a wobbly embedding (bad light,
-        # sharp angle) does not split one person in two.
+        # best cosine match above the threshold wins outright. A candidate
+        # whose embedding is clearly different (below the veto bar) is
+        # vetoed individually — with several people tracked, one
+        # ambiguous similarity must not shield a clearly-different face
+        # from the veto, and the heuristic must not hand it to a vetoed
+        # identity. In the ambiguous middle band the heuristic still
+        # decides, so a wobbly embedding (bad light, sharp angle) does
+        # not split one person in two.
+        vetoed = set()
         if embedding:
             best_person = None
             best_sim = 0.0
-            compared = 0
             for person in self.active_persons.values():
                 if not person.is_present and person.presence_confidence < 0.5:
                     continue
                 stored = person.visual_signature.face_embedding
                 if not stored:
                     continue
-                compared += 1
                 sim = _cosine_similarity(embedding, stored)
-                if sim is not None and sim > best_sim:
+                if sim is None:
+                    continue
+                if sim < self.embedding_veto_threshold:
+                    vetoed.add(person.person_id)
+                elif sim > best_sim:
                     best_sim = sim
                     best_person = person
             if best_person is not None and best_sim >= self.embedding_match_threshold:
                 return best_person
-            if compared and best_sim < self.embedding_veto_threshold:
-                return None
 
         # Create temporary signature for comparison
         temp_sig = VisualSignature(
@@ -586,7 +589,9 @@ class PersonTracker:
         for person in self.active_persons.values():
             if not person.is_present and person.presence_confidence < 0.5:
                 continue
-            
+            if person.person_id in vetoed:
+                continue
+
             score = person.visual_signature.similarity_score(temp_sig)
             
             # Boost score if position matches and was recently seen

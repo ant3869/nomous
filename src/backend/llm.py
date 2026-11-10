@@ -1876,17 +1876,30 @@ class LocalLLM:
         return description
 
     def _scene_digest_due(self) -> bool:
-        """True when a periodic scene digest is due and the scene is static."""
+        """True when a periodic scene digest is due and the scene is static.
+
+        A changed scene re-baselines immediately (and restarts the quiet
+        interval) instead of only advancing on a successful digest — the
+        old shape stayed silent forever after one scene change, because
+        nothing could ever make the new scene 'similar' to the old
+        baseline. Called once per autonomous cycle, so the mutation here
+        is one baseline update per cycle at most.
+        """
         if not self.scene_digest_seconds or not self._last_frame_image_url:
             return False
-        if time.time() - self._last_scene_digest < self.scene_digest_seconds:
-            return False
+        now = time.time()
         # Only digest a static scene: if the latest description differs
         # from the one the last digest covered, something changed — the
-        # vision pipeline will comment on its own, so no digest is needed.
+        # vision pipeline will comment on its own, so no digest is
+        # needed. Re-baseline on the new scene and restart the quiet
+        # interval, so digests resume once the new scene settles.
         if self._last_digest_signature and not self._is_similar_vision(
             self._last_frame_description, self._last_digest_signature
         ):
+            self._last_digest_signature = self._last_frame_description
+            self._last_scene_digest = now
+            return False
+        if now - self._last_scene_digest < self.scene_digest_seconds:
             return False
         return True
 

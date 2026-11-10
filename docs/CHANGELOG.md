@@ -48,15 +48,21 @@
   vision pipeline stays quiet for minutes, so `autonomous_thought` now
   describes the room on a timer (`vision.scene_digest_minutes`, default
   10, 0 disables) — but only when the scene is unchanged, so a digest
-  never interrupts something new. A "describe the scene" / "what do you
-  see?" request in chat or voice goes straight to the vision model
-  about the freshest frame, bypassing suppression and cooldown.
+  never interrupts something new. A changed scene re-baselines
+  immediately and restarts the quiet interval, so digests resume once
+  the new scene settles (Codex review). A "describe the scene" / "what
+  do you see?" request in chat or voice goes straight to the vision
+  model about the freshest frame, bypassing suppression and cooldown —
+  and the frame cache now refreshes on every preview send, not just on
+  analysis, so the answer is never about a 15s-old frame (Codex review).
 - Real person recognition (finding 4): each detected face crop is
   embedded on-device by a vendored MediaPipe ImageEmbedder (MobileNetV3,
   1024-dim L2-normalized) and matched on cosine similarity
   (`vision.embedding_match_threshold`, default 0.7). A clearly-different
-  embedding vetoes a size/position match; the ambiguous middle band
-  still lets the heuristic decide. Stored embeddings update by
+  embedding vetoes a size/position match — per candidate, so with
+  several people tracked one ambiguous similarity cannot shield a
+  clearly-different face from the veto (Codex review); the ambiguous
+  middle band still lets the heuristic decide. Stored embeddings update by
   exponential moving average and persist in the memory dicts.
 - First-run robustness (finding 8): the MediaPipe task models are
   vendored in `assets/mediapipe/` with a manifest pinning each file's

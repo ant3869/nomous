@@ -194,9 +194,26 @@ def test_scene_digest_skips_when_scene_changed():
     )
     llm._last_scene_digest = time.time() - 601
     assert llm._scene_digest_due() is False
-    # Same description as the last digest: static, due.
-    llm._last_frame_description = "an empty room with a chair"
+    # The changed scene re-baselines immediately and restarts the quiet
+    # interval, so digests resume once the new scene settles instead of
+    # staying silent forever.
+    assert llm._last_digest_signature == "a dog runs across the room"
+    assert llm._scene_digest_due() is False  # clock just restarted
+    # Ten minutes of static new scene: due again.
+    llm._last_scene_digest = time.time() - 601
     assert llm._scene_digest_due() is True
+
+
+def test_scene_digest_rebaselines_before_interval_elapses():
+    llm = _bare_llm(
+        _last_frame_image_url="data:image/jpeg;base64,xxx",
+        _last_frame_description="a dog runs across the room",
+        _last_digest_signature="an empty room with a chair",
+    )
+    # Fresh clock: no digest is due yet, but the change is still noticed
+    # and the baseline moves, so the quiet interval restarts from here.
+    assert llm._scene_digest_due() is False
+    assert llm._last_digest_signature == "a dog runs across the room"
 
 
 @pytest.mark.asyncio

@@ -578,6 +578,42 @@ class CameraLoop:
 
         return description
 
+    def _encode_vision_frame(self, frame_small):
+        """Encode a processing-size frame for the vision model.
+
+        Downscaled to at most vision_frame_width wide, as a data URL.
+        Returns None when encoding fails.
+        """
+        vision_frame = frame_small
+        if vision_frame.shape[1] > self.vision_frame_width:
+            scale = self.vision_frame_width / vision_frame.shape[1]
+            vision_frame = cv2.resize(
+                vision_frame,
+                (self.vision_frame_width, int(vision_frame.shape[0] * scale)),
+            )
+        try:
+            return to_data_url(vision_frame)
+        except Exception as exc:
+            logger.debug("Could not encode vision frame: %s", exc)
+            return None
+
+    def _refresh_live_frame(self, frame_small) -> None:
+        """Refresh the LLM's cached frame for on-demand scene descriptions.
+
+        The analysis path only refreshes it every vision_cooldown, so
+        without this a 'what do you see?' asked right after something
+        entered the room would describe a frame up to 15s old. The
+        preview already runs every ~0.5s, so the cache rides along with
+        it. A plain attribute assignment from the camera thread; the
+        value is an immutable string.
+        """
+        llm = getattr(self, "llm", None)
+        if llm is None or not getattr(llm, "_vision_available", False):
+            return
+        image_data_url = self._encode_vision_frame(frame_small)
+        if image_data_url:
+            llm._last_frame_image_url = image_data_url
+
     def _should_send_preview(self, now: float, last_preview_send: float, gesture: str) -> bool:
         """Preview cadence: every preview_interval_sec, or immediately on a gesture.
 
@@ -763,6 +799,7 @@ class CameraLoop:
                         )
                     except Exception as e:
                         logger.error(f"Error posting preview frame: {e}")
+                    self._refresh_live_frame(frame_small)
 
                 # Vision analysis stays on its own cooldown (or a gesture),
                 # independent of the preview cadence.
@@ -779,17 +816,7 @@ class CameraLoop:
                         # Send the actual frame to the vision model when it can take one.
                         image_data_url = None
                         if getattr(self.llm, "_vision_available", False):
-                            vision_frame = frame_small
-                            if vision_frame.shape[1] > self.vision_frame_width:
-                                scale = self.vision_frame_width / vision_frame.shape[1]
-                                vision_frame = cv2.resize(
-                                    vision_frame,
-                                    (self.vision_frame_width, int(vision_frame.shape[0] * scale)),
-                                )
-                            try:
-                                image_data_url = to_data_url(vision_frame)
-                            except Exception as exc:
-                                logger.debug("Could not encode vision frame: %s", exc)
+                            image_data_url = self._encode_vision_frame(frame_small)
 
                         # Schedule vision processing in LLM
                         asyncio.run_coroutine_threadsafe(

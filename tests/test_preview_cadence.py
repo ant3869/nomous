@@ -114,6 +114,60 @@ def _load_run_bridge():
 
 
 @pytest.mark.asyncio
+async def test_encode_vision_frame_downscales(monkeypatch):
+    import numpy as np
+
+    from src.backend import video as video_module
+
+    seen = {}
+
+    def fake_to_data_url(frame):
+        seen["shape"] = frame.shape
+        return "data:image/jpeg;base64,FAKE"
+
+    monkeypatch.setattr(video_module, "to_data_url", fake_to_data_url)
+    camera = CameraLoop.__new__(CameraLoop)
+    camera.vision_frame_width = 640
+    # A frame wider than the vision width is downscaled before encoding.
+    wide = (np.random.default_rng(1).random((360, 1280, 3)) * 255).astype(np.uint8)
+    assert camera._encode_vision_frame(wide) == "data:image/jpeg;base64,FAKE"
+    assert seen["shape"] == (180, 640, 3)
+    # A frame already at width passes through unchanged.
+    exact = (np.random.default_rng(2).random((360, 640, 3)) * 255).astype(np.uint8)
+    camera._encode_vision_frame(exact)
+    assert seen["shape"] == (360, 640, 3)
+
+
+def test_refresh_live_frame_updates_llm_cache(monkeypatch):
+    import numpy as np
+    import types
+
+    from src.backend import video as video_module
+
+    monkeypatch.setattr(
+        video_module, "to_data_url", lambda frame: "data:image/jpeg;base64,FAKE"
+    )
+    camera = CameraLoop.__new__(CameraLoop)
+    camera.vision_frame_width = 640
+    frame = (np.random.default_rng(3).random((360, 640, 3)) * 255).astype(np.uint8)
+
+    llm = types.SimpleNamespace(_vision_available=True, _last_frame_image_url=None)
+    camera.llm = llm
+    camera._refresh_live_frame(frame)
+    assert llm._last_frame_image_url == "data:image/jpeg;base64,FAKE"
+
+    # Vision unavailable: the cache is left alone.
+    llm._vision_available = False
+    llm._last_frame_image_url = None
+    camera._refresh_live_frame(frame)
+    assert llm._last_frame_image_url is None
+
+    # No LLM attached: silent no-op.
+    camera.llm = None
+    camera._refresh_live_frame(frame)
+
+
+@pytest.mark.asyncio
 async def test_bridge_param_sets_preview_interval_and_alias():
     try:
         run_bridge = _load_run_bridge()

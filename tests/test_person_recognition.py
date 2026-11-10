@@ -133,6 +133,35 @@ async def test_embedding_veto_and_ambiguous_band():
     assert len(third["new_arrivals"]) == 1
 
 
+@pytest.mark.asyncio
+async def test_veto_applies_per_candidate_not_globally():
+    """One ambiguous similarity must not shield a clearly-different face.
+
+    A (left, [1,0,...]) and B (right, [0,1,...]) are tracked. An incoming
+    left-hand face with [0,0.6,0.8,...] has cosine 0.0 to A (vetoed) and
+    0.6 to B (ambiguous). The old global veto let the best similarity
+    (0.6) disable the veto for everyone, and the heuristic then matched
+    A on position + size. Now A is excluded and the face is a new person.
+    """
+    tracker = PersonTracker(embedding_match_threshold=0.7)
+    dim = 8
+    emb_a = [1.0] + [0.0] * (dim - 1)
+    emb_b = [0.0, 1.0] + [0.0] * (dim - 2)
+    emb_c = [0.0, 0.6, 0.8] + [0.0] * (dim - 3)
+    assert _cosine_similarity(emb_c, emb_a) == pytest.approx(0.0)
+    assert _cosine_similarity(emb_c, emb_b) == pytest.approx(0.6)
+
+    first = await tracker.process_frame(
+        [(10, 10, 50, 50), (500, 10, 50, 50)], 640, 360, [emb_a, emb_b]
+    )
+    assert len(first["new_arrivals"]) == 2
+    known_ids = {p["id"] for p in first["present"]}
+
+    second = await tracker.process_frame([(10, 10, 100, 100)], 640, 360, [emb_c])
+    assert len(second["new_arrivals"]) == 1
+    assert second["present"][0]["id"] not in known_ids
+
+
 def test_embedding_persists_through_memory_dict():
     emb = _unit_vector(3)
     person = TrackedPerson(person_id="person_1")

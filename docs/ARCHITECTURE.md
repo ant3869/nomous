@@ -120,15 +120,19 @@ each synthesis.
 - **Scene digest.** In a static scene `autonomous_thought` describes
   the room every `vision.scene_digest_minutes` (default 10), but only
   when the latest description is similar to the last digested one — a
-  changed scene gets its own vision comment instead.
+  changed scene gets its own vision comment instead, and re-baselines
+  the digest clock so digests resume once the new scene settles.
 - **Describe the scene.** A chat/voice request matching
   "describe the scene" / "what do you see" / "what's around" bypasses
   the text model and asks the vision model about the freshest frame
-  (`describe_scene()`), with no suppression or cooldown.
+  (`describe_scene()`), with no suppression or cooldown. The frame
+  cache refreshes on every preview send, not just on analysis, so the
+  answer is current.
 - **Person recognition.** `CameraLoop` embeds each detected face crop
   (MobileNetV3, 1024-dim) and `PersonTracker` matches on cosine
   similarity (≥ `vision.embedding_match_threshold`, default 0.7), with
-  a veto below 0.4 and the size/position heuristic as fallback. Stored
+  a per-candidate veto below 0.4 and the size/position heuristic as
+  fallback. Stored
   embeddings are an exponential moving average, so one wobbly frame
   cannot re-anchor an identity. When a known face is present, the
   vision prompt carries a one-line recall of their last conversation.
