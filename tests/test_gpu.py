@@ -33,7 +33,19 @@ print("[2/4] Testing llama-cpp-python GPU support...")
 try:
     from llama_cpp import Llama
     print("✅ llama-cpp-python installed")
-    
+
+    # Vision needs the JamePeng fork handlers; the stock PyPI package has none.
+    try:
+        from llama_cpp.llama_multimodal import Qwen3VLChatHandler, GenericMTMDChatHandler
+        print("✅ Vision chat handlers available (JamePeng fork)")
+    except ImportError:
+        try:
+            from llama_cpp.llama_chat_format import Qwen3VLChatHandler, GenericMTMDChatHandler
+            print("✅ Vision chat handlers available (JamePeng fork)")
+        except ImportError:
+            print("⚠️  No vision chat handlers - vision input will be text-only")
+            print("   The launcher installs the fork wheel automatically: python scripts/start.py")
+
     # Check if it was built with CUDA
     try:
         test_model = Llama(
@@ -51,7 +63,7 @@ try:
             print(f"   Error: {error_msg[:100]}")
 except ImportError:
     print("❌ llama-cpp-python not installed")
-    print("   Install with: pip install llama-cpp-python")
+    print("   The launcher installs the vision-capable fork wheel: python scripts/start.py")
 
 print()
 
@@ -59,12 +71,13 @@ print()
 print("[3/4] Testing MediaPipe for gesture detection...")
 try:
     import mediapipe as mp
+    from mediapipe.tasks.python import vision as mp_vision
     print("✅ MediaPipe installed")
-    
-    # Test hands module
-    hands = mp.solutions.hands.Hands()
-    print("✅ MediaPipe hand detection ready")
-    hands.close()
+
+    # Tasks API: GestureRecognizer + FaceDetector (mp.solutions was removed in 1.x)
+    _ = mp_vision.GestureRecognizerOptions
+    _ = mp_vision.FaceDetectorOptions
+    print("✅ MediaPipe Tasks gesture/face detection ready")
 except ImportError:
     print("❌ MediaPipe not installed")
     print("   Install with: pip install mediapipe")
@@ -99,7 +112,7 @@ print("=" * 60)
 print()
 print("Recommended actions:")
 print("1. If CUDA not available: Install CUDA Toolkit")
-print("2. If llama-cpp-python has no GPU: Run setup_gpu.bat")
+print("2. If llama-cpp-python has no GPU/vision: run the launcher, it installs the fork wheel (python scripts/start.py)")
 print("3. If MediaPipe missing: pip install mediapipe")
 print("4. After changes: Restart computer!")
 print()

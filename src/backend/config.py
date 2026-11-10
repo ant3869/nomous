@@ -24,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT: Dict[str, Any] = {
     "paths": {
         "gguf_path": "modules/models/local.gguf",
+        "mmproj_path": "",
         "embed_gguf_path": "modules/models/embed/bge-small-en-v1.5-f16.gguf",
         "vosk_model_dir": "modules/models/vosk-model-small-en-us-0.15",
         "piper_exe": "modules/piper/piper.exe",
@@ -32,8 +33,8 @@ DEFAULT: Dict[str, Any] = {
     },
     "llm": {
         "enable": True,
-        "n_ctx": 2048,
-        "n_threads": 4,
+        "n_ctx": 16384,
+        "n_threads": 8,
         "temperature": 0.6,
         "top_p": 0.95,
         "tools_enabled": True,
@@ -48,6 +49,14 @@ DEFAULT: Dict[str, Any] = {
             "memories, note uncertainties, and decide on an action plan before "
             "committing to a response. Keep thoughts structured and actionable."
         ),
+    },
+    "vision": {
+        "enabled": True,
+        "model": "qwen3-vl-8b",
+        "image_max_tokens": 1024,
+        "frame_width": 640,
+        "enable_thinking": False,
+        "temperature": 0.5,
     },
     "audio": {
         "sample_rate": 16000,

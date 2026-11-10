@@ -16,9 +16,9 @@ camera:
   width: 1280
 llm:
   enable: true
-  n_ctx: 8192
+  n_ctx: 16384
   n_gpu_layers: -1
-  n_threads: 4
+  n_threads: 8
   temperature: 0.7
   top_p: 0.95
 memory:
@@ -28,7 +28,11 @@ memory:
   prune_days: 30
 paths:
   embed_gguf_path: modules/models/embed/bge-small-en-v1.5-f16.gguf
-  gguf_path: H:/Models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+  # Default brain: Qwen3-VL-8B-Instruct Q4_K_M (~7 GB all-in on a 16 GB card).
+  # Download from Qwen/Qwen3-VL-8B-Instruct-GGUF on Hugging Face.
+  gguf_path: H:/Models/Qwen3VL-8B-Instruct-Q4_K_M.gguf
+  # Vision projector for the model above (same repo, mmproj file).
+  mmproj_path: H:/Models/mmproj-Qwen3VL-8B-Instruct-F16.gguf
   piper_exe: modules/piper/piper.exe
   piper_out_dir: modules/piper/piper_out
   piper_voice: modules/piper/voices/en_US-amy-medium.onnx
@@ -54,6 +58,15 @@ ui:
   vision_enabled: true
 vision:
   enabled: true
+  # Vision model family: qwen3-vl-8b (default, fits easily) or qwen3.8-27b
+  # (Q3_K_XL quant only — Q4_K_M does not fit a 16 GB card).
+  model: qwen3-vl-8b
+  # Max vision tokens per frame; frames are downscaled to frame_width first.
+  image_max_tokens: 1024
+  frame_width: 640
+  # Qwen thinks by default; keep it off for short scene comments.
+  enable_thinking: false
+  temperature: 0.5
   interesting_keywords:
   - person
   - people

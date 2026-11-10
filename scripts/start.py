@@ -390,28 +390,139 @@ def detect_system_cuda_version() -> str:
                 match = re.search(r'CUDA Version:\s+(\d+)\.(\d+)', output)
                 if match:
                     major, minor = match.groups()
-                    # Map to PyTorch wheel naming convention
-                    version_map = {
-                        ('11', '8'): 'cu118',
-                        ('12', '1'): 'cu121',
-                        ('12', '4'): 'cu124',
-                    }
-                    cuda_key = (major, minor)
-                    if cuda_key in version_map:
-                        return version_map[cuda_key]
-                    # For other versions, try to construct a reasonable default
-                    if major == '11':
-                        return 'cu118'
-                    elif major == '12':
-                        if int(minor) >= 4:
-                            return 'cu124'
-                        else:
-                            return 'cu121'
+                    # Wheel tag is the driver CUDA version, e.g. cu128 / cu132.
+                    return f"cu{major}{minor}"
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
         pass
     
     # Default to CUDA 12.1 if detection fails
     return 'cu121'
+
+LLAMA_CPP_FORK_VERSION = "0.4.6"
+JAMEPENG_RELEASES_API = "https://api.github.com/repos/JamePeng/llama-cpp-python/releases"
+# CUDA wheel tags the JamePeng fork publishes, newest first.
+FORK_CUDA_TAGS = ["cu132", "cu131", "cu130", "cu128", "cu126", "cu124"]
+TORCH_CUDA_TAGS = ["cu128", "cu126", "cu124", "cu121", "cu118"]
+
+
+def _clamp_cuda_tag(detected: str, supported) -> str:
+    """Return the newest supported CUDA tag not newer than ``detected``."""
+    try:
+        detected_num = int(str(detected)[2:])
+    except (ValueError, IndexError, TypeError):
+        return supported[0]
+    for tag in supported:
+        if int(tag[2:]) <= detected_num:
+            return tag
+    return supported[-1]
+
+
+def _vision_handler_probe(python_exe: Optional[Path]) -> bool:
+    """True when the installed llama-cpp-python has a Qwen vision handler."""
+    probe = (
+        "import importlib\n"
+        "paths = ('llama_cpp.llama_multimodal', 'llama_cpp.llama_chat_format')\n"
+        "names = ('Qwen3VLChatHandler', 'GenericMTMDChatHandler')\n"
+        "ok = False\n"
+        "for p in paths:\n"
+        "    try:\n"
+        "        m = importlib.import_module(p)\n"
+        "    except Exception:\n"
+        "        continue\n"
+        "    if any(hasattr(m, n) for n in names):\n"
+        "        ok = True\n"
+        "        break\n"
+        "print('vision-ok' if ok else 'vision-missing')\n"
+    )
+    exe = str(python_exe) if python_exe else sys.executable
+    try:
+        result = subprocess.run(
+            [exe, "-c", probe], capture_output=True, text=True, timeout=30
+        )
+    except Exception as exc:
+        logger.debug("Vision handler probe failed: %s", exc)
+        return False
+    return "vision-ok" in (result.stdout or "")
+
+
+def _venv_python_tag(python_exe: Optional[Path]) -> str:
+    """Return the venv interpreter's wheel tag, e.g. cp312."""
+    exe = str(python_exe) if python_exe else sys.executable
+    try:
+        result = subprocess.run(
+            [exe, "-c", "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"],
+            capture_output=True, text=True, timeout=15,
+        )
+        tag = (result.stdout or "").strip()
+        if tag.startswith("cp") and tag[2:].isdigit():
+            return tag
+    except Exception as exc:
+        logger.debug("Could not read venv Python version: %s", exc)
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+def _resolve_fork_wheel_url(cuda_tag: str, python_tag: str) -> Optional[str]:
+    """Find the JamePeng fork wheel for this CUDA + Python in GitHub releases."""
+    import json as _json
+    import urllib.request
+
+    wheel_name = (
+        f"llama_cpp_python-{LLAMA_CPP_FORK_VERSION}+{cuda_tag}-"
+        f"{python_tag}-{python_tag}-win_amd64.whl"
+    )
+    try:
+        request = urllib.request.Request(
+            JAMEPENG_RELEASES_API, headers={"Accept": "application/vnd.github+json"}
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            releases = _json.load(response)
+    except Exception as exc:
+        logger.debug("Could not list JamePeng releases: %s", exc)
+        return None
+    for release in releases:
+        tag = str(release.get("tag_name", ""))
+        if not tag.startswith(f"v{LLAMA_CPP_FORK_VERSION}-{cuda_tag}-win-"):
+            continue
+        for asset in release.get("assets", []):
+            if asset.get("name") == wheel_name:
+                return asset.get("browser_download_url")
+    return None
+
+
+def ensure_llama_cpp_vision(pip_cmd: str, python_exe: Optional[Path], cuda_tag: str) -> bool:
+    """Install the vision-capable llama-cpp-python fork when it is missing."""
+    if _vision_handler_probe(python_exe):
+        print_success("llama-cpp-python vision handlers available")
+        return True
+
+    # The PyPI package has no Qwen vision handlers; only the JamePeng fork does.
+    if sys.platform != "win32":
+        print_warning("No prebuilt vision wheel for this platform; building the JamePeng fork from source...")
+        success, output = run_command_streaming(
+            f'CMAKE_ARGS="-DGGML_CUDA=on" {pip_cmd} install --force-reinstall --no-cache-dir '
+            f'"llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git@v{LLAMA_CPP_FORK_VERSION}"'
+        )
+        if success and _vision_handler_probe(python_exe):
+            print_success("Vision-capable llama-cpp-python installed")
+            return True
+        print_warning("Vision build failed; continuing in text-only mode")
+        return False
+
+    cuda_tag = _clamp_cuda_tag(cuda_tag, FORK_CUDA_TAGS)
+    python_tag = _venv_python_tag(python_exe)
+    url = _resolve_fork_wheel_url(cuda_tag, python_tag)
+    if not url:
+        print_warning(f"No JamePeng fork wheel for {cuda_tag} + {python_tag}; vision input will be unavailable.")
+        print_warning("Install one manually from https://github.com/JamePeng/llama-cpp-python/releases")
+        return False
+    print_status(f"Installing vision-capable llama-cpp-python {LLAMA_CPP_FORK_VERSION} ({cuda_tag}, {python_tag})...")
+    success, _ = run_command_streaming(f'{pip_cmd} install --force-reinstall --no-cache-dir "{url}"')
+    if success and _vision_handler_probe(python_exe):
+        print_success("Vision-capable llama-cpp-python installed")
+        return True
+    print_warning("Vision wheel install failed; continuing in text-only mode")
+    return False
+
 
 def check_compute_backend(python_exe: Optional[Path] = None) -> "ComputeDeviceInfo":
     """Check CUDA availability and provide a compute device summary.
@@ -522,14 +633,12 @@ def ensure_gpu_support(pip_cmd: str, info: "ComputeDeviceInfo", python_exe: Opti
     cuda_version = detect_system_cuda_version()
     print_status(f"Detected CUDA version: {cuda_version}", style="bold cyan")
 
+    # torch has no wheels past cu128; the llama fork is handled separately.
+    torch_tag = _clamp_cuda_tag(cuda_version, TORCH_CUDA_TAGS)
     gpu_installs = [
         (
-            f"{pip_cmd} install --upgrade torch --index-url https://download.pytorch.org/whl/{cuda_version}",
+            f"{pip_cmd} install --upgrade torch --index-url https://download.pytorch.org/whl/{torch_tag}",
             "PyTorch CUDA build",
-        ),
-        (
-            f'{pip_cmd} install --upgrade "llama-cpp-python[cuda]"',
-            "llama-cpp-python CUDA extension",
         ),
     ]
 
@@ -778,6 +887,15 @@ def main():
     # Use the venv's Python for detection to avoid issues with miniconda's numpy
     device_info = check_compute_backend(env_info.python_executable)
     device_info = ensure_gpu_support(env_info.pip_command, device_info, env_info.python_executable)
+    if device_info.is_gpu:
+        ensure_llama_cpp_vision(
+            env_info.pip_command, env_info.python_executable, detect_system_cuda_version()
+        )
+    else:
+        # No GPU: keep the stock CPU build from requirements.txt (text-only).
+        # Building the CUDA fork here would fail without a CUDA toolkit and
+        # is not worth it — CPU vision on an 8B model is unusable anyway.
+        print_status("No CUDA GPU detected; keeping the CPU llama-cpp-python build (text-only mode)")
     update_config_for_gpu(device_info.is_gpu)
     
     device_label = f"{device_info.backend} ({device_info.name})"

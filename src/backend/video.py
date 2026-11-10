@@ -1,12 +1,13 @@
 # Title: CameraLoop - GPU-Optimized with Gesture Recognition
 # Path: backend/video.py
-# Purpose: Lightweight frame processing + MediaPipe hand gestures for RTX 2080 Ti
+# Purpose: Lightweight frame processing + MediaPipe Tasks gestures/faces for RTX 5070 Ti
 
 import cv2
 import threading
 import time
 import asyncio
 import logging
+import urllib.request
 from pathlib import Path
 from queue import SimpleQueue, Empty
 from typing import Optional
@@ -31,11 +32,39 @@ else:
 
 try:
     import mediapipe as mp
+    from mediapipe.tasks.python import vision as mp_vision
+    from mediapipe.tasks.python import BaseOptions as MpBaseOptions
     MEDIAPIPE_AVAILABLE = True
-    logger.info("MediaPipe available - gesture detection enabled")
-except ImportError:
+    logger.info("MediaPipe Tasks available - gesture/face detection enabled")
+except (ImportError, AttributeError):
+    mp = None  # type: ignore[assignment]
+    mp_vision = None  # type: ignore[assignment]
+    MpBaseOptions = None  # type: ignore[assignment]
     MEDIAPIPE_AVAILABLE = False
     logger.warning("MediaPipe not available - install with: pip install mediapipe")
+
+# Task model files, auto-downloaded on first run into modules/models/mediapipe/.
+MEDIAPIPE_MODELS = {
+    "gesture_recognizer.task": "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
+    "blaze_face_short_range.tflite": "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+}
+
+# GestureRecognizer category -> Nomous gesture label.
+GESTURE_LABELS = {
+    "Thumb_Up": "thumbs_up",
+    "Victory": "peace_sign",
+    "Open_Palm": "open_hand",
+    "Pointing_Up": "pointing",
+    "Closed_Fist": "closed_fist",
+    "ILoveYou": "rock_on",
+}
+
+
+def _download_file(url: str, target: Path) -> None:
+    """Download ``url`` to ``target`` atomically."""
+    tmp_target = target.with_suffix(target.suffix + ".tmp")
+    urllib.request.urlretrieve(url, tmp_target)
+    tmp_target.replace(target)
 
 
 class CameraLoop:
@@ -81,37 +110,23 @@ class CameraLoop:
         self.llm = None
         self.vision_description_enabled = True
         self.vision_model_path = None
+        self.vision_frame_width = int(cfg.get("vision", {}).get("frame_width", 640) or 640)
         self.last_analysis_time = 0
         self.analysis_cooldown = float(cfg["ui"].get("vision_cooldown", 12))
-        
+
         # Gesture detection
         self.gesture_enabled = bool(cfg["ui"].get("gesture_enabled", True))
         self.last_gesture_time = 0
         self.gesture_cooldown = float(cfg["ui"].get("gesture_cooldown", 3))
-        
-        # Initialize MediaPipe
-        if MEDIAPIPE_AVAILABLE and self.gesture_enabled:
-            self.mp_hands = mp.solutions.hands
-            self.hands = self.mp_hands.Hands(
-                static_image_mode=False,
-                max_num_hands=2,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5
-            )
-            logger.info("MediaPipe hand detection initialized")
-        else:
-            self.hands = None
-        
-        # Face detection
-        try:
-            self.face_cascade = cv2.CascadeClassifier(
-                cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-            )
-            logger.info("Face detection initialized")
-        except Exception as e:
-            logger.warning(f"Could not load face detection: {e}")
-            self.face_cascade = None
-        
+
+        # MediaPipe Tasks detectors (gestures + faces); None when unavailable.
+        # Face detection is independent of the gesture toggle: person tracking
+        # needs faces even when hand gestures are off.
+        self._gesture_recognizer = None
+        self._face_detector = None
+        if MEDIAPIPE_AVAILABLE:
+            self._init_mediapipe_tasks()
+
         # Person tracking for persistent recognition
         self.person_tracker = PersonTracker()
         self._last_person_count = 0
@@ -127,6 +142,45 @@ class CameraLoop:
             self._command_queue.put_nowait((name, args))
         except Exception as e:
             logger.error(f"Failed to queue camera command {name}: {e}")
+
+    def _init_mediapipe_tasks(self):
+        """Download Task models on first run and build the gesture/face detectors."""
+        model_dir = Path(__file__).resolve().parents[2] / "modules" / "models" / "mediapipe"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        wanted = dict(MEDIAPIPE_MODELS)
+        if not self.gesture_enabled:
+            wanted.pop("gesture_recognizer.task", None)
+        paths = {}
+        for filename, url in wanted.items():
+            target = model_dir / filename
+            if not target.exists():
+                try:
+                    logger.info("Downloading MediaPipe model %s ...", filename)
+                    _download_file(url, target)
+                except Exception as exc:
+                    logger.warning("Could not download MediaPipe model %s: %s", filename, exc)
+                    return
+            paths[filename] = target
+        try:
+            if self.gesture_enabled:
+                self._gesture_recognizer = mp_vision.GestureRecognizer.create_from_options(
+                    mp_vision.GestureRecognizerOptions(
+                        base_options=MpBaseOptions(model_asset_path=str(paths["gesture_recognizer.task"])),
+                        running_mode=mp_vision.RunningMode.IMAGE,
+                        num_hands=2,
+                    )
+                )
+            self._face_detector = mp_vision.FaceDetector.create_from_options(
+                mp_vision.FaceDetectorOptions(
+                    base_options=MpBaseOptions(model_asset_path=str(paths["blaze_face_short_range.tflite"])),
+                    running_mode=mp_vision.RunningMode.IMAGE,
+                )
+            )
+            logger.info("MediaPipe Tasks detectors initialized")
+        except Exception as exc:
+            logger.warning("MediaPipe Tasks init failed: %s", exc)
+            self._gesture_recognizer = None
+            self._face_detector = None
 
     def set_llm(self, llm):
         """Set LLM reference for vision analysis."""
@@ -200,60 +254,58 @@ class CameraLoop:
         if self._thr:
             self._thr.join(timeout=2)
         self._running = False
-        
-        if self.hands:
-            self.hands.close()
-        
+
+        for detector in (self._gesture_recognizer, self._face_detector):
+            if detector is not None:
+                try:
+                    detector.close()
+                except Exception:
+                    pass
+        self._gesture_recognizer = None
+        self._face_detector = None
+
         logger.info("CameraLoop stopped")
 
     def _detect_gesture(self, frame, frame_rgb) -> str:
-        """Detect hand gestures using MediaPipe."""
-        if not self.hands:
+        """Detect hand gestures using the MediaPipe Tasks GestureRecognizer."""
+        if self._gesture_recognizer is None or not MEDIAPIPE_AVAILABLE:
             return ""
-        
+
         try:
-            results = self.hands.process(frame_rgb)
-            
-            if not results.multi_hand_landmarks:
-                return ""
-            
-            # Analyze first detected hand
-            hand_landmarks = results.multi_hand_landmarks[0]
-            
-            # Get key landmarks
-            thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
-            index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
-            middle_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
-            ring_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.RING_FINGER_TIP]
-            pinky_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.PINKY_TIP]
-            
-            wrist = hand_landmarks.landmark[self.mp_hands.HandLandmark.WRIST]
-            
-            # Calculate finger heights relative to wrist
-            thumb_up = thumb_tip.y < wrist.y
-            index_up = index_tip.y < wrist.y - 0.1
-            middle_up = middle_tip.y < wrist.y - 0.1
-            ring_up = ring_tip.y < wrist.y - 0.1
-            pinky_up = pinky_tip.y < wrist.y - 0.1
-            
-            # Count extended fingers
-            fingers_up = sum([index_up, middle_up, ring_up, pinky_up])
-            
-            # Detect gestures
-            if fingers_up >= 4:
-                return "waving" if thumb_up else "open_hand"
-            elif index_up and middle_up and not ring_up and not pinky_up:
-                return "peace_sign"
-            elif thumb_up and not index_up and not middle_up and not ring_up and not pinky_up:
-                return "thumbs_up"
-            elif index_up and not middle_up and not ring_up and not pinky_up:
-                return "pointing"
-            
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            result = self._gesture_recognizer.recognize(mp_image)
+        except Exception as exc:
+            logger.debug("Gesture detection error: %s", exc)
             return ""
-            
-        except Exception as e:
-            logger.debug(f"Gesture detection error: {e}")
-            return ""
+
+        for hand_gestures in result.gestures or []:
+            if not hand_gestures:
+                continue
+            best = max(hand_gestures, key=lambda g: g.score)
+            label = GESTURE_LABELS.get(best.category_name)
+            if label:
+                return label
+        return ""
+
+    def _detect_faces(self, frame_rgb) -> list:
+        """Detect faces with the MediaPipe Tasks FaceDetector; [] when unavailable."""
+        if self._face_detector is None or not MEDIAPIPE_AVAILABLE:
+            return []
+
+        try:
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            result = self._face_detector.detect(mp_image)
+        except Exception as exc:
+            logger.debug("Face detection error: %s", exc)
+            return []
+
+        faces = []
+        for detection in result.detections or []:
+            box = detection.bounding_box
+            if box is None:
+                continue
+            faces.append((int(box.origin_x), int(box.origin_y), int(box.width), int(box.height)))
+        return faces
 
     def _analyze_complexity(self, gray):
         """Analyze visual complexity using edge detection."""
@@ -365,34 +417,32 @@ class CameraLoop:
         face_info = ""
         person_tracking_update = None
         faces_list = []
-        
-        if self.face_cascade is not None:
+
+        if self._face_detector is not None:
             try:
-                faces = self.face_cascade.detectMultiScale(
-                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-                )
+                faces = self._detect_faces(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 face_count = len(faces)
-                
+
                 # Convert faces to list of tuples for person tracker
                 faces_list = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
-                
+
                 # Update person tracker if count changed or enough time passed
                 now = time.time()
                 should_update_tracking = (
-                    face_count != self._last_person_count or 
+                    face_count != self._last_person_count or
                     now - self._last_person_update > self._person_tracking_cooldown
                 )
-                
+
                 if should_update_tracking:
                     self._last_person_count = face_count
                     self._last_person_update = now
-                    
+
                     # Get tracking status using new process_frame API
                     try:
                         future = asyncio.run_coroutine_threadsafe(
                             self.person_tracker.process_frame(
-                                faces_list, 
-                                self.process_width, 
+                                faces_list,
+                                self.process_width,
                                 self.process_height
                             ),
                             self.loop
@@ -400,13 +450,13 @@ class CameraLoop:
                         person_tracking_update = future.result(timeout=0.5)
                     except Exception as e:
                         logger.debug(f"Person tracking update failed: {e}")
-                
+
                 # Generate face info based on tracking status
                 if person_tracking_update and person_tracking_update.get("status"):
                     face_info = person_tracking_update["status"]
                 elif face_count > 0:
                     face_info = f"I see {face_count} {'person' if face_count == 1 else 'people'}"
-                    
+
             except Exception as e:
                 logger.debug(f"Face detection error: {e}")
         
@@ -459,11 +509,12 @@ class CameraLoop:
 
         if gesture:
             gesture_text = {
-                "waving": "a quick wave",
                 "peace_sign": "a peace sign",
                 "thumbs_up": "a thumbs up",
                 "open_hand": "an open hand",
-                "pointing": "a pointing motion"
+                "pointing": "a pointing motion",
+                "closed_fist": "a closed fist",
+                "rock_on": "a rock-on gesture"
             }.get(gesture, f"a {gesture} gesture")
             description += f" I also notice {gesture_text}."
 
@@ -627,10 +678,25 @@ class CameraLoop:
                             self.last_analysis_time = now
                             description = self._describe_frame(frame_small, motion, gesture)
                             logger.info(f"Vision: {description}")
-                            
+
+                            # Send the actual frame to the vision model when it can take one.
+                            image_data_url = None
+                            if getattr(self.llm, "_vision_available", False):
+                                vision_frame = frame_small
+                                if vision_frame.shape[1] > self.vision_frame_width:
+                                    scale = self.vision_frame_width / vision_frame.shape[1]
+                                    vision_frame = cv2.resize(
+                                        vision_frame,
+                                        (self.vision_frame_width, int(vision_frame.shape[0] * scale)),
+                                    )
+                                try:
+                                    image_data_url = to_data_url(vision_frame)
+                                except Exception as exc:
+                                    logger.debug("Could not encode vision frame: %s", exc)
+
                             # Schedule vision processing in LLM
                             asyncio.run_coroutine_threadsafe(
-                                self.llm.process_vision(description),
+                                self.llm.process_vision(description, image_data_url),
                                 self.loop
                             )
                             
