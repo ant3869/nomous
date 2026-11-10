@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### 🏗️ Architecture: MCP-style tool registry, processing lanes, TTS queue
+
+- Tool registry modernized (`src/backend/tools.py`): tool definitions are
+  now the single source of truth — MCP-style schemas
+  (`Tool.to_mcp_schema()` / `get_mcp_tools()`, `{"name", "description",
+  "inputSchema"}`), the OpenAI-style schema, and the model prompt are all
+  derived from the same definitions. Handlers no longer reach into the
+  `LocalLLM` god object; they take an explicit `ToolContext` (memory,
+  bridge, person tracker, live short-term context, reinforcement hook),
+  so tools can be listed, validated, and executed with no LLM in scope.
+  The bridge serves the same registry locally over the WebSocket:
+  `tools/list` returns the MCP schemas, `tools/call` runs the same
+  validated dispatch as the model path. Offline-first, no cloud
+  dependencies; see `docs/ARCHITECTURE.md`.
+- Processing lanes replace the single shared `_processing` flag
+  (`src/backend/llm.py`, finding 6): separate chat, vision, and
+  autonomous lanes. Vision comments now queue behind chat (bounded
+  queue of 8, near-duplicate descriptions dropped, full queue drops its
+  oldest frame) instead of being dropped outright when chat is busy.
+  A `_model_lock` serializes actual inference in `_generate` /
+  `_generate_vision`, since the llama instance is single. `reload_model`
+  still refuses while any lane is busy; `LocalLLM.stop()` now shuts the
+  vision worker and TTS down.
+- TTS speak queue (`src/backend/tts.py`, finding 7): `speak()` enqueues
+  and returns immediately; one worker synthesizes and plays in order.
+  New chat/audio input interrupts in-flight speech (playback stopped,
+  Piper process killed, queue dropped). `piper_out` is pruned to the
+  newest 20 wav files after each synthesis. `muted` / `set_muted` /
+  `toggle_muted` added for the gesture actions (finding 10).
+- Config drift fixed (finding 5): `vision.vision_cooldown` (default 15)
+  is now the single source of truth for the vision cadence — the LLM and
+  the camera loop both read it, and the bridge's live `vision_cooldown`
+  param updates both. Removed the dead copies: `autonomous.vision_cooldown`
+  (never read), `ui.vision_cooldown` (fallback only), the unused
+  `vision.interesting_keywords`, and the duplicated
+  `vision.motion_sensitivity` / `vision.snapshot_debounce` (those are
+  `ui` keys).
+- Deleted `src/backend/handlers.py`: dead code, nothing imported it, and
+  it referenced APIs that no longer exist.
+
 ### 📚 Docs cleanup
 - Removed the file-citation markers (e.g. `[F:src/backend/llm.py]`) left in
   README.md, docs/README.md, and this changelog by the v0.3.0/v0.4.0 doc

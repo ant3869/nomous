@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -52,6 +53,8 @@ def _bare_llm(**overrides):
     instance._cfg = {"llm": {"n_ctx": 16384}}
     instance.system_prompt = "You are Nomous."
     instance.vision_image_max_tokens = 1024
+    # _generate/_generate_vision serialize inference on the model lock.
+    instance._model_lock = asyncio.Lock()
     for key, value in overrides.items():
         setattr(instance, key, value)
     return instance

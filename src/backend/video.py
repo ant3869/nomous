@@ -112,7 +112,8 @@ class CameraLoop:
         self.vision_model_path = None
         self.vision_frame_width = int(cfg.get("vision", {}).get("frame_width", 640) or 640)
         self.last_analysis_time = 0
-        self.analysis_cooldown = float(cfg["ui"].get("vision_cooldown", 12))
+        # Single source of truth (finding 5): vision.vision_cooldown.
+        self.analysis_cooldown = float(cfg.get("vision", {}).get("vision_cooldown", 12))
 
         # Gesture detection
         self.gesture_enabled = bool(cfg["ui"].get("gesture_enabled", True))

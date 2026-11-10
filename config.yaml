@@ -8,7 +8,6 @@ autonomous:
   min_engagement: 0.4
   proactive_questions: true
   thought_cooldown: 30
-  vision_cooldown: 15
 camera:
   backend: dshow
   height: 720
@@ -83,17 +82,12 @@ vision:
   frame_memory_items: 5
   frame_memory_max_tokens: 512
   temperature: 0.5
-  interesting_keywords:
-  - person
-  - people
-  - face
-  - hand
-  - gesture
-  - movement
-  - wave
-  motion_sensitivity: 30
+  # Seconds between vision analyses. Single source of truth: the LLM's
+  # process_vision cooldown and the camera loop's analysis cooldown both
+  # read this key (was split across a hardcoded 15 in llm.py, an unread
+  # autonomous.vision_cooldown, and a ui.vision_cooldown fallback of 12).
+  vision_cooldown: 15
   scene_change_threshold: 0.15
-  snapshot_debounce: 4
 ws:
   host: 127.0.0.1
   port: 8765

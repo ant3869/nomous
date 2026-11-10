@@ -13,7 +13,7 @@ import json
 import logging
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -51,17 +51,117 @@ class Tool:
     display_name: Optional[str] = None
     return_description: Optional[str] = None
 
+    def to_mcp_schema(self) -> Dict[str, Any]:
+        """Return this tool as an MCP-style definition.
+
+        Shape is ``{"name", "description", "inputSchema"}`` (Model Context
+        Protocol). The same definition feeds the OpenAI-style schema and the
+        prompt, so the three can never drift apart. Local only — no network
+        transport is attached to these schemas; the bridge exposes them over
+        the local WebSocket as ``tools/list`` / ``tools/call``.
+        """
+        properties: Dict[str, Any] = {}
+        required: List[str] = []
+        for param in self.parameters:
+            param_def: Dict[str, Any] = {
+                "type": param.type,
+                "description": param.description,
+            }
+            if param.enum:
+                param_def["enum"] = param.enum
+            if param.default is not None:
+                param_def["default"] = param.default
+            properties[param.name] = param_def
+            if param.required:
+                required.append(param.name)
+
+        description = self.description
+        if self.return_description:
+            description = f"{description} Returns: {self.return_description}"
+
+        return {
+            "name": self.name,
+            "description": f"[{self.category.title()}] {description}",
+            "inputSchema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        }
+
+
+@dataclass
+class ToolContext:
+    """Explicit dependency bundle handed to tool handlers.
+
+    Tools used to reach straight into the LocalLLM god object
+    (``self.llm.memory``, ``self.llm.bridge``, ...), which made the
+    registry unusable without a live LLM. Handlers now only touch this
+    small context, so tools can be listed, validated, and executed from
+    anywhere — the model path, the bridge's ``tools/call`` message, or
+    tests — with no LLM instance in scope.
+    """
+
+    memory: Any = None
+    bridge: Any = None
+    person_tracker: Any = None
+    # The live short-term context list (same object the LLM appends to,
+    # never a copy, so handlers always see current context).
+    recent_context: List[Dict[str, Any]] = field(default_factory=list)
+    reinforce: Optional[Callable[..., Any]] = None
+    _reinforcement_value: float = 0.0
+    _reinforcement_reader: Optional[Callable[[], float]] = None
+
+    @property
+    def reinforcement(self) -> float:
+        """Current reinforcement score, read live when bound to an LLM."""
+        if self._reinforcement_reader is not None:
+            try:
+                return float(self._reinforcement_reader())
+            except Exception:
+                return self._reinforcement_value
+        return self._reinforcement_value
+
+    @reinforcement.setter
+    def reinforcement(self, value: float) -> None:
+        self._reinforcement_value = float(value)
+
+    @classmethod
+    def from_llm(cls, llm: Any) -> "ToolContext":
+        """Build a context from a LocalLLM (or a duck-typed stand-in)."""
+        if llm is None:
+            return cls()
+        recent = getattr(llm, "recent_context", None)
+        if recent is None:
+            recent = []
+        return cls(
+            memory=getattr(llm, "memory", None),
+            bridge=getattr(llm, "bridge", None),
+            person_tracker=getattr(llm, "person_tracker", None),
+            recent_context=recent,
+            reinforce=getattr(llm, "reinforce", None),
+            _reinforcement_reader=lambda: getattr(llm, "_reinforcement", 0.0),
+        )
+
 
 class ToolExecutor:
     """Executes tools called by the LLM and manages tool registry."""
-    
-    def __init__(self, llm_instance):
-        """Initialize with reference to LLM instance for context access."""
+
+    def __init__(self, llm_instance=None, *, context: Optional[ToolContext] = None):
+        """Initialize the registry.
+
+        ``llm_instance`` keeps the historical constructor working (LocalLLM
+        and existing tests pass the LLM); the registry immediately extracts
+        an explicit ToolContext from it and handlers only ever touch the
+        context, never the LLM object itself. Pass ``context=`` directly to
+        run tools with no LLM in scope (bridge ``tools/call``, tests).
+        """
         self.llm = llm_instance
+        self.context = context if context is not None else ToolContext.from_llm(llm_instance)
         self.tools: Dict[str, Tool] = {}
         self.execution_history: List[Dict[str, Any]] = []
         self.max_history = 100
-        
+
         # Register built-in tools
         self._register_builtin_tools()
         
@@ -427,41 +527,29 @@ class ToolExecutor:
         self.tools[tool.name] = tool
         logger.debug("Registered tool: %s (%s)", tool.name, tool.category)
     
+    def get_mcp_tools(self) -> List[Dict[str, Any]]:
+        """All registered tools as MCP-style definitions.
+
+        Same definitions as ``get_tools_schema`` / ``get_tools_prompt``,
+        in ``{"name", "description", "inputSchema"}`` shape. Served over
+        the bridge as ``tools/list``; local only.
+        """
+        return [tool.to_mcp_schema() for tool in self.tools.values()]
+
     def get_tools_schema(self) -> List[Dict[str, Any]]:
-        """Get OpenAI-compatible function calling schema."""
+        """Get OpenAI-compatible function calling schema.
+
+        Derived from the same MCP-style definitions as get_mcp_tools, so
+        the two schemas can never disagree about a tool's parameters.
+        """
         schema = []
         for tool in self.tools.values():
-            params = {}
-            required = []
-            
-            for param in tool.parameters:
-                param_def = {
-                    "type": param.type,
-                    "description": param.description
-                }
-                if param.enum:
-                    param_def["enum"] = param.enum
-                if param.default is not None:
-                    param_def["default"] = param.default
-                    
-                params[param.name] = param_def
-                if param.required:
-                    required.append(param.name)
-            
-            description = tool.description
-            if tool.return_description:
-                description = f"{description} Returns: {tool.return_description}"
-
+            mcp = tool.to_mcp_schema()
             schema.append({
-                "name": tool.name,
-                "description": f"[{tool.category.title()}] {description}",
-                "parameters": {
-                    "type": "object",
-                    "properties": params,
-                    "required": required
-                }
+                "name": mcp["name"],
+                "description": mcp["description"],
+                "parameters": mcp["inputSchema"],
             })
-        
         return schema
     
     def get_tools_prompt(self, concise: bool = True) -> str:
@@ -797,12 +885,12 @@ class ToolExecutor:
     # Tool implementation methods
     async def _search_memory(self, query: str, limit: int = 5, modality: str = "all") -> Dict[str, Any]:
         """Search memory for relevant past interactions using semantic search."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"found": 0, "results": [], "message": "Memory system not available"}
         
         try:
             # Try semantic search first if embeddings are available
-            semantic_results = await self.llm.memory.semantic_search(
+            semantic_results = await self.context.memory.semantic_search(
                 query,
                 limit=limit,
                 similarity_threshold=0.6
@@ -831,7 +919,7 @@ class ToolExecutor:
                 }
             
             # Fallback to basic text search if no embeddings
-            nodes, edges = await self.llm.memory.load_graph()
+            nodes, edges = await self.context.memory.load_graph()
             query_lower = query.lower()
             results = []
             
@@ -865,7 +953,7 @@ class ToolExecutor:
     
     async def _recall_recent_context(self, count: int = 5) -> Dict[str, Any]:
         """Recall recent context from LLM's short-term memory."""
-        recent = self.llm.recent_context[-count:] if len(self.llm.recent_context) > 0 else []
+        recent = self.context.recent_context[-count:] if len(self.context.recent_context) > 0 else []
 
         return {
             "count": len(recent),
@@ -883,7 +971,7 @@ class ToolExecutor:
                                         include_types: Optional[List[str]] = None) -> Dict[str, Any]:
         """Provide a summary of the most recent context entries."""
 
-        if not getattr(self.llm, "recent_context", None):
+        if not self.context.recent_context:
             return {
                 "success": True,
                 "summary": "No recent context captured yet.",
@@ -894,11 +982,11 @@ class ToolExecutor:
         if include_types:
             include_set = {str(item).lower() for item in include_types}
             filtered = [
-                ctx for ctx in self.llm.recent_context
+                ctx for ctx in self.context.recent_context
                 if str(ctx.get("type", "")).lower() in include_set
             ]
         else:
-            filtered = list(self.llm.recent_context)
+            filtered = list(self.context.recent_context)
 
         if not filtered:
             return {
@@ -935,7 +1023,7 @@ class ToolExecutor:
     async def _record_observation(self, observation: str, category: str, 
                                   importance: int = 5, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """Record an observation."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available"}
         
         tags_list = tags or []
@@ -943,7 +1031,7 @@ class ToolExecutor:
         tags_list.append(f"category_{category}")
         
         try:
-            await self.llm.memory.record_interaction(
+            await self.context.memory.record_interaction(
                 modality="observation",
                 stimulus=f"[{category.upper()}] {observation}",
                 response=f"Recorded observation (importance: {importance}/10)",
@@ -972,10 +1060,10 @@ class ToolExecutor:
         }
         
         # Record as observation
-        if self.llm.memory and self.llm.memory.enabled:
+        if self.context.memory and self.context.memory.enabled:
             try:
                 eval_text = f"Self-evaluation: Quality {quality_score}/10. Worked: {what_worked or 'N/A'}. Improve: {what_to_improve or 'N/A'}"
-                await self.llm.memory.record_interaction(
+                await self.context.memory.record_interaction(
                     modality="self_evaluation",
                     stimulus="Internal reflection",
                     response=eval_text,
@@ -985,20 +1073,20 @@ class ToolExecutor:
                 logger.error(f"Failed to record evaluation: {e}")
         
         # Apply reinforcement based on score
-        if self.llm:
+        if self.context.reinforce is not None:
             delta = (quality_score - 5) * 2  # Map 1-10 to -8 to +10
-            await self.llm.reinforce(delta)
+            await self.context.reinforce(delta)
         
         return evaluation
     
     async def _identify_pattern(self, pattern: str, occurrences: int = 1, 
                                confidence: float = 0.7) -> Dict[str, Any]:
         """Record an identified pattern."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available"}
         
         try:
-            await self.llm.memory.record_interaction(
+            await self.context.memory.record_interaction(
                 modality="pattern_recognition",
                 stimulus=f"Pattern identified: {pattern}",
                 response=f"Observed {occurrences} time(s)",
@@ -1024,7 +1112,7 @@ class ToolExecutor:
             text = context.lower()
         else:
             # Use recent context
-            recent = self.llm.recent_context[-3:] if len(self.llm.recent_context) > 0 else []
+            recent = self.context.recent_context[-3:] if len(self.context.recent_context) > 0 else []
             text = " ".join([ctx.get("content", "") for ctx in recent]).lower()
         
         # Use configured sentiment word lists
@@ -1085,7 +1173,7 @@ class ToolExecutor:
     async def _track_milestone(self, milestone: str, category: str, 
                               notes: Optional[str] = None) -> Dict[str, Any]:
         """Track a developmental milestone."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available"}
         
         try:
@@ -1093,7 +1181,7 @@ class ToolExecutor:
             if notes:
                 milestone_text += f" | Notes: {notes}"
             
-            await self.llm.memory.record_interaction(
+            await self.context.memory.record_interaction(
                 modality="milestone",
                 stimulus=milestone_text,
                 response="Milestone achieved",
@@ -1101,8 +1189,8 @@ class ToolExecutor:
             )
             
             # Also send event to UI
-            if self.llm.bridge:
-                await self.llm.bridge.post({
+            if self.context.bridge:
+                await self.context.bridge.post({
                     "type": "event",
                     "message": f"🎯 Milestone: {milestone}"
                 })
@@ -1123,13 +1211,13 @@ class ToolExecutor:
             "tools_available": len(self.tools),
             "tool_categories": list(set(tool.category for tool in self.tools.values())),
             "recent_tool_usage": len([h for h in self.execution_history[-20:] if h.get("success")]),
-            "reinforcement_score": self.llm._reinforcement if hasattr(self.llm, "_reinforcement") else 0.0
+            "reinforcement_score": self.context.reinforcement
         }
         
         # Get milestone count if memory available
-        if self.llm.memory and self.llm.memory.enabled:
+        if self.context.memory and self.context.memory.enabled:
             try:
-                nodes, _ = await self.llm.memory.load_graph()
+                nodes, _ = await self.context.memory.load_graph()
                 milestones = [n for n in nodes if "milestone" in (n.get("tags") or [])]
                 capabilities["milestones_achieved"] = len(milestones)
                 capabilities["recent_milestones"] = [
@@ -1234,7 +1322,7 @@ class ToolExecutor:
         relationship: Optional[str] = None
     ) -> Dict[str, Any]:
         """Remember a person and their details."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available"}
         
         # Validate inputs
@@ -1250,7 +1338,7 @@ class ToolExecutor:
             if context:
                 properties["context"] = context.strip()
             
-            entity_id = await self.llm.memory.store_entity(
+            entity_id = await self.context.memory.store_entity(
                 entity_type="person",
                 name=name,
                 description=context or f"Person: {name}",
@@ -1275,7 +1363,7 @@ class ToolExecutor:
         layout: Optional[str] = None
     ) -> Dict[str, Any]:
         """Remember a place or location."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available"}
         
         # Validate inputs
@@ -1289,7 +1377,7 @@ class ToolExecutor:
             if layout:
                 properties["layout"] = layout.strip()
             
-            entity_id = await self.llm.memory.store_entity(
+            entity_id = await self.context.memory.store_entity(
                 entity_type="place",
                 name=name,
                 description=description or f"Place: {name}",
@@ -1314,7 +1402,7 @@ class ToolExecutor:
         location: Optional[str] = None
     ) -> Dict[str, Any]:
         """Remember an object or item."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available"}
         
         # Validate inputs
@@ -1328,7 +1416,7 @@ class ToolExecutor:
             if location:
                 properties["location"] = location.strip()
             
-            entity_id = await self.llm.memory.store_entity(
+            entity_id = await self.context.memory.store_entity(
                 entity_type="object",
                 name=name,
                 description=description or f"Object: {name}",
@@ -1353,7 +1441,7 @@ class ToolExecutor:
         importance: int = 5
     ) -> Dict[str, Any]:
         """Remember a general fact, password, instruction, or important information."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available"}
         
         # Validate inputs
@@ -1386,7 +1474,7 @@ class ToolExecutor:
             }
             
             # Store as an entity so it appears in the Memory tab
-            entity_id = await self.llm.memory.store_entity(
+            entity_id = await self.context.memory.store_entity(
                 entity_type=category,  # Will show up categorized by type
                 name=name,
                 description=description,
@@ -1395,7 +1483,7 @@ class ToolExecutor:
             
             # Also record as interaction for context
             tags = [f"importance_{importance}", f"category_{category}", "fact"]
-            await self.llm.memory.record_interaction(
+            await self.context.memory.record_interaction(
                 modality="fact",
                 stimulus=f"[{category.upper()}] {content}",
                 response=f"Fact recorded (importance: {importance}/10)",
@@ -1421,7 +1509,7 @@ class ToolExecutor:
         context: Optional[str] = None
     ) -> Dict[str, Any]:
         """Learn a user preference."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available"}
         
         try:
@@ -1430,7 +1518,7 @@ class ToolExecutor:
                 "context": context or ""
             }
             
-            entity_id = await self.llm.memory.store_entity(
+            entity_id = await self.context.memory.store_entity(
                 entity_type="preference",
                 name=preference,
                 description=context or f"User preference: {preference}",
@@ -1456,19 +1544,19 @@ class ToolExecutor:
         entity_type: str = "all"
     ) -> Dict[str, Any]:
         """Recall entities using semantic search."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available", "results": []}
         
         try:
             # Use semantic search
-            results = await self.llm.memory.semantic_search(query, limit=10)
+            results = await self.context.memory.semantic_search(query, limit=10)
             
             # Filter by entity type if specified
             if entity_type != "all":
                 results = [r for r in results if entity_type in r.get("text", "").lower()]
             
             # Also get entities directly
-            entities = await self.llm.memory.get_entities(
+            entities = await self.context.memory.get_entities(
                 entity_type=entity_type if entity_type != "all" else None
             )
             
@@ -1511,12 +1599,12 @@ class ToolExecutor:
         limit: int = 20
     ) -> Dict[str, Any]:
         """Get learning timeline showing knowledge evolution."""
-        if not self.llm.memory or not self.llm.memory.enabled:
+        if not self.context.memory or not self.context.memory.enabled:
             return {"success": False, "message": "Memory system not available", "timeline": []}
         
         try:
             # Get timeline events
-            timeline = await self.llm.memory.get_learning_timeline(
+            timeline = await self.context.memory.get_learning_timeline(
                 entity_id=entity,
                 limit=limit
             )
@@ -1538,7 +1626,7 @@ class ToolExecutor:
         person_id: str = ""
     ) -> Dict[str, Any]:
         """Remember a person's name and associate it with their identity."""
-        person_tracker = getattr(self.llm, 'person_tracker', None)
+        person_tracker = self.context.person_tracker
         if not person_tracker:
             return {"success": False, "error": "Person tracking not available"}
         
@@ -1580,7 +1668,7 @@ class ToolExecutor:
         person_id: str = ""
     ) -> Dict[str, Any]:
         """Record distinguishing visual features of a person."""
-        person_tracker = getattr(self.llm, 'person_tracker', None)
+        person_tracker = self.context.person_tracker
         if not person_tracker:
             return {"success": False, "error": "Person tracking not available"}
         
@@ -1614,7 +1702,7 @@ class ToolExecutor:
         person_id: str = ""
     ) -> Dict[str, Any]:
         """Look up information about a person you've met."""
-        person_tracker = getattr(self.llm, 'person_tracker', None)
+        person_tracker = self.context.person_tracker
         if not person_tracker:
             return {"success": False, "error": "Person tracking not available"}
         
@@ -1632,7 +1720,7 @@ class ToolExecutor:
 
     async def _get_people_present(self) -> Dict[str, Any]:
         """Get information about all people currently visible."""
-        person_tracker = getattr(self.llm, 'person_tracker', None)
+        person_tracker = self.context.person_tracker
         if not person_tracker:
             return {"success": False, "error": "Person tracking not available", "people": []}
         
@@ -1657,7 +1745,7 @@ class ToolExecutor:
         name: str = ""
     ) -> Dict[str, Any]:
         """Record an observed behavior for a person."""
-        person_tracker = getattr(self.llm, 'person_tracker', None)
+        person_tracker = self.context.person_tracker
         if not person_tracker:
             return {"success": False, "error": "Person tracking not available"}
         
@@ -1690,7 +1778,7 @@ class ToolExecutor:
         name: str = ""
     ) -> Dict[str, Any]:
         """Add a personal note about someone."""
-        person_tracker = getattr(self.llm, 'person_tracker', None)
+        person_tracker = self.context.person_tracker
         if not person_tracker:
             return {"success": False, "error": "Person tracking not available"}
         
@@ -1717,4 +1805,4 @@ class ToolExecutor:
             return {"success": False, "error": str(e)}
 
 
-__all__ = ["Tool", "ToolParameter", "ToolExecutor"]
+__all__ = ["Tool", "ToolParameter", "ToolContext", "ToolExecutor"]

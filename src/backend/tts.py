@@ -27,6 +27,19 @@ class PiperTTS:
         self.auto_play = True  # NEW: Auto-play generated speech
         self.master_volume = 0.7
 
+        # Speak queue (finding 7): speak() enqueues and returns immediately;
+        # a single worker synthesizes + plays in order, so overlapping chat,
+        # vision, and autonomous replies no longer race Piper. Interrupt
+        # bumps the generation: the worker drops the in-flight item and
+        # everything queued behind it. Wav files are pruned to the newest
+        # _keep_wavs so piper_out stops growing forever.
+        self._speak_queue: asyncio.Queue = asyncio.Queue()
+        self._speak_worker_task: Optional[asyncio.Task] = None
+        self._current_proc = None
+        self._generation = 0
+        self._keep_wavs = 20
+        self.muted = False
+
         self._voices_root = Path(self.voice).parent
 
         # Validate executable path
@@ -101,6 +114,99 @@ class PiperTTS:
 
     async def stop(self):
         logger.info("PiperTTS stopping...")
+        await self.interrupt()
+        if self._speak_worker_task is not None:
+            self._speak_worker_task.cancel()
+            try:
+                await self._speak_worker_task
+            except asyncio.CancelledError:
+                pass
+            self._speak_worker_task = None
+
+    def set_muted(self, value: bool):
+        """Mute/unmute speech (gesture fist toggles this). Muted speech is
+        dropped, not queued for later — unmuting does not replay it."""
+        self.muted = bool(value)
+        logger.info(f"PiperTTS {'muted' if self.muted else 'unmuted'}")
+
+    def toggle_muted(self) -> bool:
+        """Flip the mute flag; returns the new muted state."""
+        self.set_muted(not self.muted)
+        return self.muted
+
+    def _ensure_worker(self):
+        if self._speak_worker_task is None or self._speak_worker_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            self._speak_worker_task = loop.create_task(self._speak_worker())
+
+    async def interrupt(self):
+        """Stop current playback and drop everything queued behind it.
+
+        Called when new chat/audio input arrives so the model never talks
+        over the user. Bumps the generation so the worker abandons the
+        in-flight item even if it is mid-synthesis.
+        """
+        self._generation += 1
+        drained = 0
+        while True:
+            try:
+                self._speak_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._speak_queue.task_done()
+            drained += 1
+        if self._current_proc is not None:
+            try:
+                self._current_proc.kill()
+            except Exception:
+                pass
+            self._current_proc = None
+        try:
+            import sounddevice as sd
+            await asyncio.to_thread(sd.stop)
+        except Exception:
+            pass
+        if drained:
+            logger.info("TTS interrupted, dropped %s queued item(s)", drained)
+
+    async def _speak_worker(self):
+        """Serial worker: synthesize + play queued speech in order."""
+        while True:
+            text = await self._speak_queue.get()
+            gen = self._generation
+            try:
+                if self.muted or not self.enabled:
+                    continue
+                wav = await self._synthesize(text)
+                if wav is None or gen != self._generation:
+                    continue
+                if self.auto_play:
+                    await self._play_audio(wav)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("TTS worker error: %s", exc, exc_info=True)
+            finally:
+                self._speak_queue.task_done()
+
+    def _prune_wav_files(self):
+        """Keep only the newest _keep_wavs files in piper_out."""
+        try:
+            wavs = sorted(
+                Path(self.out_dir).glob("speech_*.wav"),
+                key=lambda p: p.stat().st_mtime,
+            )
+            if len(wavs) > self._keep_wavs:
+                for stale in wavs[:-self._keep_wavs]:
+                    try:
+                        stale.unlink()
+                    except OSError as exc:
+                        logger.debug("Could not delete old wav %s: %s", stale, exc)
+        except Exception as exc:
+            logger.debug("Wav pruning failed: %s", exc)
 
     def set_enabled(self, value: bool):
         self.enabled = bool(value)
@@ -175,22 +281,36 @@ class PiperTTS:
             logger.error("Error playing audio: %s", exc)
 
     async def speak(self, text: str):
-        """Synthesize speech from text and play it."""
+        """Queue text for speech and return once queued.
+
+        Playback is serial through the worker, so callers never block on
+        synthesis and overlapping replies queue in order instead of
+        racing. Use interrupt() to cut speech when new input arrives.
+        """
         if not self.enabled:
             logger.warning("TTS is disabled, skipping speech")
             return
-        
+
         text = text.strip()
         if not text:
             return
-        
+
+        if self.muted:
+            logger.debug("TTS muted, skipping speech")
+            return
+
+        self._ensure_worker()
+        self._speak_queue.put_nowait(text)
+
+    async def _synthesize(self, text: str) -> Optional[str]:
+        """Synthesize one utterance with Piper; wav path or None on failure."""
         # Remove quotes and problematic characters
-        text = text.replace('"', "'").replace('\n', ' ')
-        
+        text = text.replace('"', "'").replace('\\n', ' ')
+
         # Generate unique filename
         ts = int(time.time() * 1000)
         wav = os.path.join(self.out_dir, f"speech_{ts}.wav")
-        
+
         # Build command - Piper reads from stdin
         cmd = [
             self.exe,
@@ -198,10 +318,10 @@ class PiperTTS:
             "-f", wav,
             "--sample-rate", str(self.rate)
         ]
-        
+
         try:
             logger.info(f"Speaking: {text[:100]}...")
-            
+
             # Run Piper process
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -209,43 +329,45 @@ class PiperTTS:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            
+            self._current_proc = proc
+
             # Send text to Piper via stdin
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=text.encode("utf-8")),
                 timeout=10.0
             )
-            
+            self._current_proc = None
+
             # Check result
             if proc.returncode == 0:
                 if os.path.exists(wav):
                     file_size = os.path.getsize(wav)
                     logger.info(f"Speech generated: {wav} ({file_size} bytes)")
                     await self.bridge.post(msg_event(f"🔊 Speech saved: {os.path.basename(wav)}"))
-
-                    # NEW: Auto-play the audio
-                    if self.auto_play:
-                        await self._play_audio(wav)
-                else:
-                    logger.error(f"Piper succeeded but wav file not found: {wav}")
+                    self._prune_wav_files()
+                    return wav
+                logger.error(f"Piper succeeded but wav file not found: {wav}")
             else:
                 error_msg = stderr.decode("utf-8", errors="ignore").strip()
                 logger.error(f"Piper failed with code {proc.returncode}: {error_msg}")
                 await self.bridge.post(msg_event(f"TTS error: {error_msg[:100]}"))
-                
+
         except asyncio.TimeoutError:
             logger.error("Piper process timed out")
             try:
                 proc.kill()
-            except:
+            except Exception:
                 pass
+            self._current_proc = None
             await self.bridge.post(msg_event("TTS error: Process timed out"))
-            
+
         except FileNotFoundError:
             logger.error(f"Piper executable not found: {self.exe}")
             await self.bridge.post(msg_event("TTS error: Piper not found"))
             self.enabled = False
-            
+
         except Exception as e:
             logger.error(f"TTS error: {e}", exc_info=True)
             await self.bridge.post(msg_event(f"TTS error: {str(e)}"))
+
+        return None

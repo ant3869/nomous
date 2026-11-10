@@ -173,8 +173,14 @@ class Server:
         if key == "motion_sensitivity" and self.cam:
             self.cam.motion_threshold = int(value)
             return
-        if key == "vision_cooldown" and self.cam:
-            self.cam.analysis_cooldown = float(value)
+        if key == "vision_cooldown":
+            # Single source of truth (finding 5): vision.vision_cooldown.
+            # The live param updates both readers — the camera loop's
+            # analysis cooldown and the LLM's process_vision cooldown.
+            if self.cam:
+                self.cam.analysis_cooldown = float(value)
+            if self.llm:
+                self.llm.vision_cooldown = int(float(value))
             return
         if key == "thought_cooldown" and self.llm:
             self.llm.thought_cooldown = float(value)
@@ -466,6 +472,34 @@ class Server:
                             await self.llm.reinforce(delta)
                         else:
                             logger.warning("LLM not initialized, ignoring reinforce")
+
+                    elif msg_type == "tools/list":
+                        # MCP-style registry listing, local only: the
+                        # dashboard (or any local client) can enumerate the
+                        # same tool definitions the model calls through.
+                        if self.llm:
+                            await self.bridge.post({
+                                "type": "tools_list",
+                                "tools": self.llm.tools.get_mcp_tools(),
+                            })
+                        else:
+                            logger.warning("LLM not initialized, ignoring tools/list")
+
+                    elif msg_type == "tools/call":
+                        # Direct tool invocation through the same validated
+                        # registry/dispatch the model uses. Local only.
+                        if self.llm:
+                            tool_name = str(msg.get("tool", ""))
+                            args = msg.get("args") or {}
+                            if not isinstance(args, dict):
+                                args = {}
+                            execution = await self.llm.tools.execute_tool(tool_name, args)
+                            await self.bridge.post({
+                                "type": "tool_result",
+                                **execution,
+                            })
+                        else:
+                            logger.warning("LLM not initialized, ignoring tools/call")
 
                     elif msg_type == "memory_update":
                         if not self.memory:

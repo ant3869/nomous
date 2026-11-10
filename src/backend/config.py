@@ -62,6 +62,11 @@ DEFAULT: Dict[str, Any] = {
         "frame_memory_items": 5,
         "frame_memory_max_tokens": 512,
         "temperature": 0.5,
+        # Single source of truth for the vision cadence (finding 5): the
+        # LLM's process_vision cooldown and the camera loop's analysis
+        # cooldown both read vision.vision_cooldown. There is no
+        # autonomous.vision_cooldown or ui.vision_cooldown anymore.
+        "vision_cooldown": 15,
     },
     "audio": {
         "sample_rate": 16000,
@@ -78,6 +83,8 @@ DEFAULT: Dict[str, Any] = {
         "motion_sensitivity": 30,
         "tts_enabled": True,
         "vision_enabled": True,
+        "gesture_enabled": True,
+        "gesture_cooldown": 3,
     },
 }
 
