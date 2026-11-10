@@ -6,10 +6,7 @@ import os
 import time
 import asyncio
 import logging
-import platform
 import shutil
-import wave
-import audioop
 from pathlib import Path
 from typing import List, Optional
 from .utils import msg_event
@@ -157,87 +154,25 @@ class PiperTTS:
     async def set_voice_path(self, path: str):
         await self.set_voice(path)
 
-    def _get_play_command(self, wav_path: str) -> Optional[List[str]]:
-        """Determine the best available playback command for the current OS."""
-
-        system = platform.system()
-
-        if system == "Windows":
-            powershell = shutil.which("powershell") or shutil.which("powershell.exe")
-            if powershell:
-                return [
-                    powershell,
-                    "-c",
-                    f"(New-Object Media.SoundPlayer '{wav_path}').PlaySync()"
-                ]
-            logger.debug("PowerShell not available for audio playback")
-            return None
-
-        if system == "Darwin":  # macOS
-            afplay = shutil.which("afplay")
-            if afplay:
-                return [afplay, wav_path]
-            logger.debug("afplay command not available on macOS")
-            return None
-
-        # Linux or other Unix-like systems
-        for candidate in ("paplay", "aplay", "ffplay"):
-            path = shutil.which(candidate)
-            if path:
-                if candidate == "ffplay":
-                    return [path, "-nodisp", "-autoexit", wav_path]
-                return [path, wav_path]
-
-        logger.debug("No suitable audio playback command found on this system")
-        return None
-
     async def _play_audio(self, wav_path: str):
-        """Play audio file using a platform-appropriate command."""
-        cmd = self._get_play_command(wav_path)
-
-        if not cmd:
-            logger.warning("Audio playback skipped: no supported player found")
-            return
-
-        logger.debug("Using playback command: %s", cmd)
-
+        """Play a WAV file through sounddevice (cross-platform, no shelling out)."""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-
-            await asyncio.wait_for(proc.wait(), timeout=30.0)
-            logger.info(f"Audio playback completed: {os.path.basename(wav_path)}")
-
-        except asyncio.TimeoutError:
-            logger.warning("Audio playback timed out")
-            try:
-                proc.kill()
-            except Exception as e:
-                logger.error(f"Failed to kill audio playback process: {e}")
-        except FileNotFoundError:
-            logger.warning("Audio playback command disappeared during execution")
-        except Exception as e:
-            logger.error(f"Error playing audio: {e}")
-
-    def _apply_volume(self, wav_path: str):
-        if not os.path.exists(wav_path):
+            import sounddevice as sd
+            import soundfile as sf
+        except ImportError:
+            logger.warning("sounddevice/soundfile missing; audio playback skipped")
             return
-
-        if abs(self.master_volume - 1.0) < 0.01:
+        try:
+            data, samplerate = await asyncio.to_thread(sf.read, wav_path, dtype="float32")
+        except Exception as exc:
+            logger.error("Could not read audio for playback: %s", exc)
             return
-
-        with wave.open(wav_path, "rb") as src:
-            params = src.getparams()
-            frames = src.readframes(src.getnframes())
-
-        scaled = audioop.mul(frames, params.sampwidth, self.master_volume)
-
-        with wave.open(wav_path, "wb") as dst:
-            dst.setparams(params)
-            dst.writeframes(scaled)
+        try:
+            await asyncio.to_thread(sd.play, data * self.master_volume, samplerate)
+            await asyncio.to_thread(sd.wait)
+            logger.info("Audio playback completed: %s", os.path.basename(wav_path))
+        except Exception as exc:
+            logger.error("Error playing audio: %s", exc)
 
     async def speak(self, text: str):
         """Synthesize speech from text and play it."""
@@ -284,7 +219,6 @@ class PiperTTS:
             # Check result
             if proc.returncode == 0:
                 if os.path.exists(wav):
-                    self._apply_volume(wav)
                     file_size = os.path.getsize(wav)
                     logger.info(f"Speech generated: {wav} ({file_size} bytes)")
                     await self.bridge.post(msg_event(f"🔊 Speech saved: {os.path.basename(wav)}"))

@@ -352,7 +352,7 @@ const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   cameraExposure: 45,
   cameraBrightness: 55,
   llmModelPath: "/models/llm/main.gguf",
-  visionModelPath: "/models/vision/runtime.bin",
+  visionModelPath: "H:/Models/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
   audioModelPath: "/models/audio/piper.onnx",
   sttModelPath: "/models/stt/whisper-small",
   llmTemperature: 0.8,
@@ -3171,7 +3171,7 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
         conditions: ["Latency < 150ms", "Short prompts"],
         models: {
           llm: "/models/llm/main-q4_0.gguf",
-          vision: "/models/vision/runtime-lite.bin",
+          vision: "H:/Models/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
           audio: "/models/audio/piper-fast.onnx",
           stt: "/models/stt/whisper-small",
         },
@@ -3183,7 +3183,7 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
         conditions: ["Adaptive context", "Standard workloads"],
         models: {
           llm: "/models/llm/main.gguf",
-          vision: "/models/vision/runtime.bin",
+          vision: "H:/Models/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
           audio: "/models/audio/piper.onnx",
           stt: "/models/stt/whisper-small",
         },
@@ -3195,7 +3195,7 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
         conditions: ["Long-form tasks", "Detailed perception"],
         models: {
           llm: "/models/llm/main-q6_k.gguf",
-          vision: "/models/vision/runtime-highres.bin",
+          vision: "H:/Models/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
           audio: "/models/audio/piper-high.onnx",
           stt: "/models/stt/whisper-large-v3",
         },
@@ -3751,7 +3751,7 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
                               value={state.settings.visionModelPath}
                               onChange={val => updateSettings({ visionModelPath: val })}
                               onCommit={createModelCommitHandler("visionModelPath", "vision_model_path", "Switching vision model")}
-                              accept={[".bin", ".onnx"]}
+                              accept={[".gguf"]}
                             />
                           </label>
                           <label className="flex flex-col gap-2">

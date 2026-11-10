@@ -145,8 +145,10 @@ class Server:
         if key == "camera_brightness" and self.cam:
             self.cam.set_brightness(int(value))
             return
-        if key == "vision_model_path" and self.cam:
-            self.cam.set_vision_model_path(str(value))
+        if key == "vision_model_path" and self.llm:
+            await self.llm.reload_vision_model(str(value))
+            if self.cam:
+                self.cam.set_vision_model_path(str(value))
             return
         if key == "llm_temperature" and self.llm:
             self.llm.update_sampling(temperature=float(value))
