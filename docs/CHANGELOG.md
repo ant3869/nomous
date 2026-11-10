@@ -36,6 +36,9 @@
   similarity instead of word overlap on heuristic sentences.【F:src/backend/llm.py】
 - Vision inference runs in a worker thread (`asyncio.to_thread`) so image
   prefill never blocks the WebSocket event loop.【F:src/backend/llm.py】
+- `process_vision` analyzes the frame first and suppresses on the VLM's
+  observation — the old text-description speech gates no longer decide
+  whether a stable scene ever reaches the vision model.【F:src/backend/llm.py】
 - A generation cut off inside `<think>` no longer falls back to speaking the
   raw reasoning block: the fallback now uses the think-stripped text, and a
   reasoning-only generation stays silent.【F:src/backend/llm.py】

@@ -1553,6 +1553,63 @@ class LocalLLM:
         finally:
             self._processing = False
 
+    async def _get_person_context(self) -> str:
+        """One-line summary of who the person tracker currently sees."""
+        if not self.person_tracker:
+            return ""
+        try:
+            present = await self.person_tracker.get_all_present()
+        except Exception as exc:
+            logger.debug("Could not get person context: %s", exc)
+            return ""
+        if not present:
+            return ""
+        person_parts = []
+        for p in present:
+            name = p.get("name") or p.get("display_name", "someone")
+            familiarity = p.get("familiarity", 0)
+            if familiarity > 0.5:
+                person_parts.append(f"{name} (familiar)")
+            elif familiarity > 0.2:
+                person_parts.append(f"{name} (seen before)")
+            else:
+                person_parts.append(name)
+        person_context = f"\nPeople present: {', '.join(person_parts)}"
+        for p in present:
+            if p.get("should_ask_name"):
+                person_context += f"\n(Consider asking {p.get('display_name', 'this person')} their name)"
+        return person_context
+
+    async def _handle_vision_response(self, response: str, description: str, normalized_description: str, now: float) -> bool:
+        """Suppress or speak a vision observation; True when spoken."""
+        # VLM descriptions vary; compare to the last spoken line by meaning,
+        # not word overlap, and stay quiet on near-duplicates.
+        if self._last_spoken_response:
+            similarity = self._embedding_similarity(response, self._last_spoken_response)
+            if similarity is not None and similarity >= 0.85:
+                logger.info("Vision response suppressed (duplicate): %s", response[:80])
+                self._add_context("vision_quiet", response)
+                return False
+        # Filter out generic responses
+        generic_phrases = [
+            "i see one person", "i see 1 person",
+            "in a dark environment", "in a moderately lit",
+            "the scene looks", "the space looks",
+        ]
+        response_lower = response.lower()
+        if any(phrase in response_lower for phrase in generic_phrases) and len(response) < 50:
+            logger.info("Vision response suppressed (generic): %s", response)
+            self._add_context("vision_quiet", response)
+            return False
+        self._add_context("assistant", response)
+        await self.bridge.post(msg_speak(response))
+        await self.tts.speak(response)
+        self._last_spoken_vision = (normalized_description, now)
+        self._last_spoken_response = response
+        if self.memory:
+            await self.memory.record_interaction("vision", description, response, tags=["vision"])
+        return True
+
     async def process_vision(self, description: str, image_data_url: Optional[str] = None):
         """Process vision input (what the camera sees)."""
         now = time.time()
@@ -1569,7 +1626,24 @@ class LocalLLM:
             
             # Normalize for comparison
             normalized_description = description.strip().lower()
-            
+
+            # Image path first: analyze the frame, then suppress on the
+            # observation itself. The text gates below must not decide
+            # whether the vision model ever sees a stable scene.
+            if image_data_url and self._vision_available:
+                person_context = await self._get_person_context()
+                response = await self._generate_vision(
+                    image_data_url,
+                    f"Look at this frame. {description}{person_context}\n\n"
+                    "Describe what you see in one natural sentence. If you recognize "
+                    "someone, address them by name. If nothing new is happening, say so briefly.",
+                    max_tokens=60,
+                )
+                if response:
+                    await self._handle_vision_response(response, description, normalized_description, now)
+                    return
+                # The VLM said nothing: fall through to the text path below.
+
             # Check if this is essentially the same observation as before
             if self._last_spoken_vision:
                 last_text, last_time = self._last_spoken_vision
@@ -1622,30 +1696,8 @@ class LocalLLM:
             self._add_context("vision", description)
             
             # Get person context if available
-            person_context = ""
-            if self.person_tracker:
-                try:
-                    present = await self.person_tracker.get_all_present()
-                    if present:
-                        person_parts = []
-                        for p in present:
-                            name = p.get("name") or p.get("display_name", "someone")
-                            familiarity = p.get("familiarity", 0)
-                            if familiarity > 0.5:
-                                person_parts.append(f"{name} (familiar)")
-                            elif familiarity > 0.2:
-                                person_parts.append(f"{name} (seen before)")
-                            else:
-                                person_parts.append(name)
-                        person_context = f"\nPeople present: {', '.join(person_parts)}"
-                        
-                        # Check if we should suggest asking for a name
-                        for p in present:
-                            if p.get("should_ask_name"):
-                                person_context += f"\n(Consider asking {p.get('display_name', 'this person')} their name)"
-                except Exception as e:
-                    logger.debug(f"Could not get person context: {e}")
-            
+            person_context = await self._get_person_context()
+
             # Build a prompt that encourages novel observations
             vision_prompt = (
                 f"Visual observation: {description}{person_context}\n\n"
@@ -1655,49 +1707,12 @@ class LocalLLM:
                 "Don't just repeat 'I see X person in Y environment' - be more insightful or stay silent."
             )
 
-            response = ""
-            if image_data_url and self._vision_available:
-                response = await self._generate_vision(
-                    image_data_url,
-                    f"Look at this frame. {description}{person_context}\n\n"
-                    "Describe what you see in one natural sentence. If you recognize "
-                    "someone, address them by name. If nothing new is happening, say so briefly.",
-                    max_tokens=60,
-                )
-            if not response:
-                prompt = self._build_prompt(vision_prompt, "vision")
-                response = await self._generate(prompt, max_tokens=60)
+            # Text fallback (no frame, no vision model, or the VLM said nothing).
+            prompt = self._build_prompt(vision_prompt, "vision")
+            response = await self._generate(prompt, max_tokens=60)
 
             if response:
-                # VLM descriptions vary; compare to the last spoken line by meaning,
-                # not word overlap, and stay quiet on near-duplicates.
-                if self._last_spoken_response:
-                    similarity = self._embedding_similarity(response, self._last_spoken_response)
-                    if similarity is not None and similarity >= 0.85:
-                        logger.info("Vision response suppressed (duplicate): %s", response[:80])
-                        self._add_context("vision_quiet", description)
-                        return
-                # Filter out generic responses
-                generic_phrases = [
-                    "i see one person", "i see 1 person", 
-                    "in a dark environment", "in a moderately lit",
-                    "the scene looks", "the space looks"
-                ]
-                response_lower = response.lower()
-                is_generic = any(phrase in response_lower for phrase in generic_phrases)
-                
-                if is_generic and len(response) < 50:
-                    # Don't speak generic responses
-                    logger.info(f"Vision response suppressed (generic): {response}")
-                    return
-                
-                self._add_context("assistant", response)
-                await self.bridge.post(msg_speak(response))
-                await self.tts.speak(response)
-                self._last_spoken_vision = (normalized_description, now)
-                self._last_spoken_response = response
-                if self.memory:
-                    await self.memory.record_interaction("vision", description, response, tags=["vision"])
+                await self._handle_vision_response(response, description, normalized_description, now)
                 
         finally:
             self._processing = False
