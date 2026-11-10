@@ -13,6 +13,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# ...but the frontend's own lib/ holds source (shadcn cn helper), not a venv.
+!src/frontend/lib/
 parts/
 sdist/
 var/
