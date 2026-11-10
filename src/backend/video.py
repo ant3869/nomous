@@ -7,12 +7,12 @@ import threading
 import time
 import asyncio
 import logging
-import urllib.request
 from pathlib import Path
 from queue import SimpleQueue, Empty
 from typing import Optional
 from .utils import to_data_url, msg_event, msg_image
 from .person_tracker import PersonTracker
+from .mediapipe_assets import MEDIAPIPE_MODELS, resolve_model  # noqa: F401  (MEDIAPIPE_MODELS re-exported)
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +43,9 @@ except (ImportError, AttributeError):
     MEDIAPIPE_AVAILABLE = False
     logger.warning("MediaPipe not available - install with: pip install mediapipe")
 
-# Task model files, auto-downloaded on first run into modules/models/mediapipe/.
-MEDIAPIPE_MODELS = {
-    "gesture_recognizer.task": "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
-    "blaze_face_short_range.tflite": "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
-}
+# Task model files live vendored in assets/mediapipe/ (manifest + checksums
+# in src/backend/mediapipe_assets.py, with a pinned-URL download fallback
+# into modules/models/mediapipe/).
 
 # GestureRecognizer category -> Nomous gesture label.
 GESTURE_LABELS = {
@@ -58,13 +56,6 @@ GESTURE_LABELS = {
     "Closed_Fist": "closed_fist",
     "ILoveYou": "rock_on",
 }
-
-
-def _download_file(url: str, target: Path) -> None:
-    """Download ``url`` to ``target`` atomically."""
-    tmp_target = target.with_suffix(target.suffix + ".tmp")
-    urllib.request.urlretrieve(url, tmp_target)
-    tmp_target.replace(target)
 
 
 class CameraLoop:
@@ -145,38 +136,37 @@ class CameraLoop:
             logger.error(f"Failed to queue camera command {name}: {e}")
 
     def _init_mediapipe_tasks(self):
-        """Download Task models on first run and build the gesture/face detectors."""
-        model_dir = Path(__file__).resolve().parents[2] / "modules" / "models" / "mediapipe"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        wanted = dict(MEDIAPIPE_MODELS)
-        if not self.gesture_enabled:
-            wanted.pop("gesture_recognizer.task", None)
-        paths = {}
-        for filename, url in wanted.items():
-            target = model_dir / filename
-            if not target.exists():
-                try:
-                    logger.info("Downloading MediaPipe model %s ...", filename)
-                    _download_file(url, target)
-                except Exception as exc:
-                    logger.warning("Could not download MediaPipe model %s: %s", filename, exc)
-                    return
-            paths[filename] = target
+        """Build the gesture/face detectors from verified model files.
+
+        Models resolve from the vendored assets/mediapipe/ copies first
+        (checksum-checked against the manifest), then the legacy download
+        dir, then a pinned-URL download. A missing model disables only its
+        own detector instead of taking the other one down with it.
+        """
+        gesture_path = None
+        if self.gesture_enabled:
+            gesture_path = resolve_model("gesture_recognizer.task")
+            if gesture_path is None:
+                logger.warning("Gesture recognizer model unavailable; gesture detection off")
+        face_path = resolve_model("blaze_face_short_range.tflite")
+        if face_path is None:
+            logger.warning("Face detector model unavailable; face detection off")
         try:
-            if self.gesture_enabled:
+            if gesture_path is not None:
                 self._gesture_recognizer = mp_vision.GestureRecognizer.create_from_options(
                     mp_vision.GestureRecognizerOptions(
-                        base_options=MpBaseOptions(model_asset_path=str(paths["gesture_recognizer.task"])),
+                        base_options=MpBaseOptions(model_asset_path=str(gesture_path)),
                         running_mode=mp_vision.RunningMode.IMAGE,
                         num_hands=2,
                     )
                 )
-            self._face_detector = mp_vision.FaceDetector.create_from_options(
-                mp_vision.FaceDetectorOptions(
-                    base_options=MpBaseOptions(model_asset_path=str(paths["blaze_face_short_range.tflite"])),
-                    running_mode=mp_vision.RunningMode.IMAGE,
+            if face_path is not None:
+                self._face_detector = mp_vision.FaceDetector.create_from_options(
+                    mp_vision.FaceDetectorOptions(
+                        base_options=MpBaseOptions(model_asset_path=str(face_path)),
+                        running_mode=mp_vision.RunningMode.IMAGE,
+                    )
                 )
-            )
             logger.info("MediaPipe Tasks detectors initialized")
         except Exception as exc:
             logger.warning("MediaPipe Tasks init failed: %s", exc)
