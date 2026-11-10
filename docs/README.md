@@ -63,6 +63,7 @@ vision:
   thinking_max_tokens: 128
   frame_memory_items: 5
   frame_memory_max_tokens: 512
+  vision_cooldown: 15
 
 camera:
   backend: dshow
@@ -74,7 +75,8 @@ camera:
   frame_skip: 2
 
 autonomous:
-  vision_cooldown: 15
+  enabled: true
+  thought_cooldown: 30
 
 ui:
   snapshot_debounce: 4

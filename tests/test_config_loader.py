@@ -66,3 +66,28 @@ def test_loader_rejects_non_mapping_paths(tmp_path: Path, monkeypatch: pytest.Mo
     loader = config_module.ConfigLoader()
     with pytest.raises(config_module.ConfigError):
         loader.load(path)
+
+
+def test_vision_cooldown_single_source_of_truth() -> None:
+    """Finding 5: vision.vision_cooldown is the one cadence knob.
+
+    The dead copies (autonomous.vision_cooldown, ui.vision_cooldown, the
+    unused vision.interesting_keywords) must not come back.
+    """
+    assert config_module.DEFAULT["vision"]["vision_cooldown"] == 15
+    assert "interesting_keywords" not in config_module.DEFAULT["vision"]
+    assert "vision_cooldown" not in config_module.DEFAULT.get("autonomous", {})
+    assert "vision_cooldown" not in config_module.DEFAULT.get("ui", {})
+    assert config_module.DEFAULT["ui"]["gesture_enabled"] is True
+
+
+def test_repo_config_yaml_has_single_vision_cooldown() -> None:
+    """The shipped config.yaml keeps the same single-source shape."""
+    loader = config_module.ConfigLoader()
+    config = loader.load(PROJECT_ROOT / "config.yaml")
+
+    assert config["vision"]["vision_cooldown"] == 15
+    assert "interesting_keywords" not in config["vision"]
+    assert "vision_cooldown" not in config.get("autonomous", {})
+    assert "motion_sensitivity" not in config["vision"]
+    assert "snapshot_debounce" not in config["vision"]

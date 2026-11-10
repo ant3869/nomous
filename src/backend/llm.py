@@ -164,7 +164,7 @@ class LocalLLM:
         self.autonomous_mode = True
         self.last_vision_analysis = 0
         self._last_spoken_vision: tuple[str, float] | None = None
-        self.vision_cooldown = 15  # seconds between autonomous vision checks
+        self.vision_cooldown = int(vision_cfg.get("vision_cooldown", 15))  # seconds between autonomous vision checks
         self.last_thought = 0
         self.thought_cooldown = 30  # seconds between unprompted thoughts
 
@@ -176,9 +176,17 @@ class LocalLLM:
         # Person tracking (set by camera loop)
         self.person_tracker = None
 
-        # Processing lock
-        self._processing = False
-        self._lock = asyncio.Lock()
+        # Processing lanes (finding 6): chat/audio, vision, and autonomous
+        # run in separate lanes instead of one shared _processing flag, so a
+        # vision comment queues behind chat instead of being dropped.
+        # _lane_lock guards the check-and-set of lane flags; _model_lock
+        # serializes actual model inference (the llama instance is single).
+        self._lanes: dict[str, bool] = {"chat": False, "vision": False, "autonomous": False}
+        self._lane_lock = asyncio.Lock()
+        self._model_lock = asyncio.Lock()
+        self._vision_queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+        self._vision_worker_task: Optional[asyncio.Task] = None
+        self._vision_queued_keys: set[str] = set()
         
         # Input classification patterns for adaptive behavior
         self._greeting_patterns = {
@@ -732,6 +740,15 @@ class LocalLLM:
 
     async def stop(self):
         logger.info("LLM stopping...")
+        if self._vision_worker_task is not None:
+            self._vision_worker_task.cancel()
+            try:
+                await self._vision_worker_task
+            except asyncio.CancelledError:
+                pass
+            self._vision_worker_task = None
+        if getattr(self, "tts", None) is not None and hasattr(self.tts, "stop"):
+            await self.tts.stop()
 
     def update_sampling(self, temperature: float | None = None, max_tokens: int | None = None):
         if temperature is not None:
@@ -767,8 +784,8 @@ class LocalLLM:
         if not model_path:
             raise ValueError("Model path cannot be empty")
 
-        async with self._lock:
-            if self._processing:
+        async with self._lane_lock:
+            if self._any_lane_busy():
                 raise RuntimeError("Cannot reload LLM while processing")
 
             # Snapshot the switch state: a failed load keeps the old model,
@@ -1214,50 +1231,54 @@ class LocalLLM:
             stop = ["Person:", "You:", "\n\n\n", "###", "User:"]
             if self.prompt_style == "chatml":
                 stop.append("<|im_end|>")
-            stream = self.model(
-                prompt,
-                max_tokens=stream_limit,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                stream=True,
-                stop=stop,
-                repeat_penalty=1.1
-            )
+            # The llama instance is single: serialize inference across
+            # lanes (chat/vision/autonomous) so two generations can never
+            # overlap inside the model.
+            async with self._model_lock:
+                stream = self.model(
+                    prompt,
+                    max_tokens=stream_limit,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    stream=True,
+                    stop=stop,
+                    repeat_penalty=1.1
+                )
 
-            tokens = []
-            total_tokens = 0
+                tokens = []
+                total_tokens = 0
 
-            for chunk in stream:
-                if chunk and "choices" in chunk and len(chunk["choices"]) > 0:
-                    choice = chunk["choices"][0]
-                    text = choice.get("text", "")
+                for chunk in stream:
+                    if chunk and "choices" in chunk and len(chunk["choices"]) > 0:
+                        choice = chunk["choices"][0]
+                        text = choice.get("text", "")
 
-                    if choice.get("finish_reason") == "length":
-                        logger.warning("Hit max token limit, response may be truncated")
+                        if choice.get("finish_reason") == "length":
+                            logger.warning("Hit max token limit, response may be truncated")
 
-                    if text:
-                        tokens.append(text)
-                        total_tokens += max(1, len(text) // 4)
-                        await self.bridge.post(msg_token(total_tokens))
+                        if text:
+                            tokens.append(text)
+                            total_tokens += max(1, len(text) // 4)
+                            await self.bridge.post(msg_token(total_tokens))
 
-                        # Show progress without exposing raw generation
-                        if total_tokens % 10 == 0:  # Update every 10 tokens
-                            await self.bridge.post({
-                                "type": "thought",
-                                "text": f"Processing... ({total_tokens} tokens)",
-                            })
+                            # Show progress without exposing raw generation
+                            if total_tokens % 10 == 0:  # Update every 10 tokens
+                                await self.bridge.post({
+                                    "type": "thought",
+                                    "text": f"Processing... ({total_tokens} tokens)",
+                                })
 
-                        if total_tokens >= failsafe_limit:
-                            logger.warning(
-                                "Reached failsafe token limit (%s tokens), stopping generation",
-                                failsafe_limit
-                            )
-                            await self.bridge.post(
-                                msg_event(
-                                    f"generation stopped after {failsafe_limit} tokens to prevent runaway output"
+                            if total_tokens >= failsafe_limit:
+                                logger.warning(
+                                    "Reached failsafe token limit (%s tokens), stopping generation",
+                                    failsafe_limit
                                 )
-                            )
-                            break
+                                await self.bridge.post(
+                                    msg_event(
+                                        f"generation stopped after {failsafe_limit} tokens to prevent runaway output"
+                                    )
+                                )
+                                break
 
             # Build full response from tokens
             raw_response = "".join(tokens).strip()
@@ -1547,7 +1568,8 @@ class LocalLLM:
             ]},
         ]
         try:
-            raw = await asyncio.to_thread(self._run_vision_completion, messages, output_tokens)
+            async with self._model_lock:
+                raw = await asyncio.to_thread(self._run_vision_completion, messages, output_tokens)
             if self.vision_show_thinking:
                 reasoning, _ = self._extract_think_blocks(raw)
                 await self._post_reasoning(reasoning)
@@ -1561,14 +1583,43 @@ class LocalLLM:
             return ""
         return ""
 
+    def _lane_busy(self, lane: str) -> bool:
+        """True when the named processing lane is currently held."""
+        return self._lanes.get(lane, False)
+
+    def _any_lane_busy(self) -> bool:
+        """True when any processing lane is held (e.g. for model reload)."""
+        return any(self._lanes.values())
+
+    async def _acquire_lane(self, lane: str) -> bool:
+        """Take a processing lane; False when it is already busy."""
+        async with self._lane_lock:
+            if self._lanes.get(lane, False):
+                return False
+            self._lanes[lane] = True
+            return True
+
+    def _release_lane(self, lane: str) -> None:
+        """Release a processing lane."""
+        self._lanes[lane] = False
+
+    async def _interrupt_speech(self) -> None:
+        """Cut in-flight TTS: new chat/audio input wins over old speech."""
+        interrupt = getattr(getattr(self, "tts", None), "interrupt", None)
+        if interrupt is not None:
+            try:
+                await interrupt()
+            except Exception as exc:
+                logger.debug("TTS interrupt failed: %s", exc)
+
     async def chat(self, user_text: str):
         """Process user text input (manual or from UI)."""
-        async with self._lock:
-            if self._processing:
-                logger.warning("Already processing, skipping")
-                return
-            self._processing = True
-        
+        if not await self._acquire_lane("chat"):
+            logger.warning("Already processing, skipping")
+            return
+        # New input wins: cut any speech still playing from a previous reply.
+        await self._interrupt_speech()
+
         try:
             logger.info(f"Chat input: {user_text[:100]}")
             self._add_context("user_text", user_text)
@@ -1629,18 +1680,17 @@ class LocalLLM:
                     except Exception as e:
                         logger.debug(f"Could not bind chat conversation: {e}")
         finally:
-            self._processing = False
+            self._release_lane("chat")
 
     async def process_audio(self, transcribed_text: str):
         """Process speech-to-text input (autonomous trigger)."""
         if not transcribed_text.strip():
             return
         
-        async with self._lock:
-            if self._processing:
-                logger.warning("Already processing, skipping audio")
-                return
-            self._processing = True
+        if not await self._acquire_lane("chat"):
+            logger.warning("Already processing, skipping audio")
+            return
+        await self._interrupt_speech()
         
         try:
             logger.info(f"Processing audio: {transcribed_text}")
@@ -1699,7 +1749,7 @@ class LocalLLM:
                         logger.debug(f"Could not bind conversation: {e}")
                 
         finally:
-            self._processing = False
+            self._release_lane("chat")
 
     async def _get_person_context(self) -> str:
         """One-line summary of who the person tracker currently sees."""
@@ -1764,12 +1814,12 @@ class LocalLLM:
         return True
 
     async def process_vision(self, description: str, image_data_url: Optional[str] = None):
-        """Process vision input (what the camera sees).
+        """Queue a vision observation for analysis (see _process_vision_impl).
 
-        This is the think-or-speak decision point for vision: the frame is
-        analyzed, reasoning goes to the thoughts panel, and the observation
-        is spoken only if it passes suppression. A future idle loop can
-        drive the same decision on a timer with the stored last frame.
+        Vision comments queue behind chat instead of dropping: the worker
+        waits for the chat lane to clear, then runs the oldest queued frame.
+        Near-duplicate descriptions already queued are dropped, and a full
+        queue drops its oldest frame so the freshest frame always wins.
         """
         now = time.time()
         if description:
@@ -1778,114 +1828,164 @@ class LocalLLM:
             self._last_frame_image_url = image_data_url
         if now - self.last_vision_analysis < self.vision_cooldown:
             return  # Skip if too soon
-        
-        async with self._lock:
-            if self._processing:
+
+        key = (description or "").strip().lower()[:120]
+        if key and key in self._vision_queued_keys:
+            logger.debug("Vision (dropped duplicate queued): %s", description[:80])
+            return
+        if self._vision_queue.full():
+            try:
+                old = self._vision_queue.get_nowait()
+                self._vision_queued_keys.discard((old[0] or "").strip().lower()[:120])
+                self._vision_queue.task_done()
+            except asyncio.QueueEmpty:
+                pass
+        if key:
+            self._vision_queued_keys.add(key)
+        self._vision_queue.put_nowait((description, image_data_url, now))
+        self._ensure_vision_worker()
+
+    def _ensure_vision_worker(self):
+        if self._vision_worker_task is None or self._vision_worker_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
                 return
-            self._processing = True
-        
-        try:
-            self.last_vision_analysis = now
-            
-            # Normalize for comparison
-            normalized_description = description.strip().lower()
+            self._vision_worker_task = loop.create_task(self._vision_worker())
 
-            # Image path first: analyze the frame, then suppress on the
-            # observation itself. The text gates below must not decide
-            # whether the vision model ever sees a stable scene.
-            if image_data_url and self._vision_available:
-                person_context = await self._get_person_context()
-                response = await self._generate_vision(
-                    image_data_url,
-                    f"Look at this frame. {description}{person_context}\n\n"
-                    "Describe what you see in one natural sentence. If you recognize "
-                    "someone, address them by name. If nothing new is happening, say so briefly.",
-                    max_tokens=60,
-                )
-                if response:
-                    self._record_frame_observation(description, response)
-                    await self._handle_vision_response(response, description, normalized_description, now)
-                    return
-                # The VLM said nothing: record the frame anyway so the next
-                # call still knows what was seen, then fall through below.
-                self._record_frame_observation(description, "")
+    async def _vision_worker(self):
+        """Drain the vision queue one frame at a time, behind chat."""
+        while True:
+            description, image_data_url, now = await self._vision_queue.get()
+            key = (description or "").strip().lower()[:120]
+            self._vision_queued_keys.discard(key)
+            try:
+                # A conversation in progress always wins over a camera
+                # observation: wait for the chat lane to clear.
+                while self._lane_busy("chat"):
+                    await asyncio.sleep(0.25)
+                if not await self._acquire_lane("vision"):
+                    continue
+                try:
+                    await self._process_vision_impl(description, image_data_url, now)
+                finally:
+                    self._release_lane("vision")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("Vision worker error: %s", exc, exc_info=True)
+            finally:
+                self._vision_queue.task_done()
 
-            # Check if this is essentially the same observation as before
-            if self._last_spoken_vision:
-                last_text, last_time = self._last_spoken_vision
-                # More aggressive duplicate detection - check semantic similarity
-                is_duplicate = self._is_similar_vision(normalized_description, last_text)
-                if is_duplicate and now - last_time < max(self.vision_cooldown * 6, 90):
-                    # Log silently but don't announce - suppress for longer (90 seconds min)
-                    logger.debug("Vision (suppressed duplicate): %s", description[:80])
-                    self._add_context("vision_quiet", description)
-                    self._record_frame_observation(description, "")
-                    return
-            
-            # Check for meaningful changes worth commenting on
-            # Only speak if something NEW and INTERESTING happens
-            interesting_changes = [
-                'gesture', 'waving', 'pointing', 'thumbs', 'peace',
-                'left', 'entered', 'appeared', 'disappeared', 'returned',
-                'different', 'new', 'changed', 'multiple'
-            ]
-            
-            has_interesting_change = any(
-                word in normalized_description 
-                for word in interesting_changes
+    async def _process_vision_impl(self, description: str, image_data_url: Optional[str] = None, now: float | None = None):
+        """Analyze one queued frame.
+
+        This is the think-or-speak decision point for vision: the frame is
+        analyzed, reasoning goes to the thoughts panel, and the observation
+        is spoken only if it passes suppression. A future idle loop can
+        drive the same decision on a timer with the stored last frame.
+        """
+        now = time.time() if now is None else now
+        if now - self.last_vision_analysis < self.vision_cooldown:
+            return  # Skip if too soon (a newer frame already ran)
+        self.last_vision_analysis = now
+
+        # Normalize for comparison
+        normalized_description = description.strip().lower()
+
+        # Image path first: analyze the frame, then suppress on the
+        # observation itself. The text gates below must not decide
+        # whether the vision model ever sees a stable scene.
+        if image_data_url and self._vision_available:
+            person_context = await self._get_person_context()
+            response = await self._generate_vision(
+                image_data_url,
+                f"Look at this frame. {description}{person_context}\n\n"
+                "Describe what you see in one natural sentence. If you recognize "
+                "someone, address them by name. If nothing new is happening, say so briefly.",
+                max_tokens=60,
             )
-            
-            # Check if we've seen this person count/environment combo recently
-            static_patterns = [
-                'i see 1 person', 'i see one person',
-                'the space looks', 'the scene looks',
-                'moderately lit', 'dimly lit', 'well lit', 'dark'
-            ]
-            is_static_observation = all(
-                pattern not in normalized_description or pattern in (self._last_spoken_vision[0] if self._last_spoken_vision else "")
-                for pattern in static_patterns
-                if pattern in normalized_description
-            )
-            
-            # Decision: Should we comment on this?
-            should_speak = has_interesting_change and not is_static_observation
-            
-            # Random quiet periods even for interesting things (30% quiet)
-            import random
-            if not should_speak or random.random() < 0.3:
-                logger.info(f"Vision (quiet): {description[:80]}")
+            if response:
+                self._record_frame_observation(description, response)
+                await self._handle_vision_response(response, description, normalized_description, now)
+                return
+            # The VLM said nothing: record the frame anyway so the next
+            # call still knows what was seen, then fall through below.
+            self._record_frame_observation(description, "")
+
+        # Check if this is essentially the same observation as before
+        if self._last_spoken_vision:
+            last_text, last_time = self._last_spoken_vision
+            # More aggressive duplicate detection - check semantic similarity
+            is_duplicate = self._is_similar_vision(normalized_description, last_text)
+            if is_duplicate and now - last_time < max(self.vision_cooldown * 6, 90):
+                # Log silently but don't announce - suppress for longer (90 seconds min)
+                logger.debug("Vision (suppressed duplicate): %s", description[:80])
                 self._add_context("vision_quiet", description)
                 self._record_frame_observation(description, "")
-                # Send as thought but don't speak
-                await self.bridge.post({"type": "thought", "text": f"Observing: {description}"})
                 return
+        
+        # Check for meaningful changes worth commenting on
+        # Only speak if something NEW and INTERESTING happens
+        interesting_changes = [
+            'gesture', 'waving', 'pointing', 'thumbs', 'peace',
+            'left', 'entered', 'appeared', 'disappeared', 'returned',
+            'different', 'new', 'changed', 'multiple'
+        ]
+        
+        has_interesting_change = any(
+            word in normalized_description 
+            for word in interesting_changes
+        )
+        
+        # Check if we've seen this person count/environment combo recently
+        static_patterns = [
+            'i see 1 person', 'i see one person',
+            'the space looks', 'the scene looks',
+            'moderately lit', 'dimly lit', 'well lit', 'dark'
+        ]
+        is_static_observation = all(
+            pattern not in normalized_description or pattern in (self._last_spoken_vision[0] if self._last_spoken_vision else "")
+            for pattern in static_patterns
+            if pattern in normalized_description
+        )
+        
+        # Decision: Should we comment on this?
+        should_speak = has_interesting_change and not is_static_observation
+        
+        # Random quiet periods even for interesting things (30% quiet)
+        import random
+        if not should_speak or random.random() < 0.3:
+            logger.info(f"Vision (quiet): {description[:80]}")
+            self._add_context("vision_quiet", description)
+            self._record_frame_observation(description, "")
+            # Send as thought but don't speak
+            await self.bridge.post({"type": "thought", "text": f"Observing: {description}"})
+            return
 
-            logger.info(f"Vision (speaking): {description[:100]}")
-            self._add_context("vision", description)
+        logger.info(f"Vision (speaking): {description[:100]}")
+        self._add_context("vision", description)
+        
+        # Get person context if available
+        person_context = await self._get_person_context()
+
+        # Build a prompt that encourages novel observations
+        vision_prompt = (
+            f"Visual observation: {description}{person_context}\n\n"
+            "If this is something NEW or a CHANGE from before, comment on it briefly. "
+            "If you recognize someone, address them by name. "
+            "If it's the same as what you've been seeing, stay quiet or make a very brief acknowledgment. "
+            "Don't just repeat 'I see X person in Y environment' - be more insightful or stay silent."
+        )
+
+        # Text fallback (no frame, no vision model, or the VLM said nothing).
+        prompt = self._build_prompt(vision_prompt, "vision")
+        response = await self._generate(prompt, max_tokens=60)
+
+        self._record_frame_observation(description, response)
+        if response:
+            await self._handle_vision_response(response, description, normalized_description, now)
             
-            # Get person context if available
-            person_context = await self._get_person_context()
-
-            # Build a prompt that encourages novel observations
-            vision_prompt = (
-                f"Visual observation: {description}{person_context}\n\n"
-                "If this is something NEW or a CHANGE from before, comment on it briefly. "
-                "If you recognize someone, address them by name. "
-                "If it's the same as what you've been seeing, stay quiet or make a very brief acknowledgment. "
-                "Don't just repeat 'I see X person in Y environment' - be more insightful or stay silent."
-            )
-
-            # Text fallback (no frame, no vision model, or the VLM said nothing).
-            prompt = self._build_prompt(vision_prompt, "vision")
-            response = await self._generate(prompt, max_tokens=60)
-
-            self._record_frame_observation(description, response)
-            if response:
-                await self._handle_vision_response(response, description, normalized_description, now)
-                
-        finally:
-            self._processing = False
-
     def _is_similar_vision(self, new_text: str, old_text: str) -> bool:
         """Check if two vision descriptions are semantically similar."""
         # Normalize texts
@@ -1935,10 +2035,10 @@ class LocalLLM:
         if not self.autonomous_mode:
             return
         
-        async with self._lock:
-            if self._processing:
-                return
-            self._processing = True
+        # Never talk over a conversation; autonomous thoughts wait for
+        # the chat lane to be free (the 30s loop just tries again).
+        if self._lane_busy("chat") or not await self._acquire_lane("autonomous"):
+            return
         
         try:
             self.last_thought = now
@@ -1948,7 +2048,6 @@ class LocalLLM:
             if random.random() < 0.7:
                 logger.info("Autonomous thought: choosing silence")
                 await self.bridge.post({"type": "thought", "text": "Quietly observing..."})
-                self._processing = False
                 return
             
             logger.info("Autonomous thought: speaking")
@@ -1967,7 +2066,7 @@ class LocalLLM:
                 logger.info("Autonomous thought: no output")
 
         finally:
-            self._processing = False
+            self._release_lane("autonomous")
 
     def _extract_topics(self, text: str) -> List[str]:
         """Extract simple topics from conversation text."""
