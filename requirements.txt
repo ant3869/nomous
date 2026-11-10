@@ -1,30 +1,35 @@
-# core
-websockets
-numpy<2.3.0
-opencv-contrib-python     # or swap to opencv-python if you don't need contrib
-Pillow
-PyYAML
-requests
-diskcache
-Jinja2
-psutil
-rich
-# torch - install with CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pynvml
+# Core (pinned — a fresh install must reproduce exactly)
+websockets==17.4
+numpy==2.2.6
+opencv-contrib-python==4.12.0.88
+Pillow==13.0.0
+PyYAML==6.0.3
+requests==2.34.2
+diskcache==5.6.3
+Jinja2==3.1.6
+psutil==7.2.2
+rich==15.0.0
+nvidia-ml-py==13.615.71
+
+# torch: installed with CUDA by scripts/start.py, never from here
+# (pip install torch --index-url https://download.pytorch.org/whl/cu128)
 
 # audio / vad / asr
-sounddevice
-soundfile
-webrtcvad
-vosk
+sounddevice==0.5.6
+soundfile==0.14.0
+webrtcvad==2.0.10
+vosk==0.3.45
 
-# llm
-llama-cpp-python
-sentencepiece
+# llm: llama-cpp-python is deliberately NOT here. The vision-capable
+# build (Qwen3VLChatHandler / GenericMTMDChatHandler) only exists in the
+# JamePeng fork, shipped as GitHub Release wheels — see scripts/start.py,
+# which detects Python x CUDA and installs the matching wheel.
+sentencepiece==0.2.3
 
-# optional viz / extras (keep if you use them)
-matplotlib
-mediapipe
+# viz / extras
+matplotlib==3.11.2
+mediapipe==1.2.2
 
 # testing
-pytest-asyncio
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
