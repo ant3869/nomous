@@ -67,6 +67,9 @@ DEFAULT: Dict[str, Any] = {
         # cooldown both read vision.vision_cooldown. There is no
         # autonomous.vision_cooldown or ui.vision_cooldown anymore.
         "vision_cooldown": 15,
+        # How often to describe the room when the scene is static
+        # (finding 3). 0 disables the digest.
+        "scene_digest_minutes": 10,
         # Minimum cosine similarity between face embeddings to call two
         # faces the same person (finding 4). MobileNetV3 embeddings are
         # generic image vectors, not face-specific — tune on real faces.

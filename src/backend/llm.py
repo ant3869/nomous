@@ -165,6 +165,11 @@ class LocalLLM:
         self.last_vision_analysis = 0
         self._last_spoken_vision: tuple[str, float] | None = None
         self.vision_cooldown = int(vision_cfg.get("vision_cooldown", 15))  # seconds between autonomous vision checks
+        # Scene digest (finding 3): how often to describe the room when
+        # the scene is static. 0 disables it.
+        self.scene_digest_seconds = max(0, int(vision_cfg.get("scene_digest_minutes", 10) or 0)) * 60
+        self._last_scene_digest = time.time()  # digest clock starts at boot
+        self._last_digest_signature = ""  # description the last digest covered
         self.last_thought = 0
         self.thought_cooldown = 30  # seconds between unprompted thoughts
 
@@ -1627,20 +1632,28 @@ class LocalLLM:
             if self.analytics:
                 self.analytics.observe_user_message(user_text)
 
-            # Classify input to determine response strategy
-            input_class = self._classify_input(user_text)
-            logger.info(f"Input classified: greeting={input_class['is_greeting']}, affirmation={input_class['is_affirmation']}, vision={input_class['is_vision_question']}, skip_tools={input_class['skip_tools']}, tokens={input_class['suggested_tokens']}")
-            
-            # Build prompt with classification context
-            prompt = self._build_prompt(user_text, "text", include_tools=not input_class['skip_tools'], input_class=input_class)
-            
-            # Use adaptive token limit based on input type
-            response = await self._generate(
-                prompt, 
-                max_tokens=input_class['suggested_tokens'],
-                user_text=user_text,
-                allow_tool_calls=not input_class['skip_tools']
-            )
+            # A describe-the-scene request goes straight to the camera:
+            # the vision model describes the live frame instead of the
+            # text model answering from a stale description.
+            if self._is_describe_scene_request(user_text):
+                response = await self.describe_scene()
+                if not response:
+                    response = "I don't have a camera frame to look at right now."
+            else:
+                # Classify input to determine response strategy
+                input_class = self._classify_input(user_text)
+                logger.info(f"Input classified: greeting={input_class['is_greeting']}, affirmation={input_class['is_affirmation']}, vision={input_class['is_vision_question']}, skip_tools={input_class['skip_tools']}, tokens={input_class['suggested_tokens']}")
+
+                # Build prompt with classification context
+                prompt = self._build_prompt(user_text, "text", include_tools=not input_class['skip_tools'], input_class=input_class)
+
+                # Use adaptive token limit based on input type
+                response = await self._generate(
+                    prompt,
+                    max_tokens=input_class['suggested_tokens'],
+                    user_text=user_text,
+                    allow_tool_calls=not input_class['skip_tools']
+                )
 
             if response:
                 self._add_context("assistant", response)
@@ -1699,16 +1712,23 @@ class LocalLLM:
             if self.analytics:
                 self.analytics.observe_user_message(transcribed_text)
 
-            # Classify input for adaptive response
-            input_class = self._classify_input(transcribed_text)
-            logger.info(f"Audio input classified: greeting={input_class['is_greeting']}, skip_tools={input_class['skip_tools']}, tokens={input_class['suggested_tokens']}")
-            
-            prompt = self._build_prompt(transcribed_text, "audio", include_tools=not input_class['skip_tools'], input_class=input_class)
-            response = await self._generate(
-                prompt,
-                max_tokens=input_class['suggested_tokens'],
-                allow_tool_calls=not input_class['skip_tools']
-            )
+            # A describe-the-scene request goes straight to the camera,
+            # same as in chat(): the live frame, not a stale description.
+            if self._is_describe_scene_request(transcribed_text):
+                response = await self.describe_scene()
+                if not response:
+                    response = "I don't have a camera frame to look at right now."
+            else:
+                # Classify input for adaptive response
+                input_class = self._classify_input(transcribed_text)
+                logger.info(f"Audio input classified: greeting={input_class['is_greeting']}, skip_tools={input_class['skip_tools']}, tokens={input_class['suggested_tokens']}")
+
+                prompt = self._build_prompt(transcribed_text, "audio", include_tools=not input_class['skip_tools'], input_class=input_class)
+                response = await self._generate(
+                    prompt,
+                    max_tokens=input_class['suggested_tokens'],
+                    allow_tool_calls=not input_class['skip_tools']
+                )
 
             if response:
                 self._add_context("assistant", response)
@@ -1811,6 +1831,60 @@ class LocalLLM:
         self._last_spoken_response = response
         if self.memory:
             await self.memory.record_interaction("vision", description, response, tags=["vision"])
+        return True
+
+    @staticmethod
+    def _is_describe_scene_request(text: str) -> bool:
+        """True when the user is asking what the camera sees right now."""
+        lowered = text.lower()
+        return any(
+            phrase in lowered
+            for phrase in (
+                "describe the scene",
+                "describe what you see",
+                "describe the room",
+                "what do you see",
+                "what can you see",
+                "what's around",
+                "what is around",
+                "what's happening",
+                "what is happening",
+                "what's in front of you",
+            )
+        )
+
+    async def describe_scene(self) -> str:
+        """Fresh one-sentence description of the current frame, on demand.
+
+        Bypasses the vision suppression and cooldown: the user asked for
+        it, so they get a live look instead of the stale description the
+        text model would answer from. Returns "" when there is no frame
+        or vision is unavailable.
+        """
+        if not self._last_frame_image_url:
+            return ""
+        description = await self._generate_vision(
+            self._last_frame_image_url,
+            "Describe what you see in this scene in one sentence.",
+            max_tokens=60,
+        )
+        if description:
+            self._add_context("vision", description)
+        return description
+
+    def _scene_digest_due(self) -> bool:
+        """True when a periodic scene digest is due and the scene is static."""
+        if not self.scene_digest_seconds or not self._last_frame_image_url:
+            return False
+        if time.time() - self._last_scene_digest < self.scene_digest_seconds:
+            return False
+        # Only digest a static scene: if the latest description differs
+        # from the one the last digest covered, something changed — the
+        # vision pipeline will comment on its own, so no digest is needed.
+        if self._last_digest_signature and not self._is_similar_vision(
+            self._last_frame_description, self._last_digest_signature
+        ):
+            return False
         return True
 
     async def process_vision(self, description: str, image_data_url: Optional[str] = None):
@@ -2042,7 +2116,25 @@ class LocalLLM:
         
         try:
             self.last_thought = now
-            
+
+            # Scene digest (finding 3): in a static scene nothing triggers
+            # vision speech for minutes, so describe the room on a timer.
+            # The digest only fires when the scene is unchanged — new
+            # activity gets its own vision comment — and it posts as a
+            # thought, like any other autonomous output, not as speech.
+            if self._scene_digest_due():
+                digest = await self.describe_scene()
+                if digest:
+                    self._last_scene_digest = now
+                    self._last_digest_signature = self._last_frame_description
+                    self._add_context("assistant_autonomous", digest)
+                    await self.bridge.post({"type": "thought", "text": digest})
+                    if self.memory and len(digest) > 15:
+                        await self.memory.record_interaction("autonomous", "scene_digest", digest)
+                    return
+                # Vision unavailable: leave the digest clock alone and fall
+                # through to the normal silence/random branch.
+
             # Random chance to skip (stay quiet 70% of the time)
             import random
             if random.random() < 0.7:
