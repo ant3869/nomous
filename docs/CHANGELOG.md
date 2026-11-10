@@ -1,5 +1,23 @@
 # Changelog - Bug Fixes & Optimizations
 
+## Unreleased
+
+### 📚 Docs cleanup
+- Removed the file-citation markers (e.g. `[F:src/backend/llm.py]`) left in
+  README.md, docs/README.md, and this changelog by the v0.3.0/v0.4.0 doc
+  passes — they rendered as literal junk text on GitHub.
+- README header is plain markdown now: the `<div>` / `<img>` / `<br>` /
+  `<strong>` block is gone; the logo is a markdown image (`logo.png`,
+  resized from 1024px to 480px) with the tagline as a bold line.
+- Added the missing MIT `LICENSE` file the README already linked to.
+- Fixed README inaccuracies: `llm.temperature` is 0.7 (was 0.6) and the tool
+  framework has 26 built-in tools (was "nine"); the project-structure tree
+  now matches the real layout.
+- docs/README.md config example now matches `config.yaml` (n_ctx 16384, the
+  vision section with frame-memory keys, `gesture_enabled: false`); the Piper
+  playback and camera-vision descriptions now match the code (cross-platform
+  playback; real frames to the vision model, not text descriptions).
+
 ## v0.4.0 - Frame memory & visible reasoning
 
 ### ✨ Frame memory: the camera remembers what it saw
@@ -7,26 +25,26 @@
   (`vision.frame_memory_items`, default 5) as prompt context, so the model
   can track change over time instead of seeing one amnesiac still per call.
   Near-duplicate observations refresh the last entry instead of appending.
-  【F:src/backend/llm.py】
+
 - Frame memory is capped by item count and by tokens
   (`vision.frame_memory_max_tokens`, default 512), and the token budget
   check counts it — the history can never blow the Qwen context window.
-  【F:src/backend/llm.py】
+
 
 ### ✨ The thoughts panel shows the model's real reasoning
 - `<think>` content is now streamed into the dashboard thoughts panel as
   `Thinking: …` lines for chat, audio, and vision replies. The spoken path
   is unchanged: `_sanitize_response` still strips think blocks before
   anything reaches Piper, so reasoning is never read aloud.
-  【F:src/backend/llm.py】
+
 - New `vision.show_thinking` (default true) turns thinking on for vision
   calls so there is reasoning to display, and reserves
   `vision.thinking_max_tokens` (default 128) of output budget for it; set
   `show_thinking: false` to restore the old status-lines-only panel.
   `llm.show_thinking` (default true) is the same toggle for chat/audio.
-  【F:src/backend/llm.py】【F:config.yaml】
+
 - The old `Raw output: …` thought line is gone, replaced by the extracted
-  reasoning.【F:src/backend/llm.py】
+  reasoning.
 
 ### 🔌 Ready for a future idle loop (no loop built yet)
 - Frame memory entries are timestamped, and the LLM keeps the last analyzed
@@ -34,54 +52,54 @@
   `process_vision(last_frame_description, last_frame_image_url)` to ask
   "think or speak?" without a new camera event. The think/speech split
   above is what makes that safe: the tick's reasoning stays on screen and
-  only a passing observation ever reaches Piper.【F:src/backend/llm.py】
+  only a passing observation ever reaches Piper.
 
 ## v0.3.0 - Qwen vision upgrade
 
 ### ✨ Real vision input
 - The camera now sends actual frames to a Qwen vision model (Qwen3-VL-8B
   default, ~7 GB all-in; Qwen3.8-27B as a documented option) instead of a text
-  sentence about brightness and motion.【F:src/backend/video.py】【F:src/backend/llm.py】
+  sentence about brightness and motion.
 - The launcher installs the vision-capable JamePeng fork of llama-cpp-python
   (0.4.6 CUDA wheel, matched by Python version and driver CUDA tag) — the
-  stock PyPI package has no Qwen vision handlers.【F:scripts/start.py】
+  stock PyPI package has no Qwen vision handlers.
 - The stock PyPI build stays in `requirements.txt` as the CPU/text-only base,
   so a machine without a CUDA GPU still starts; the fork install is skipped
-  there instead of failing the launch.【F:requirements.txt】【F:scripts/start.py】
+  there instead of failing the launch.
 - The frontend vision-model picker is wired to the LLM for real
   (`vision_model_path` → `llm.reload_vision_model()`); it accepts `.gguf` and
-  the presets point at the Qwen model.【F:scripts/run_bridge.py】【F:src/frontend/App.tsx】
+  the presets point at the Qwen model.
 
 ### 🔧 Fixed broken install paths
 - MediaPipe migrated to the Tasks API (`GestureRecognizer` + `FaceDetector`,
   models auto-download on first run). `mp.solutions` was removed in MediaPipe
-  1.x, so fresh installs of the old code crashed.【F:src/backend/video.py】
+  1.x, so fresh installs of the old code crashed.
 - OpenCV Haar cascade face detection replaced with the MediaPipe face
-  detector.【F:src/backend/video.py】
+  detector.
 - Dependencies pinned in `requirements.txt`; `pytest.ini` registers the
-  `asyncio` marker.【F:requirements.txt】【F:pytest.ini】
+  `asyncio` marker.
 
 ### 🔧 Behaviour fixes
 - `<think>` blocks are stripped before output reaches Piper, and thinking is
-  off by default (`vision.enable_thinking: false`).【F:src/backend/llm.py】
+  off by default (`vision.enable_thinking: false`).
 - Vision calls are token-budgeted against `n_ctx` (system prompt + user text
   + frame + output), skipping cleanly when they do not fit — Qwen overflow is
   a hard error, not a silent truncation. Switching vision models re-resolves
-  the projector from next to the new model instead of keeping the old one.【F:src/backend/llm.py】
+  the projector from next to the new model instead of keeping the old one.
 - Vision duplicate suppression now compares VLM output by embedding cosine
-  similarity instead of word overlap on heuristic sentences.【F:src/backend/llm.py】
+  similarity instead of word overlap on heuristic sentences.
 - Vision inference runs in a worker thread (`asyncio.to_thread`) so image
-  prefill never blocks the WebSocket event loop.【F:src/backend/llm.py】
+  prefill never blocks the WebSocket event loop.
 - `process_vision` analyzes the frame first and suppresses on the VLM's
   observation — the old text-description speech gates no longer decide
-  whether a stable scene ever reaches the vision model.【F:src/backend/llm.py】
+  whether a stable scene ever reaches the vision model.
 - A generation cut off inside `<think>` no longer falls back to speaking the
   raw reasoning block: the fallback now uses the think-stripped text, and a
-  reasoning-only generation stays silent.【F:src/backend/llm.py】
+  reasoning-only generation stays silent.
 - Piper playback is now cross-platform via sounddevice + soundfile; the
-  PowerShell media-player shim is gone.【F:src/backend/tts.py】
+  PowerShell media-player shim is gone.
 - ChatML prompt template for Qwen models, with `<|im_end|>` as a stop
-  token.【F:src/backend/llm.py】
+  token.
 
 ### 🔒 Privacy
 - The assistant memory database (`data/memory/nomous.sqlite`) is removed from
@@ -90,19 +108,22 @@
 
 ### 📚 Docs
 - `docs/GPU_SETUP.md` rewritten for the RTX 5070 Ti, the fork wheel, and the
-  Qwen models; README config/docs updated to match.
+  Qwen models; README config/docs updated to match; `docs/TESTING.md`
+  updated for the pinned dependencies and the `asyncio` marker.
+- Restored `src/frontend/lib/utils.ts` (shadcn `cn` helper) that the vision
+  rework had dropped.
 
 ## v2.1 - Telemetry & Documentation Refresh
 
 ### ✨ Features & Design Updates
-- Added real-time system telemetry publisher with GPU/CPU metrics and UI system usage card integration.【F:src/backend/system.py†L1-L152】【F:src/frontend/components/SystemUsageCard.tsx†L1-L83】
-- Expanded documentation with feature status tracking and configuration highlights in both the main README and runtime guide.【F:README.md†L1-L164】【F:docs/README.md†L1-L98】
-- Surfaced tool execution history and stats directly in the dashboard to accompany the existing tool system.【F:src/frontend/components/ToolActivity.tsx†L6-L213】
-- Clarified optional components such as GPU acceleration, Piper playback, and gesture recognition across docs.【F:README.md†L166-L213】
+- Added real-time system telemetry publisher with GPU/CPU metrics and UI system usage card integration.
+- Expanded documentation with feature status tracking and configuration highlights in both the main README and runtime guide.
+- Surfaced tool execution history and stats directly in the dashboard to accompany the existing tool system.
+- Clarified optional components such as GPU acceleration, Piper playback, and gesture recognition across docs.
 
 ### ⚠️ Known Limitations
-- Piper auto playback remains Windows-specific; cross-platform playback remains on the roadmap.【F:src/backend/tts.py†L87-L123】
-- GPU telemetry and system tests depend on `torch`, `pynvml`, and `psutil`; missing packages disable metrics and fail tests.【F:src/backend/system.py†L1-L152】【F:tests/test_system.py†L1-L120】
+- Piper auto playback remains Windows-specific; cross-platform playback remains on the roadmap.
+- GPU telemetry and system tests depend on `torch`, `pynvml`, and `psutil`; missing packages disable metrics and fail tests.
 
 ## v2.0 - Performance & Quality Update
 
@@ -207,7 +228,7 @@
    ```bash
    # Windows:
    setup_gpu.bat
-   
+
    # Manual:
    pip uninstall llama-cpp-python -y
    CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
@@ -218,7 +239,7 @@
    ```bash
    # Backup original
    cp backend/video.py backend/video_backup.py
-   
+
    # Use optimized
    cp video_optimized.py backend/video.py
    ```
@@ -278,7 +299,7 @@ ui:
 
 ---
 
-**Version:** 2.0  
-**Date:** October 30, 2025  
-**Major Changes:** GPU optimization + bug fixes  
+**Version:** 2.0
+**Date:** October 30, 2025
+**Major Changes:** GPU optimization + bug fixes
 **Backward Compatible:** Yes (config auto-updated)

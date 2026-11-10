@@ -1,46 +1,44 @@
 # Nomous
 
-<div align="center">
-  <img src="logo.png" alt="Nomous Logo" width="800"/>
-  <br>
-  <strong>A Local Autonomy Runtime Bridge</strong>
-</div>
+![Nomous Logo](logo.png)
+
+**A Local Autonomy Runtime Bridge**
 
 ## Overview
 Nomous is an offline-first WebSocket bridge that connects a TypeScript React dashboard to local AI services. The runtime wires together:
-- 🧠 **Local LLM** loading via `llama.cpp`, including live load progress reporting and runtime sampling controls【F:src/backend/llm.py†L21-L115】【F:src/frontend/App.tsx†L330-L401】
-- 🎤 **Speech-to-Text** streaming from the browser microphone to Vosk with configurable sensitivity and automatic LLM triggering【F:src/backend/audio.py†L15-L118】【F:scripts/run_bridge.py†L108-L158】
-- 🗣️ **Text-to-Speech** synthesis through Piper with runtime toggles, voice switching, and optional auto playback【F:src/backend/tts.py†L15-L138】【F:scripts/run_bridge.py†L72-L157】
-- 👁️ **Computer Vision** capture with MediaPipe Tasks gesture/face detection, motion-aware frame streaming, and real image input to a Qwen vision model — the camera frame itself goes to the model, not a text summary of it【F:src/backend/video.py†L1-L176】【F:src/backend/llm.py†L21-L212】
-- 📈 **System telemetry** that surfaces CPU/GPU utilisation and memory pressure inside the dashboard UI【F:src/backend/system.py†L1-L152】【F:src/frontend/components/SystemUsageCard.tsx†L1-L83】
-- 📚 **Persistent memory graph & tool system** that lets the model store observations, run self-evaluations, and surface tool activity in the UI【F:src/backend/memory.py†L1-L170】【F:src/backend/tools.py†L1-L146】【F:src/frontend/App.tsx†L376-L430】
-- 👤 **Person identity tracking** that recognizes individuals, learns names, associates conversations, and builds relationships across sessions【F:src/backend/person_tracker.py†L1-L620】
+- 🧠 **Local LLM** loading via `llama.cpp`, including live load progress reporting and runtime sampling controls
+- 🎤 **Speech-to-Text** streaming from the browser microphone to Vosk with configurable sensitivity and automatic LLM triggering
+- 🗣️ **Text-to-Speech** synthesis through Piper with runtime toggles, voice switching, and optional auto playback
+- 👁️ **Computer Vision** capture with MediaPipe Tasks gesture/face detection, motion-aware frame streaming, and real image input to a Qwen vision model — the camera frame itself goes to the model, not a text summary of it
+- 📈 **System telemetry** that surfaces CPU/GPU utilisation and memory pressure inside the dashboard UI
+- 📚 **Persistent memory graph & tool system** that lets the model store observations, run self-evaluations, and surface tool activity in the UI
+- 👤 **Person identity tracking** that recognizes individuals, learns names, associates conversations, and builds relationships across sessions
 
 ## Feature Highlights
-- ✨ Real-time token streaming, load overlays, and chat playback for every assistant response【F:src/backend/llm.py†L116-L212】【F:src/frontend/App.tsx†L330-L401】
-- 🛠️ **25+ built-in LLM tools** covering memory search, observation logging, learning, social safeguards, and person tracking with UI visualisation of tool usage and stats【F:src/backend/tools.py†L32-L187】【F:src/frontend/components/ToolActivity.tsx†L6-L213】
-- 👤 **Person identity tracking** with visual signature matching, automatic name detection, conversation binding, and relationship building【F:src/backend/person_tracker.py†L1-L620】
-- 📹 Live camera preview with motion thresholds, gesture detection, face detection, and configurable debounce/cooldown windows【F:src/backend/video.py†L28-L123】【F:src/backend/video.py†L360-L437】
-- 🎙️ Browser microphone streaming (PCM16) with automatic speech detection and configurable sensitivity【F:src/backend/audio.py†L33-L118】
-- 🔊 Optional Piper TTS synthesis with per-session toggles for enablement, auto playback, volume, and voice selection【F:src/backend/tts.py†L19-L138】【F:scripts/run_bridge.py†L72-L154】
-- 🧠 Persistent memory graph with SQLite backing plus front-end visualisation and analytics helpers【F:src/backend/memory.py†L13-L167】【F:src/frontend/App.tsx†L403-L430】
-- 📊 Dashboard telemetry (system metrics, behaviour scoring, reward accounting, token throughput) surfaced through dedicated cards and charts【F:src/backend/handlers.py†L24-L43】【F:src/frontend/components/SystemUsageCard.tsx†L1-L83】【F:src/frontend/App.tsx†L1614-L2158】
+- ✨ Real-time token streaming, load overlays, and chat playback for every assistant response
+- 🛠️ **25+ built-in LLM tools** covering memory search, observation logging, learning, social safeguards, and person tracking with UI visualisation of tool usage and stats
+- 👤 **Person identity tracking** with visual signature matching, automatic name detection, conversation binding, and relationship building
+- 📹 Live camera preview with motion thresholds, gesture detection, face detection, and configurable debounce/cooldown windows
+- 🎙️ Browser microphone streaming (PCM16) with automatic speech detection and configurable sensitivity
+- 🔊 Optional Piper TTS synthesis with per-session toggles for enablement, auto playback, volume, and voice selection
+- 🧠 Persistent memory graph with SQLite backing plus front-end visualisation and analytics helpers
+- 📊 Dashboard telemetry (system metrics, behaviour scoring, reward accounting, token throughput) surfaced through dedicated cards and charts
 
 ## Feature Status
 ### ✅ Complete & Working
-- Local llama.cpp LLM loading with progress events, sampling controls, and autonomous thought/vision loops【F:src/backend/llm.py†L21-L212】【F:scripts/run_bridge.py†L108-L213】
-- Vosk-based microphone pipeline that feeds transcripted speech into the LLM and echoes microphone activity back to the UI【F:src/backend/audio.py†L33-L118】【F:src/frontend/App.tsx†L330-L383】
-- MediaPipe-enabled camera loop with motion gating, gesture detection, and asynchronous vision prompts for the model【F:src/backend/video.py†L28-L123】【F:src/backend/video.py†L360-L437】
-- Tool execution framework with nine tools, execution history, and dedicated dashboard widgets【F:src/backend/tools.py†L32-L187】【F:src/frontend/components/ToolActivity.tsx†L6-L213】
-- System telemetry publishing CPU/GPU metrics and surfacing device context in the UI system usage card【F:src/backend/system.py†L1-L152】【F:src/frontend/components/SystemUsageCard.tsx†L1-L83】
-- Persistent memory store that records interactions and streams the graph to the UI via WebSocket events【F:src/backend/memory.py†L13-L167】【F:src/frontend/App.tsx†L403-L430】
+- Local llama.cpp LLM loading with progress events, sampling controls, and autonomous thought/vision loops
+- Vosk-based microphone pipeline that feeds transcripted speech into the LLM and echoes microphone activity back to the UI
+- MediaPipe-enabled camera loop with motion gating, gesture detection, and asynchronous vision prompts for the model
+- Tool execution framework with 26 tools, execution history, and dedicated dashboard widgets
+- System telemetry publishing CPU/GPU metrics and surfacing device context in the UI system usage card
+- Persistent memory store that records interactions and streams the graph to the UI via WebSocket events
 
 ### ⚠️ Work in Progress / Limited Support
-- GPU metrics require `torch`, `pynvml`, and `psutil`; missing dependencies will disable telemetry and cause the Python test suite to fail when system monitoring tests import them【F:src/backend/system.py†L1-L152】【F:tests/test_system.py†L1-L120】【62a53a†L1-L36】
+- GPU metrics require `torch`, `pynvml`, and `psutil`; missing dependencies will disable telemetry and cause the Python test suite to fail when system monitoring tests import them
 
 ### 🚧 Not Yet Implemented / Planned
-- Additional gesture classifiers (thumbs down, etc.) and configurable gesture-to-action mappings noted in the roadmap【F:docs/CHANGELOG.md†L136-L170】
-- Custom wake-word activation for hands-free microphone capture【F:docs/CHANGELOG.md†L168-L170】
+- Additional gesture classifiers (thumbs down, etc.) and configurable gesture-to-action mappings noted in the roadmap
+- Custom wake-word activation for hands-free microphone capture
 
 ## Quick Start
 
@@ -94,15 +92,18 @@ nomous/
 │  │  ├─ audio.py     # Audio processing
 │  │  ├─ video.py     # Video capture
 │  │  ├─ llm.py       # LLM integration
-│  │  └─ tts.py       # Text-to-speech
-│  │
+│  │  ├─ tts.py       # Text-to-speech
+│  │  ├─ memory.py    # Persistent memory graph
+│  │  ├─ tools.py     # LLM tool system
+│  │  └─ ...          # config, handlers, system, person tracking
 │  └─ frontend/       # React TypeScript UI
 │     ├─ components/  # UI components
 │     └─ App.tsx      # Main application
 │
-├─ scripts/           # Utility scripts
-├─ tests/            # Test suite
-└─ config.yaml       # Configuration
+├─ scripts/           # Launcher + bridge entry points
+├─ tests/             # Test suite
+├─ docs/              # Guides + changelog
+└─ config.yaml        # Configuration
 ```
 
 ## Configuration
@@ -122,7 +123,7 @@ llm:
   enable: true
   n_ctx: 16384
   n_threads: 8
-  temperature: 0.6
+  temperature: 0.7
   top_p: 0.95
 
 vision:
@@ -154,9 +155,9 @@ aloud.
 See [INSTALL_INSTRUCTIONS.md](docs/INSTALL_INSTRUCTIONS.md) for detailed setup steps.
 
 ### Optional Components
-- **GPU acceleration** – enable by setting `llm.n_gpu_layers`; the launcher installs the matching torch CUDA build and the vision-capable llama-cpp-python fork wheel automatically (see [docs/GPU_SETUP.md](docs/GPU_SETUP.md)). Telemetry additionally needs `torch` + `pynvml` (see `requirements.txt`).【F:src/backend/llm.py†L89-L115】【F:src/backend/system.py†L1-L152】
-- **Piper text-to-speech** – requires `paths.piper_exe`, `paths.piper_voice`, and `paths.piper_out_dir` to exist; playback is via sounddevice, cross-platform.【F:src/backend/tts.py†L29-L138】
-- **Vision analysis & gestures** – ensure OpenCV can access your camera and install `mediapipe` for gesture detection.【F:src/backend/video.py†L15-L68】
+- **GPU acceleration** – enable by setting `llm.n_gpu_layers`; the launcher installs the matching torch CUDA build and the vision-capable llama-cpp-python fork wheel automatically (see [docs/GPU_SETUP.md](docs/GPU_SETUP.md)). Telemetry additionally needs `torch` + `pynvml` (see `requirements.txt`).
+- **Piper text-to-speech** – requires `paths.piper_exe`, `paths.piper_voice`, and `paths.piper_out_dir` to exist; playback is via sounddevice, cross-platform.
+- **Vision analysis & gestures** – ensure OpenCV can access your camera and install `mediapipe` for gesture detection.
 
 ## Testing
 Run the test suite:
