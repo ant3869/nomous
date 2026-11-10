@@ -720,6 +720,14 @@ class LocalLLM:
         if mmproj_path:
             self.mmproj_path = str(mmproj_path).strip()
             self._cfg.setdefault("paths", {})["mmproj_path"] = self.mmproj_path
+        else:
+            # Model switch without an explicit projector: pair the new model
+            # with its adjacent mmproj instead of keeping the old one, which
+            # may belong to a different model family.
+            self.mmproj_path = ""
+            resolved = self._resolve_mmproj_path(model_path)
+            self.mmproj_path = resolved or ""
+            self._cfg.setdefault("paths", {})["mmproj_path"] = self.mmproj_path
 
         family = self._detect_vision_family(model_path)
         if family:
@@ -739,7 +747,7 @@ class LocalLLM:
             logger.info("LLM model reloaded successfully")
 
     async def reload_vision_model(self, model_path: str):
-        """Switch to a new vision model file (mmproj from config or model folder)."""
+        """Switch to a new vision model file (mmproj resolved from next to it)."""
         await self.reload_model(model_path)
 
     async def reinforce(self, delta: float):
@@ -1313,18 +1321,19 @@ class LocalLLM:
         return max(1, len(text) // 4)
 
     def _vision_fits_budget(self, prompt_text: str, max_tokens: int) -> bool:
-        """Trim rolling context until the vision call fits n_ctx; False to skip."""
+        """Check the actual vision request (system + user + frame) fits n_ctx."""
         n_ctx = int(self._cfg.get("llm", {}).get("n_ctx", 16384) or 16384)
-        frame_tokens = max(0, self.vision_image_max_tokens)
-        while self.recent_context:
-            prompt_tokens = self._estimate_tokens(prompt_text) + sum(
-                self._estimate_tokens(str(ctx.get("content", ""))) for ctx in self.recent_context
-            )
-            if frame_tokens + prompt_tokens + max_tokens <= n_ctx:
-                return True
-            self.recent_context.pop(0)
-        prompt_tokens = self._estimate_tokens(prompt_text)
-        return frame_tokens + prompt_tokens + max_tokens <= n_ctx
+        # Count what _generate_vision actually sends. The rolling
+        # recent_context is not in the vision messages, so trimming it would
+        # delete history without shrinking the request.
+        needed = (
+            self._estimate_tokens(self.system_prompt)
+            + self._estimate_tokens(prompt_text)
+            + max(0, self.vision_image_max_tokens)
+            + max_tokens
+            + 64  # template overhead
+        )
+        return needed <= n_ctx
 
     def _embedding_similarity(self, a: str, b: str) -> Optional[float]:
         """Cosine similarity via the memory embedder, or None when unavailable."""
@@ -1376,21 +1385,16 @@ class LocalLLM:
                 {"type": "text", "text": prompt_text},
             ]},
         ]
-        for attempt in (1, 2):
-            try:
-                raw = await asyncio.to_thread(self._run_vision_completion, messages, max_tokens)
-                return self._sanitize_response(raw)
-            except RuntimeError as exc:
-                # Qwen disables context shift: overflow raises instead of truncating.
-                logger.warning("Vision generation failed (%s); clearing context and retrying", exc)
-                self.recent_context.clear()
-                if attempt == 2:
-                    await self.bridge.post(msg_event(f"vision error: {exc}"))
-                    return ""
-            except Exception as exc:
-                logger.warning("Vision generation failed: %s", exc)
-                await self.bridge.post(msg_event(f"vision error: {exc}"))
-                return ""
+        try:
+            raw = await asyncio.to_thread(self._run_vision_completion, messages, max_tokens)
+            return self._sanitize_response(raw)
+        except Exception as exc:
+            # Qwen disables context shift, so overflow raises instead of
+            # truncating. The budget check should have caught it; retrying
+            # identical messages cannot help, so fail cleanly.
+            logger.warning("Vision generation failed: %s", exc)
+            await self.bridge.post(msg_event(f"vision error: {exc}"))
+            return ""
         return ""
 
     async def chat(self, user_text: str):

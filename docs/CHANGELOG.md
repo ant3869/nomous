@@ -28,9 +28,10 @@
 ### 🔧 Behaviour fixes
 - `<think>` blocks are stripped before output reaches Piper, and thinking is
   off by default (`vision.enable_thinking: false`).【F:src/backend/llm.py】
-- Vision calls are token-budgeted against `n_ctx` (frame + prompt + output),
-  trimming rolling context first and retrying once after clearing context —
-  Qwen overflow is a hard error, not a silent truncation.【F:src/backend/llm.py】
+- Vision calls are token-budgeted against `n_ctx` (system prompt + user text
+  + frame + output), skipping cleanly when they do not fit — Qwen overflow is
+  a hard error, not a silent truncation. Switching vision models re-resolves
+  the projector from next to the new model instead of keeping the old one.【F:src/backend/llm.py】
 - Vision duplicate suppression now compares VLM output by embedding cosine
   similarity instead of word overlap on heuristic sentences.【F:src/backend/llm.py】
 - Vision inference runs in a worker thread (`asyncio.to_thread`) so image

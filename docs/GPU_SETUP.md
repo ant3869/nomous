@@ -167,8 +167,9 @@ vision:
 Notes:
 
 - Qwen disables context shift, so a context overflow is a hard error. The LLM
-  budgets every vision call (frame + prompt + output vs `n_ctx`), trims rolling
-  context first, and retries once after clearing context instead of crashing.
+  budgets every vision call (system prompt + user text + frame + output vs
+  `n_ctx`) and skips the call cleanly when it does not fit, instead of
+  crashing.
 - Thinking is off by default (`vision.enable_thinking: false`) and `<think>`
   blocks are stripped from output before it reaches Piper, so reasoning is never
   read aloud.
