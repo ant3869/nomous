@@ -102,6 +102,25 @@ def test_frame_memory_dedups_similar_observations():
     assert llm._frame_memory[0]["response"] == "Still one person."
 
 
+def test_frame_memory_keeps_entries_when_response_changes():
+    llm = _bare_llm()
+    llm._record_frame_observation("I see 1 person in a moderately lit environment.", "One person is reading a book.")
+    llm._record_frame_observation("I see 1 person in a moderately lit environment, waving.", "The person is waving at the camera.")
+    assert len(llm._frame_memory) == 2
+    assert llm._frame_memory[0]["response"] == "One person is reading a book."
+    assert llm._frame_memory[1]["response"] == "The person is waving at the camera."
+
+
+def test_frame_memory_trims_after_refresh_grows_entry():
+    llm = _bare_llm(frame_memory_max_tokens=64)
+    llm._record_frame_observation("A red bicycle leans against a brick wall.", "Short.")
+    llm._record_frame_observation(
+        "A red bicycle leans against a brick wall, very still.",
+        "A long detailed observation about the bicycle and the wall and everything around it in the room.",
+    )
+    assert llm._estimate_tokens(llm._frame_memory_block()) <= 64
+
+
 def test_frame_memory_caps_items():
     llm = _bare_llm(frame_memory_items=2)
     llm._record_frame_observation("A red bicycle leans against a brick wall.", "")

@@ -867,11 +867,37 @@ class LocalLLM:
         }
         if self._frame_memory:
             last = self._frame_memory[-1]
-            if self._is_similar_vision(description, last["description"]):
+            # Refresh only when the analyzed observation is unchanged too:
+            # descriptions are coarse (lighting/person count), so two frames
+            # can read as "similar" while the model saw something different
+            # (reading vs waving, a second person entering). Comparing the
+            # responses as well keeps the sequence in memory.
+            if self._is_similar_vision(description, last["description"]) and self._responses_similar(
+                response, last.get("response", "")
+            ):
                 last.update(entry)
+                # A refresh can grow the entry past the token cap, so trim
+                # here too — the early return must not bypass the budget.
+                self._trim_frame_memory()
                 return
         self._frame_memory.append(entry)
         self._trim_frame_memory()
+
+    @staticmethod
+    def _responses_similar(a: str, b: str) -> bool:
+        """True when two vision responses say roughly the same thing."""
+        a = (a or "").strip()
+        b = (b or "").strip()
+        if not a and not b:
+            return True
+        if not a or not b:
+            return False
+        a_words = set(re.findall(r"\w+", a.lower()))
+        b_words = set(re.findall(r"\w+", b.lower()))
+        if not a_words or not b_words:
+            return False
+        overlap = len(a_words & b_words)
+        return (overlap / max(len(a_words), len(b_words))) > 0.6
 
     def _trim_frame_memory(self) -> None:
         """Drop oldest frame observations until item and token caps hold."""
