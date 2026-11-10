@@ -9,6 +9,9 @@
 - The launcher installs the vision-capable JamePeng fork of llama-cpp-python
   (0.4.6 CUDA wheel, matched by Python version and driver CUDA tag) — the
   stock PyPI package has no Qwen vision handlers.【F:scripts/start.py】
+- The stock PyPI build stays in `requirements.txt` as the CPU/text-only base,
+  so a machine without a CUDA GPU still starts; the fork install is skipped
+  there instead of failing the launch.【F:requirements.txt】【F:scripts/start.py】
 - The frontend vision-model picker is wired to the LLM for real
   (`vision_model_path` → `llm.reload_vision_model()`); it accepts `.gguf` and
   the presets point at the Qwen model.【F:scripts/run_bridge.py】【F:src/frontend/App.tsx】

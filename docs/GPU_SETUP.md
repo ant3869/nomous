@@ -57,8 +57,11 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 
 ### Step 3: Vision-capable llama-cpp-python (JamePeng fork)
 
-The fork is never on PyPI. On Windows the launcher downloads the matching wheel
-from <https://github.com/JamePeng/llama-cpp-python/releases> (matched by Python
+The fork is never on PyPI. `requirements.txt` installs the stock CPU build
+as a text-only fallback, so the backend always starts; on a GPU machine the
+launcher replaces it with the matching fork wheel below. On Windows the
+launcher downloads the matching wheel from
+<https://github.com/JamePeng/llama-cpp-python/releases> (matched by Python
 version, e.g. `cp312`, and CUDA tag, e.g. `cu132`), for example:
 
 ```text

@@ -120,9 +120,11 @@ class CameraLoop:
         self.gesture_cooldown = float(cfg["ui"].get("gesture_cooldown", 3))
 
         # MediaPipe Tasks detectors (gestures + faces); None when unavailable.
+        # Face detection is independent of the gesture toggle: person tracking
+        # needs faces even when hand gestures are off.
         self._gesture_recognizer = None
         self._face_detector = None
-        if MEDIAPIPE_AVAILABLE and self.gesture_enabled:
+        if MEDIAPIPE_AVAILABLE:
             self._init_mediapipe_tasks()
 
         # Person tracking for persistent recognition
@@ -145,8 +147,11 @@ class CameraLoop:
         """Download Task models on first run and build the gesture/face detectors."""
         model_dir = Path(__file__).resolve().parents[2] / "modules" / "models" / "mediapipe"
         model_dir.mkdir(parents=True, exist_ok=True)
+        wanted = dict(MEDIAPIPE_MODELS)
+        if not self.gesture_enabled:
+            wanted.pop("gesture_recognizer.task", None)
         paths = {}
-        for filename, url in MEDIAPIPE_MODELS.items():
+        for filename, url in wanted.items():
             target = model_dir / filename
             if not target.exists():
                 try:
@@ -157,13 +162,14 @@ class CameraLoop:
                     return
             paths[filename] = target
         try:
-            self._gesture_recognizer = mp_vision.GestureRecognizer.create_from_options(
-                mp_vision.GestureRecognizerOptions(
-                    base_options=MpBaseOptions(model_asset_path=str(paths["gesture_recognizer.task"])),
-                    running_mode=mp_vision.RunningMode.IMAGE,
-                    num_hands=2,
+            if self.gesture_enabled:
+                self._gesture_recognizer = mp_vision.GestureRecognizer.create_from_options(
+                    mp_vision.GestureRecognizerOptions(
+                        base_options=MpBaseOptions(model_asset_path=str(paths["gesture_recognizer.task"])),
+                        running_mode=mp_vision.RunningMode.IMAGE,
+                        num_hands=2,
+                    )
                 )
-            )
             self._face_detector = mp_vision.FaceDetector.create_from_options(
                 mp_vision.FaceDetectorOptions(
                     base_options=MpBaseOptions(model_asset_path=str(paths["blaze_face_short_range.tflite"])),

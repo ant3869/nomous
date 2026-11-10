@@ -322,6 +322,10 @@ class LocalLLM:
         if self.mmproj_path:
             candidates.append(Path(self.mmproj_path))
         model_file = Path(model_path)
+        # The projector drops the model's quant suffix: Qwen3VL-8B-Instruct-Q4_K_M
+        # pairs with mmproj-Qwen3VL-8B-Instruct-F16.gguf, not mmproj-...-Q4_K_M-F16.
+        stem = re.sub(r"-(Q[0-9][A-Za-z0-9_]*|F16|BF16|F32|IQ[0-9][A-Za-z0-9_]*)$", "", model_file.stem)
+        candidates.append(model_file.parent / f"mmproj-{stem}-F16.gguf")
         candidates.append(model_file.parent / f"mmproj-{model_file.stem}-F16.gguf")
         candidates.append(model_file.parent / "mmproj-F16.gguf")
         for candidate in candidates:

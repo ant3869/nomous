@@ -887,9 +887,15 @@ def main():
     # Use the venv's Python for detection to avoid issues with miniconda's numpy
     device_info = check_compute_backend(env_info.python_executable)
     device_info = ensure_gpu_support(env_info.pip_command, device_info, env_info.python_executable)
-    ensure_llama_cpp_vision(
-        env_info.pip_command, env_info.python_executable, detect_system_cuda_version()
-    )
+    if device_info.is_gpu:
+        ensure_llama_cpp_vision(
+            env_info.pip_command, env_info.python_executable, detect_system_cuda_version()
+        )
+    else:
+        # No GPU: keep the stock CPU build from requirements.txt (text-only).
+        # Building the CUDA fork here would fail without a CUDA toolkit and
+        # is not worth it — CPU vision on an 8B model is unusable anyway.
+        print_status("No CUDA GPU detected; keeping the CPU llama-cpp-python build (text-only mode)")
     update_config_for_gpu(device_info.is_gpu)
     
     device_label = f"{device_info.backend} ({device_info.name})"

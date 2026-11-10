@@ -20,10 +20,10 @@ soundfile==0.14.0
 webrtcvad==2.0.10
 vosk==0.3.45
 
-# llm: llama-cpp-python is deliberately NOT here. The vision-capable
-# build (Qwen3VLChatHandler / GenericMTMDChatHandler) only exists in the
-# JamePeng fork, shipped as GitHub Release wheels — see scripts/start.py,
-# which detects Python x CUDA and installs the matching wheel.
+# llm: base CPU build (text-only fallback). scripts/start.py upgrades it to
+# the vision-capable JamePeng fork wheel on GPU machines; the stock PyPI
+# package has no Qwen vision handlers, so it can never do image input.
+llama-cpp-python==0.3.36
 sentencepiece==0.2.3
 
 # viz / extras
