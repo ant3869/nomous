@@ -390,7 +390,7 @@ class LocalLLM:
             human_layers = "all" if n_gpu_layers < 0 else str(n_gpu_layers)
             logger.info(f"GPU acceleration enabled: offloading {human_layers} layer(s)")
 
-        def _instantiate(layers: int) -> Llama:
+        def _instantiate(layers: int):
             kwargs = dict(
                 model_path=model_path,
                 n_ctx=llm_cfg["n_ctx"],
@@ -404,12 +404,10 @@ class LocalLLM:
                 kwargs["chat_handler"] = chat_handler
                 # Image prefill chunks badly at the 512 default.
                 kwargs["n_ubatch"] = max(2048, int(llm_cfg.get("n_batch", 512) or 512))
-                self._chat_handler = chat_handler
-                self._vision_available = True
-            else:
-                self._chat_handler = None
-                self._vision_available = False
-            return Llama(**kwargs)
+            # Publish handler/availability only once Llama() below succeeds:
+            # a failed load keeps the previous model, so its vision state
+            # must stay untouched.
+            return Llama(**kwargs), chat_handler
 
         def _progress(current: int, total: int) -> bool:
             percent = int((current / total) * 100) if total else 0
@@ -418,7 +416,7 @@ class LocalLLM:
             return True
 
         try:
-            model = _instantiate(n_gpu_layers)
+            model, chat_handler = _instantiate(n_gpu_layers)
             
             # GPU memory optimization
             if n_gpu_layers != 0 and TORCH_AVAILABLE:
@@ -441,6 +439,8 @@ class LocalLLM:
                 except Exception as gpu_exc:
                     logger.warning(f"GPU optimization failed: {gpu_exc}")
             
+            self._chat_handler = chat_handler
+            self._vision_available = chat_handler is not None
             return model
         except Exception as exc:
             if n_gpu_layers != 0:
@@ -449,7 +449,10 @@ class LocalLLM:
                     msg_event("GPU offload unavailable, retrying language model on CPU")
                 )
                 self._resolved_gpu_layers = 0
-                return _instantiate(0)
+                model, chat_handler = _instantiate(0)
+                self._chat_handler = chat_handler
+                self._vision_available = chat_handler is not None
+                return model
             raise
 
     async def _load_model_async(self, model_path: str, announce: bool = False):
@@ -717,33 +720,46 @@ class LocalLLM:
         model_path = model_path.strip()
         if not model_path:
             raise ValueError("Model path cannot be empty")
-        if mmproj_path:
-            self.mmproj_path = str(mmproj_path).strip()
-            self._cfg.setdefault("paths", {})["mmproj_path"] = self.mmproj_path
-        else:
-            # Model switch without an explicit projector: pair the new model
-            # with its adjacent mmproj instead of keeping the old one, which
-            # may belong to a different model family.
-            self.mmproj_path = ""
-            resolved = self._resolve_mmproj_path(model_path)
-            self.mmproj_path = resolved or ""
-            self._cfg.setdefault("paths", {})["mmproj_path"] = self.mmproj_path
-
-        family = self._detect_vision_family(model_path)
-        if family:
-            self.vision_model_family = family
 
         async with self._lock:
             if self._processing:
                 raise RuntimeError("Cannot reload LLM while processing")
 
-            await self._load_model_async(model_path, announce=True)
-            prompt_style_cfg = str(self._cfg.get("llm", {}).get("prompt_style", "auto") or "auto").lower()
-            self.prompt_style = (
-                prompt_style_cfg
-                if prompt_style_cfg != "auto"
-                else self._auto_prompt_style(model_path)
-            )
+            # Snapshot the switch state: a failed load keeps the old model,
+            # so its family, projector, and prompt style must be restored.
+            prev_family = self.vision_model_family
+            prev_mmproj = self.mmproj_path
+            prev_prompt_style = self.prompt_style
+            if mmproj_path:
+                self.mmproj_path = str(mmproj_path).strip()
+                self._cfg.setdefault("paths", {})["mmproj_path"] = self.mmproj_path
+            else:
+                # Model switch without an explicit projector: pair the new
+                # model with its adjacent mmproj instead of keeping the old
+                # one, which may belong to a different model family.
+                self.mmproj_path = ""
+                resolved = self._resolve_mmproj_path(model_path)
+                self.mmproj_path = resolved or ""
+                self._cfg.setdefault("paths", {})["mmproj_path"] = self.mmproj_path
+
+            family = self._detect_vision_family(model_path)
+            if family:
+                self.vision_model_family = family
+
+            try:
+                await self._load_model_async(model_path, announce=True)
+                prompt_style_cfg = str(self._cfg.get("llm", {}).get("prompt_style", "auto") or "auto").lower()
+                self.prompt_style = (
+                    prompt_style_cfg
+                    if prompt_style_cfg != "auto"
+                    else self._auto_prompt_style(model_path)
+                )
+            except Exception:
+                self.vision_model_family = prev_family
+                self.mmproj_path = prev_mmproj
+                self.prompt_style = prev_prompt_style
+                self._cfg.setdefault("paths", {})["mmproj_path"] = prev_mmproj
+                raise
             logger.info("LLM model reloaded successfully")
 
     async def reload_vision_model(self, model_path: str):
