@@ -21,6 +21,9 @@ llm:
   n_threads: 8
   temperature: 0.7
   top_p: 0.95
+  # Show the model's real reasoning in the dashboard thoughts panel for
+  # chat/audio replies too (TTS still strips <think> blocks).
+  show_thinking: true
 memory:
   db_path: ./data/memory/nomous.sqlite
   enable: true
@@ -66,6 +69,19 @@ vision:
   frame_width: 640
   # Qwen thinks by default; keep it off for short scene comments.
   enable_thinking: false
+  # Show the model's real reasoning in the dashboard thoughts panel.
+  # Turning this on also turns thinking on for vision calls (there is no
+  # reasoning to display otherwise) and reserves thinking_max_tokens of
+  # output budget for it; TTS still strips <think> blocks, so Piper never
+  # reads reasoning aloud. Set false to restore the old status-lines-only
+  # panel (and switch thinking back off for vision).
+  show_thinking: true
+  thinking_max_tokens: 128
+  # Rolling frame memory: the last few analyzed frames, fed back into the
+  # vision prompt so the model can track change over time. Capped by item
+  # count and by tokens, so it can never blow the Qwen context budget.
+  frame_memory_items: 5
+  frame_memory_max_tokens: 512
   temperature: 0.5
   interesting_keywords:
   - person

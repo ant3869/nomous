@@ -108,6 +108,27 @@ class LocalLLM:
         self.vision_frame_width = int(vision_cfg.get("frame_width", 640) or 640)
         self.vision_enable_thinking = bool(vision_cfg.get("enable_thinking", False))
         self.vision_temperature = float(vision_cfg.get("temperature", self.temperature))
+        # show_thinking: the thoughts panel displays the model's real
+        # reasoning. That needs thinking to exist, so it also turns thinking
+        # on for vision calls (see _build_chat_handler) and reserves extra
+        # output tokens for it (see _generate_vision). TTS still strips
+        # <think> blocks — display and speech are separate paths.
+        self.vision_show_thinking = bool(vision_cfg.get("show_thinking", True))
+        self.vision_thinking_max_tokens = max(0, int(vision_cfg.get("thinking_max_tokens", 128) or 128))
+        self.show_thinking = bool(cfg.get("llm", {}).get("show_thinking", True))
+        # Rolling frame memory: the last few analyzed frames, fed back into
+        # the vision prompt so the model can track change over time instead
+        # of seeing one amnesiac still per call. Capped by item count and
+        # by tokens so it can never blow the Qwen context budget.
+        self.frame_memory_items = max(1, int(vision_cfg.get("frame_memory_items", 5) or 5))
+        self.frame_memory_max_tokens = max(64, int(vision_cfg.get("frame_memory_max_tokens", 512) or 512))
+        self._frame_memory: list[dict] = []
+        # Last analyzed frame, kept so a future idle loop can ask the model
+        # "think or speak?" on a timer without a new camera event: call
+        # process_vision(self._last_frame_description,
+        # self._last_frame_image_url). No loop lives here yet.
+        self._last_frame_description: str = ""
+        self._last_frame_image_url: Optional[str] = None
         self.mmproj_path = str(cfg.get("paths", {}).get("mmproj_path") or "")
         self._chat_handler = None
         self._vision_available = False
@@ -349,7 +370,9 @@ class LocalLLM:
             except ImportError:
                 logger.warning("llama-cpp-python has no vision chat handlers; install the JamePeng fork wheel")
                 return None
-        extra = {"enable_thinking": self.vision_enable_thinking}
+        # show_thinking implies thinking: the panel can only display reasoning
+        # the model actually produced.
+        extra = {"enable_thinking": self.vision_enable_thinking or self.vision_show_thinking}
         try:
             if self.vision_model_family.startswith("qwen3.8"):
                 handler = GenericMTMDChatHandler(
@@ -493,6 +516,29 @@ class LocalLLM:
         cleaned = re.sub(r"<think>.*?</think>", " ", text, flags=re.DOTALL | re.IGNORECASE)
         cleaned = re.sub(r"<think>.*$", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
         return cleaned.replace("</think>", " ")
+
+    @staticmethod
+    def _extract_think_blocks(text: str) -> tuple[str, str]:
+        """Split raw model output into (reasoning, text without <think> blocks).
+
+        The reasoning is what the thoughts panel shows; the cleaned text is
+        what gets spoken. An unclosed trailing <think> counts as reasoning.
+        """
+        parts = re.findall(r"<think>(.*?)</think>", text, flags=re.DOTALL | re.IGNORECASE)
+        tail = re.search(r"<think>((?:(?!</think>).)*)$", text, flags=re.DOTALL | re.IGNORECASE)
+        if tail:
+            parts.append(tail.group(1))
+        reasoning = re.sub(r"\s+", " ", " ".join(parts)).strip()
+        return reasoning, LocalLLM._strip_think_blocks(text)
+
+    async def _post_reasoning(self, reasoning: str) -> None:
+        """Post model reasoning to the thoughts panel (display only, never spoken)."""
+        if not reasoning or not self.bridge:
+            return
+        text = re.sub(r"\s+", " ", reasoning).strip()
+        if not text:
+            return
+        await self.bridge.post({"type": "thought", "text": f"Thinking: {text[:400]}"})
 
     def _sanitize_response(self, text: str) -> str:
         """Remove stage directions/emotes, meta-commentary, and keep output brief."""
@@ -804,6 +850,78 @@ class LocalLLM:
                 if ctx["type"] == most_common:
                     self.recent_context.pop(i)
                     break
+
+    def _record_frame_observation(self, description: str, response: str) -> None:
+        """Append one analyzed frame to the rolling frame memory.
+
+        Near-duplicates refresh the last entry instead of appending, so a
+        still scene does not fill the memory with copies of one observation.
+        """
+        description = (description or "").strip()
+        if not description:
+            return
+        entry = {
+            "time": time.time(),
+            "description": description[:240],
+            "response": (response or "").strip()[:240],
+        }
+        if self._frame_memory:
+            last = self._frame_memory[-1]
+            # Refresh only when the analyzed observation is unchanged too:
+            # descriptions are coarse (lighting/person count), so two frames
+            # can read as "similar" while the model saw something different
+            # (reading vs waving, a second person entering). Comparing the
+            # responses as well keeps the sequence in memory.
+            if self._is_similar_vision(description, last["description"]) and self._responses_similar(
+                response, last.get("response", "")
+            ):
+                last.update(entry)
+                # A refresh can grow the entry past the token cap, so trim
+                # here too — the early return must not bypass the budget.
+                self._trim_frame_memory()
+                return
+        self._frame_memory.append(entry)
+        self._trim_frame_memory()
+
+    @staticmethod
+    def _responses_similar(a: str, b: str) -> bool:
+        """True when two vision responses say roughly the same thing."""
+        a = (a or "").strip()
+        b = (b or "").strip()
+        if not a and not b:
+            return True
+        if not a or not b:
+            return False
+        a_words = set(re.findall(r"\w+", a.lower()))
+        b_words = set(re.findall(r"\w+", b.lower()))
+        if not a_words or not b_words:
+            return False
+        overlap = len(a_words & b_words)
+        return (overlap / max(len(a_words), len(b_words))) > 0.6
+
+    def _trim_frame_memory(self) -> None:
+        """Drop oldest frame observations until item and token caps hold."""
+        while len(self._frame_memory) > self.frame_memory_items:
+            self._frame_memory.pop(0)
+        while (
+            self._frame_memory
+            and self._estimate_tokens(self._frame_memory_block()) > self.frame_memory_max_tokens
+        ):
+            self._frame_memory.pop(0)
+
+    def _frame_memory_block(self) -> str:
+        """Render frame memory as prompt context, oldest first; '' when empty."""
+        if not self._frame_memory:
+            return ""
+        now = time.time()
+        lines = ["What you have seen recently (oldest first):"]
+        for entry in self._frame_memory:
+            age = max(0, int(now - entry["time"]))
+            line = f"- {age}s ago: {entry['description']}"
+            if entry.get("response"):
+                line += f" — you noted: {entry['response']}"
+            lines.append(line)
+        return "\n".join(lines)
     
     def _classify_input(self, text: str) -> dict:
         """Classify user input to determine appropriate response strategy."""
@@ -1143,12 +1261,13 @@ class LocalLLM:
 
             # Build full response from tokens
             raw_response = "".join(tokens).strip()
-            
-            # Show the raw thinking process (before sanitization)
-            await self.bridge.post({
-                "type": "thought",
-                "text": f"Raw output: {raw_response[:150]}{'...' if len(raw_response) > 150 else ''}",
-            })
+
+            # Show the model's actual reasoning in the thoughts panel. The
+            # spoken response below is sanitized separately, so reasoning
+            # never reaches Piper.
+            if self.show_thinking:
+                reasoning, _ = self._extract_think_blocks(raw_response)
+                await self._post_reasoning(reasoning)
 
             # Remove any role-play artifacts
             raw_response = raw_response.replace("You:", "").replace("Person:", "").strip()
@@ -1339,9 +1458,11 @@ class LocalLLM:
     def _vision_fits_budget(self, prompt_text: str, max_tokens: int) -> bool:
         """Check the actual vision request (system + user + frame) fits n_ctx."""
         n_ctx = int(self._cfg.get("llm", {}).get("n_ctx", 16384) or 16384)
-        # Count what _generate_vision actually sends. The rolling
-        # recent_context is not in the vision messages, so trimming it would
-        # delete history without shrinking the request.
+        # Count what _generate_vision actually sends: the rolling frame
+        # memory is folded into prompt_text before this check, so history
+        # counts against the budget too (and gets trimmed when it grows).
+        # recent_context is not in the vision messages, so trimming it
+        # would delete history without shrinking the request.
         needed = (
             self._estimate_tokens(self.system_prompt)
             + self._estimate_tokens(prompt_text)
@@ -1387,10 +1508,34 @@ class LocalLLM:
         return "".join(tokens).strip()
 
     async def _generate_vision(self, image_data_url: str, prompt_text: str, max_tokens: int = 60) -> str:
-        """Ask the vision model about one frame; '' when vision is unavailable."""
+        """Ask the vision model about one frame; '' when vision is unavailable.
+
+        The prompt carries the rolling frame memory so the model can track
+        change over time, and when the thoughts panel shows reasoning the
+        output budget reserves room for it — reasoning shares the output
+        budget with the answer, so it is counted in the fits check.
+        """
         if self.model is None or not self._vision_available:
             return ""
-        if not self._vision_fits_budget(prompt_text, max_tokens):
+        history = self._frame_memory_block()
+        full_prompt = f"{history}\n\n{prompt_text}" if history else prompt_text
+        output_tokens = max_tokens + (
+            self.vision_thinking_max_tokens if self.vision_show_thinking else 0
+        )
+        if not self._vision_fits_budget(full_prompt, output_tokens):
+            # History is the only trimmable part of the request: evict the
+            # oldest entries until it fits. Without this a static scene
+            # stalls forever — every skipped call records an empty
+            # observation while the older history responsible for the
+            # overflow stays put. A bare frame that still doesn't fit is
+            # skipped as before.
+            while self._frame_memory:
+                self._frame_memory.pop(0)
+                history = self._frame_memory_block()
+                full_prompt = f"{history}\n\n{prompt_text}" if history else prompt_text
+                if self._vision_fits_budget(full_prompt, output_tokens):
+                    break
+        if not self._vision_fits_budget(full_prompt, output_tokens):
             logger.warning("Vision call skipped: frame + prompt exceed context window")
             await self.bridge.post(msg_event("vision skipped: frame too large for context window"))
             return ""
@@ -1398,11 +1543,14 @@ class LocalLLM:
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": image_data_url}},
-                {"type": "text", "text": prompt_text},
+                {"type": "text", "text": full_prompt},
             ]},
         ]
         try:
-            raw = await asyncio.to_thread(self._run_vision_completion, messages, max_tokens)
+            raw = await asyncio.to_thread(self._run_vision_completion, messages, output_tokens)
+            if self.vision_show_thinking:
+                reasoning, _ = self._extract_think_blocks(raw)
+                await self._post_reasoning(reasoning)
             return self._sanitize_response(raw)
         except Exception as exc:
             # Qwen disables context shift, so overflow raises instead of
@@ -1616,8 +1764,18 @@ class LocalLLM:
         return True
 
     async def process_vision(self, description: str, image_data_url: Optional[str] = None):
-        """Process vision input (what the camera sees)."""
+        """Process vision input (what the camera sees).
+
+        This is the think-or-speak decision point for vision: the frame is
+        analyzed, reasoning goes to the thoughts panel, and the observation
+        is spoken only if it passes suppression. A future idle loop can
+        drive the same decision on a timer with the stored last frame.
+        """
         now = time.time()
+        if description:
+            self._last_frame_description = description
+        if image_data_url:
+            self._last_frame_image_url = image_data_url
         if now - self.last_vision_analysis < self.vision_cooldown:
             return  # Skip if too soon
         
@@ -1645,9 +1803,12 @@ class LocalLLM:
                     max_tokens=60,
                 )
                 if response:
+                    self._record_frame_observation(description, response)
                     await self._handle_vision_response(response, description, normalized_description, now)
                     return
-                # The VLM said nothing: fall through to the text path below.
+                # The VLM said nothing: record the frame anyway so the next
+                # call still knows what was seen, then fall through below.
+                self._record_frame_observation(description, "")
 
             # Check if this is essentially the same observation as before
             if self._last_spoken_vision:
@@ -1658,6 +1819,7 @@ class LocalLLM:
                     # Log silently but don't announce - suppress for longer (90 seconds min)
                     logger.debug("Vision (suppressed duplicate): %s", description[:80])
                     self._add_context("vision_quiet", description)
+                    self._record_frame_observation(description, "")
                     return
             
             # Check for meaningful changes worth commenting on
@@ -1693,6 +1855,7 @@ class LocalLLM:
             if not should_speak or random.random() < 0.3:
                 logger.info(f"Vision (quiet): {description[:80]}")
                 self._add_context("vision_quiet", description)
+                self._record_frame_observation(description, "")
                 # Send as thought but don't speak
                 await self.bridge.post({"type": "thought", "text": f"Observing: {description}"})
                 return
@@ -1716,6 +1879,7 @@ class LocalLLM:
             prompt = self._build_prompt(vision_prompt, "vision")
             response = await self._generate(prompt, max_tokens=60)
 
+            self._record_frame_observation(description, response)
             if response:
                 await self._handle_vision_response(response, description, normalized_description, now)
                 

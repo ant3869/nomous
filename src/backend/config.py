@@ -39,6 +39,7 @@ DEFAULT: Dict[str, Any] = {
         "top_p": 0.95,
         "tools_enabled": True,
         "prompt_style": "auto",
+        "show_thinking": True,
         "system_prompt": (
             "You are Nomous, an autonomous multimodal AI orchestrator. "
             "Support the operator with concise, confident guidance, coordinate "
@@ -56,6 +57,10 @@ DEFAULT: Dict[str, Any] = {
         "image_max_tokens": 1024,
         "frame_width": 640,
         "enable_thinking": False,
+        "show_thinking": True,
+        "thinking_max_tokens": 128,
+        "frame_memory_items": 5,
+        "frame_memory_max_tokens": 512,
         "temperature": 0.5,
     },
     "audio": {
