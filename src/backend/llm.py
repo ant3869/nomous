@@ -484,6 +484,13 @@ class LocalLLM:
         if announce:
             await self.bridge.post(msg_event(f"LLM model → {model_name}"))
 
+    @staticmethod
+    def _strip_think_blocks(text: str) -> str:
+        """Remove <think>...</think> reasoning (and unclosed <think> to end)."""
+        cleaned = re.sub(r"<think>.*?</think>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<think>.*$", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        return cleaned.replace("</think>", " ")
+
     def _sanitize_response(self, text: str) -> str:
         """Remove stage directions/emotes, meta-commentary, and keep output brief."""
         if not text:
@@ -502,9 +509,7 @@ class LocalLLM:
 
         cleaned = text
         # Qwen thinks by default; never let reasoning reach speech or the UI.
-        cleaned = re.sub(r"<think>.*?</think>", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
-        cleaned = re.sub(r"<think>.*$", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
-        cleaned = cleaned.replace("</think>", " ")
+        cleaned = self._strip_think_blocks(cleaned)
         cleaned = re.sub(r"\*([^*\n]{0,80})\*", _strip_stage, cleaned)
         cleaned = re.sub(r"\(([^\)\n]{0,80})\)", _strip_stage, cleaned)
         cleaned = re.sub(r"\[([^\]\n]{0,80})\]", _strip_stage, cleaned)
@@ -1240,7 +1245,11 @@ class LocalLLM:
             # Sanitize for final output (this is what gets spoken)
             final_response = self._sanitize_response(raw_response)
             if not final_response:
-                final_response = raw_response  # Fallback to raw if sanitization removes everything
+                # Sanitization removed everything. Fall back to the raw text
+                # minus any reasoning — never speak a generation that was
+                # entirely <think> (e.g. cut off mid-reasoning at the token
+                # limit). An empty fallback stays empty and is suppressed.
+                final_response = self._strip_think_blocks(raw_response).strip()
 
             if len(final_response) < 3 and total_tokens < min_tokens:
                 logger.warning(f"Response too short ({len(final_response)} chars, {total_tokens} tokens), regenerating...")
@@ -1335,6 +1344,23 @@ class LocalLLM:
             return None
         return dot / (norm_a * norm_b)
 
+    def _run_vision_completion(self, messages, max_tokens: int) -> str:
+        """Blocking vision call; always run via asyncio.to_thread, never on the loop."""
+        stream = self.model.create_chat_completion(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=self.vision_temperature,
+            top_p=self.top_p,
+            stream=True,
+        )
+        tokens = []
+        for chunk in stream:
+            delta = chunk["choices"][0].get("delta", {})
+            text = delta.get("content") or ""
+            if text:
+                tokens.append(text)
+        return "".join(tokens).strip()
+
     async def _generate_vision(self, image_data_url: str, prompt_text: str, max_tokens: int = 60) -> str:
         """Ask the vision model about one frame; '' when vision is unavailable."""
         if self.model is None or not self._vision_available:
@@ -1352,20 +1378,8 @@ class LocalLLM:
         ]
         for attempt in (1, 2):
             try:
-                stream = self.model.create_chat_completion(
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=self.vision_temperature,
-                    top_p=self.top_p,
-                    stream=True,
-                )
-                tokens = []
-                for chunk in stream:
-                    delta = chunk["choices"][0].get("delta", {})
-                    text = delta.get("content") or ""
-                    if text:
-                        tokens.append(text)
-                return self._sanitize_response("".join(tokens).strip())
+                raw = await asyncio.to_thread(self._run_vision_completion, messages, max_tokens)
+                return self._sanitize_response(raw)
             except RuntimeError as exc:
                 # Qwen disables context shift: overflow raises instead of truncating.
                 logger.warning("Vision generation failed (%s); clearing context and retrying", exc)

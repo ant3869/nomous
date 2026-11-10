@@ -33,6 +33,11 @@
   Qwen overflow is a hard error, not a silent truncation.【F:src/backend/llm.py】
 - Vision duplicate suppression now compares VLM output by embedding cosine
   similarity instead of word overlap on heuristic sentences.【F:src/backend/llm.py】
+- Vision inference runs in a worker thread (`asyncio.to_thread`) so image
+  prefill never blocks the WebSocket event loop.【F:src/backend/llm.py】
+- A generation cut off inside `<think>` no longer falls back to speaking the
+  raw reasoning block: the fallback now uses the think-stripped text, and a
+  reasoning-only generation stays silent.【F:src/backend/llm.py】
 - Piper playback is now cross-platform via sounddevice + soundfile; the
   PowerShell media-player shim is gone.【F:src/backend/tts.py】
 - ChatML prompt template for Qwen models, with `<|im_end|>` as a stop
