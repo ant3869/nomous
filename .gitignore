@@ -63,3 +63,6 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.sw?
+# Local runtime data (never commit assistant memory or RAG stores)
+data/memory/
+data/rag/
