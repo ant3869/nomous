@@ -98,6 +98,21 @@ class LocalLLM:
         self.temperature = float(cfg["llm"]["temperature"])
         self.top_p = float(cfg["llm"]["top_p"])
 
+        # Vision model (Qwen VL family). mmproj is the vision projector; without
+        # it the model runs text-only and frames never reach a model.
+        vision_cfg = cfg.get("vision", {})
+        self.vision_cfg = vision_cfg
+        self.vision_enabled = bool(vision_cfg.get("enabled", True))
+        self.vision_model_family = str(vision_cfg.get("model", "qwen3-vl-8b") or "qwen3-vl-8b").lower()
+        self.vision_image_max_tokens = int(vision_cfg.get("image_max_tokens", 1024) or 1024)
+        self.vision_frame_width = int(vision_cfg.get("frame_width", 640) or 640)
+        self.vision_enable_thinking = bool(vision_cfg.get("enable_thinking", False))
+        self.vision_temperature = float(vision_cfg.get("temperature", self.temperature))
+        self.mmproj_path = str(cfg.get("paths", {}).get("mmproj_path") or "")
+        self._chat_handler = None
+        self._vision_available = False
+        self._last_spoken_response = ""
+
         max_tokens_cfg = cfg["llm"].get("max_tokens")
         self.max_tokens: int | None = None
         if max_tokens_cfg is not None:
@@ -301,6 +316,55 @@ class LocalLLM:
         if announce:
             self._schedule_bridge_post(msg_event(f"LLM model → {model_name}"))
 
+    def _resolve_mmproj_path(self, model_path: str) -> Optional[str]:
+        """Return the vision projector file: config first, then next to the model."""
+        candidates = []
+        if self.mmproj_path:
+            candidates.append(Path(self.mmproj_path))
+        model_file = Path(model_path)
+        candidates.append(model_file.parent / f"mmproj-{model_file.stem}-F16.gguf")
+        candidates.append(model_file.parent / "mmproj-F16.gguf")
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def _build_chat_handler(self, model_path: str):
+        """Build the JamePeng fork vision chat handler, or None when unavailable."""
+        if not self.vision_enabled:
+            return None
+        mmproj = self._resolve_mmproj_path(model_path)
+        if not mmproj:
+            logger.info("No mmproj found; vision input disabled (text-only mode)")
+            return None
+        try:
+            from llama_cpp.llama_multimodal import GenericMTMDChatHandler, Qwen3VLChatHandler
+        except ImportError:
+            try:
+                from llama_cpp.llama_chat_format import GenericMTMDChatHandler, Qwen3VLChatHandler
+            except ImportError:
+                logger.warning("llama-cpp-python has no vision chat handlers; install the JamePeng fork wheel")
+                return None
+        extra = {"enable_thinking": self.vision_enable_thinking}
+        try:
+            if self.vision_model_family.startswith("qwen3.8"):
+                handler = GenericMTMDChatHandler(
+                    chat_format=None, mmproj_path=mmproj, verbose=False,
+                    image_min_tokens=1024, image_max_tokens=self.vision_image_max_tokens,
+                    extra_template_arguments=extra,
+                )
+            else:
+                handler = Qwen3VLChatHandler(
+                    mmproj_path=mmproj, verbose=False,
+                    image_min_tokens=1024, image_max_tokens=self.vision_image_max_tokens,
+                    extra_template_arguments=extra,
+                )
+        except Exception as exc:
+            logger.warning("Could not build vision chat handler (%s); text-only mode", exc)
+            return None
+        logger.info("Vision chat handler ready (%s, mmproj %s)", self.vision_model_family, Path(mmproj).name)
+        return handler
+
     def _create_model(self, model_path: str) -> Llama:
         llm_cfg = self._cfg.get("llm", {})
         n_gpu_layers_cfg = llm_cfg.get("n_gpu_layers", 0)
@@ -323,14 +387,25 @@ class LocalLLM:
             logger.info(f"GPU acceleration enabled: offloading {human_layers} layer(s)")
 
         def _instantiate(layers: int) -> Llama:
-            return Llama(
+            kwargs = dict(
                 model_path=model_path,
                 n_ctx=llm_cfg["n_ctx"],
                 n_threads=llm_cfg["n_threads"],
                 n_gpu_layers=layers,
                 verbose=False,
-                progress_callback=_progress
+                progress_callback=_progress,
             )
+            chat_handler = self._build_chat_handler(model_path)
+            if chat_handler is not None:
+                kwargs["chat_handler"] = chat_handler
+                # Image prefill chunks badly at the 512 default.
+                kwargs["n_ubatch"] = max(2048, int(llm_cfg.get("n_batch", 512) or 512))
+                self._chat_handler = chat_handler
+                self._vision_available = True
+            else:
+                self._chat_handler = None
+                self._vision_available = False
+            return Llama(**kwargs)
 
         def _progress(current: int, total: int) -> bool:
             percent = int((current / total) * 100) if total else 0
@@ -422,6 +497,10 @@ class LocalLLM:
             return " "
 
         cleaned = text
+        # Qwen thinks by default; never let reasoning reach speech or the UI.
+        cleaned = re.sub(r"<think>.*?</think>", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<think>.*$", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = cleaned.replace("</think>", " ")
         cleaned = re.sub(r"\*([^*\n]{0,80})\*", _strip_stage, cleaned)
         cleaned = re.sub(r"\(([^\)\n]{0,80})\)", _strip_stage, cleaned)
         cleaned = re.sub(r"\[([^\]\n]{0,80})\]", _strip_stage, cleaned)
@@ -616,17 +695,43 @@ class LocalLLM:
                 if self.max_tokens is not None:
                     self.failsafe_tokens = max(self.failsafe_tokens, self.max_tokens)
 
-    async def reload_model(self, model_path: str):
+    @staticmethod
+    def _detect_vision_family(model_path: str) -> Optional[str]:
+        name = str(model_path).lower()
+        if "qwen3.8" in name or "qwen3-8" in name:
+            return "qwen3.8-27b"
+        if "qwen3-vl" in name or "qwen3vl" in name:
+            return "qwen3-vl-8b"
+        return None
+
+    async def reload_model(self, model_path: str, mmproj_path: Optional[str] = None):
         model_path = model_path.strip()
         if not model_path:
             raise ValueError("Model path cannot be empty")
+        if mmproj_path:
+            self.mmproj_path = str(mmproj_path).strip()
+            self._cfg.setdefault("paths", {})["mmproj_path"] = self.mmproj_path
+
+        family = self._detect_vision_family(model_path)
+        if family:
+            self.vision_model_family = family
 
         async with self._lock:
             if self._processing:
                 raise RuntimeError("Cannot reload LLM while processing")
 
             await self._load_model_async(model_path, announce=True)
+            prompt_style_cfg = str(self._cfg.get("llm", {}).get("prompt_style", "auto") or "auto").lower()
+            self.prompt_style = (
+                prompt_style_cfg
+                if prompt_style_cfg != "auto"
+                else self._auto_prompt_style(model_path)
+            )
             logger.info("LLM model reloaded successfully")
+
+    async def reload_vision_model(self, model_path: str):
+        """Switch to a new vision model file (mmproj from config or model folder)."""
+        await self.reload_model(model_path)
 
     async def reinforce(self, delta: float):
         """Apply reinforcement learning signal."""
@@ -765,6 +870,8 @@ class LocalLLM:
             return "plain"
 
         path_text = str(model_path).lower()
+        if "qwen" in path_text:
+            return "chatml"
         if "llama-3" in path_text or "llama3" in path_text:
             return "llama-3-chat"
 
@@ -774,6 +881,14 @@ class LocalLLM:
         """Format ``system_text`` and ``user_text`` using the configured template."""
 
         template = self.prompt_style
+
+        if template == "chatml":
+            parts: list[str] = []
+            if system_text.strip():
+                parts.append(f"<|im_start|>system\n{system_text.strip()}<|im_end|>")
+            parts.append(f"<|im_start|>user\n{user_text.strip()}<|im_end|>")
+            parts.append("<|im_start|>assistant\n")
+            return "\n".join(parts)
 
         if template == "llama-3-chat":
             # Llama 3 chat expects explicit header tokens around each role.
@@ -945,13 +1060,16 @@ class LocalLLM:
 
             stream_limit = requested_tokens or self.failsafe_tokens
             failsafe_limit = self.failsafe_tokens
+            stop = ["Person:", "You:", "\n\n\n", "###", "User:"]
+            if self.prompt_style == "chatml":
+                stop.append("<|im_end|>")
             stream = self.model(
                 prompt,
                 max_tokens=stream_limit,
                 temperature=self.temperature,
                 top_p=self.top_p,
                 stream=True,
-                stop=["Person:", "You:", "\n\n\n", "###", "User:"],
+                stop=stop,
                 repeat_penalty=1.1
             )
 
@@ -1171,6 +1289,92 @@ class LocalLLM:
             
             return ""
 
+    def _estimate_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        if self.model is not None:
+            try:
+                return len(self.model.tokenize(text.encode("utf-8")))
+            except Exception:
+                pass
+        return max(1, len(text) // 4)
+
+    def _vision_fits_budget(self, prompt_text: str, max_tokens: int) -> bool:
+        """Trim rolling context until the vision call fits n_ctx; False to skip."""
+        n_ctx = int(self._cfg.get("llm", {}).get("n_ctx", 16384) or 16384)
+        frame_tokens = max(0, self.vision_image_max_tokens)
+        while self.recent_context:
+            prompt_tokens = self._estimate_tokens(prompt_text) + sum(
+                self._estimate_tokens(str(ctx.get("content", ""))) for ctx in self.recent_context
+            )
+            if frame_tokens + prompt_tokens + max_tokens <= n_ctx:
+                return True
+            self.recent_context.pop(0)
+        prompt_tokens = self._estimate_tokens(prompt_text)
+        return frame_tokens + prompt_tokens + max_tokens <= n_ctx
+
+    def _embedding_similarity(self, a: str, b: str) -> Optional[float]:
+        """Cosine similarity via the memory embedder, or None when unavailable."""
+        if not self.memory:
+            return None
+        try:
+            emb_a = self.memory._generate_embedding(a)
+            emb_b = self.memory._generate_embedding(b)
+        except Exception:
+            return None
+        if not emb_a or not emb_b or len(emb_a) != len(emb_b):
+            return None
+        dot = sum(x * y for x, y in zip(emb_a, emb_b))
+        norm_a = sum(x * x for x in emb_a) ** 0.5
+        norm_b = sum(y * y for y in emb_b) ** 0.5
+        if norm_a == 0 or norm_b == 0:
+            return None
+        return dot / (norm_a * norm_b)
+
+    async def _generate_vision(self, image_data_url: str, prompt_text: str, max_tokens: int = 60) -> str:
+        """Ask the vision model about one frame; '' when vision is unavailable."""
+        if self.model is None or not self._vision_available:
+            return ""
+        if not self._vision_fits_budget(prompt_text, max_tokens):
+            logger.warning("Vision call skipped: frame + prompt exceed context window")
+            await self.bridge.post(msg_event("vision skipped: frame too large for context window"))
+            return ""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+                {"type": "text", "text": prompt_text},
+            ]},
+        ]
+        for attempt in (1, 2):
+            try:
+                stream = self.model.create_chat_completion(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=self.vision_temperature,
+                    top_p=self.top_p,
+                    stream=True,
+                )
+                tokens = []
+                for chunk in stream:
+                    delta = chunk["choices"][0].get("delta", {})
+                    text = delta.get("content") or ""
+                    if text:
+                        tokens.append(text)
+                return self._sanitize_response("".join(tokens).strip())
+            except RuntimeError as exc:
+                # Qwen disables context shift: overflow raises instead of truncating.
+                logger.warning("Vision generation failed (%s); clearing context and retrying", exc)
+                self.recent_context.clear()
+                if attempt == 2:
+                    await self.bridge.post(msg_event(f"vision error: {exc}"))
+                    return ""
+            except Exception as exc:
+                logger.warning("Vision generation failed: %s", exc)
+                await self.bridge.post(msg_event(f"vision error: {exc}"))
+                return ""
+        return ""
+
     async def chat(self, user_text: str):
         """Process user text input (manual or from UI)."""
         async with self._lock:
@@ -1311,7 +1515,7 @@ class LocalLLM:
         finally:
             self._processing = False
 
-    async def process_vision(self, description: str):
+    async def process_vision(self, description: str, image_data_url: Optional[str] = None):
         """Process vision input (what the camera sees)."""
         now = time.time()
         if now - self.last_vision_analysis < self.vision_cooldown:
@@ -1413,10 +1617,28 @@ class LocalLLM:
                 "Don't just repeat 'I see X person in Y environment' - be more insightful or stay silent."
             )
 
-            prompt = self._build_prompt(vision_prompt, "vision")
-            response = await self._generate(prompt, max_tokens=60)
+            response = ""
+            if image_data_url and self._vision_available:
+                response = await self._generate_vision(
+                    image_data_url,
+                    f"Look at this frame. {description}{person_context}\n\n"
+                    "Describe what you see in one natural sentence. If you recognize "
+                    "someone, address them by name. If nothing new is happening, say so briefly.",
+                    max_tokens=60,
+                )
+            if not response:
+                prompt = self._build_prompt(vision_prompt, "vision")
+                response = await self._generate(prompt, max_tokens=60)
 
             if response:
+                # VLM descriptions vary; compare to the last spoken line by meaning,
+                # not word overlap, and stay quiet on near-duplicates.
+                if self._last_spoken_response:
+                    similarity = self._embedding_similarity(response, self._last_spoken_response)
+                    if similarity is not None and similarity >= 0.85:
+                        logger.info("Vision response suppressed (duplicate): %s", response[:80])
+                        self._add_context("vision_quiet", description)
+                        return
                 # Filter out generic responses
                 generic_phrases = [
                     "i see one person", "i see 1 person", 
@@ -1435,6 +1657,7 @@ class LocalLLM:
                 await self.bridge.post(msg_speak(response))
                 await self.tts.speak(response)
                 self._last_spoken_vision = (normalized_description, now)
+                self._last_spoken_response = response
                 if self.memory:
                     await self.memory.record_interaction("vision", description, response, tags=["vision"])
                 
