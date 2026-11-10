@@ -1796,6 +1796,9 @@ class LocalLLM:
         for p in present:
             if p.get("should_ask_name"):
                 person_context += f"\n(Consider asking {p.get('display_name', 'this person')} their name)"
+            recall = p.get("last_seen_recall")
+            if recall:
+                person_context += f"\n{recall}"
         return person_context
 
     async def _handle_vision_response(self, response: str, description: str, normalized_description: str, now: float) -> bool:

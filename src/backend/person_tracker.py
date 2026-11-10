@@ -264,6 +264,31 @@ class TrackedPerson:
         
         return "\n".join(summaries)
     
+    def get_last_seen_recall(self) -> str:
+        """One-line recall of the most recent conversation with this person.
+
+        "" when there is nothing to recall — a stranger gets no fake
+        memory. The vision prompt injects this line, so when a known
+        face walks back in the model can pick up where they left off.
+        """
+        if not self.conversations:
+            return ""
+        last = self.conversations[-1]
+        time_ago = time.time() - last.timestamp
+        if time_ago < 60:
+            when = "just now"
+        elif time_ago < 3600:
+            when = f"{int(time_ago / 60)} min ago"
+        else:
+            when = f"{int(time_ago / 3600)} hours ago"
+        name = self.get_display_name()
+        if last.topics:
+            return f"Last time you saw {name} ({when}): talked about {', '.join(last.topics)}."
+        user_msg = (last.user_message or "").strip()
+        if user_msg:
+            return f"Last time you saw {name} ({when}): they said \"{user_msg[:80]}\"."
+        return f"Last time you saw {name} ({when})."
+
     def should_ask_name(self) -> bool:
         """Determine if we should ask this person their name."""
         if self.name:
@@ -810,6 +835,7 @@ class PersonTracker:
                         "display_name": person.get_display_name(),
                         "familiarity": round(person.familiarity_score, 2),
                         "should_ask_name": person.should_ask_name(),
+                        "last_seen_recall": person.get_last_seen_recall(),
                     })
             return present
     
