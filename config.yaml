@@ -53,7 +53,7 @@ rag:
   enable: true
 ui:
   gesture_cooldown: 3
-  gesture_enabled: false
+  gesture_enabled: true
   motion_sensitivity: 30
   preview_interval_sec: 0.5
   tts_enabled: true

@@ -18,7 +18,7 @@ Nomous is an offline-first WebSocket bridge that connects a TypeScript React das
 - ✨ Real-time token streaming, load overlays, and chat playback for every assistant response
 - 🛠️ **25+ built-in LLM tools** covering memory search, observation logging, learning, social safeguards, and person tracking with UI visualisation of tool usage and stats
 - 👤 **Person identity tracking** with visual signature matching, automatic name detection, conversation binding, and relationship building
-- 📹 Live camera preview with motion thresholds, gesture detection, face detection, and configurable debounce/cooldown windows
+- 📹 Live camera preview with motion thresholds, gesture detection, face detection, and configurable preview-interval/cooldown windows
 - 🎙️ Browser microphone streaming (PCM16) with automatic speech detection and configurable sensitivity
 - 🔊 Optional Piper TTS synthesis with per-session toggles for enablement, auto playback, volume, and voice selection
 - 🧠 Persistent memory graph with SQLite backing plus front-end visualisation and analytics helpers
@@ -37,7 +37,7 @@ Nomous is an offline-first WebSocket bridge that connects a TypeScript React das
 - GPU metrics require `torch`, `pynvml`, and `psutil`; missing dependencies will disable telemetry and cause the Python test suite to fail when system monitoring tests import them
 
 ### 🚧 Not Yet Implemented / Planned
-- Additional gesture classifiers (thumbs down, etc.) and configurable gesture-to-action mappings noted in the roadmap
+- Gesture actions are live: open palm pauses speech, fist toggles mute (enabled by default). Additional gesture classifiers (thumbs down, etc.) and configurable gesture-to-action mappings remain roadmap items
 - Custom wake-word activation for hands-free microphone capture
 
 ## Quick Start

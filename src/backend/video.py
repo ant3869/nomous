@@ -586,6 +586,33 @@ class CameraLoop:
         """
         return bool(gesture) or (now - last_preview_send) >= self.preview_interval_sec
 
+    def _dispatch_gesture(self, gesture: str) -> None:
+        """Map a detected hand gesture to an action.
+
+        open_hand (open palm) pauses in-flight speech; closed_fist
+        toggles the mute. Other gestures are only reported, not acted
+        on. This runs in the camera thread, so the async TTS interrupt
+        is scheduled on the event loop; the mute toggle is synchronous.
+        """
+        llm = getattr(self, "llm", None)
+        tts = getattr(llm, "tts", None) if llm is not None else None
+        if tts is None:
+            return
+        if gesture == "open_hand":
+            try:
+                asyncio.run_coroutine_threadsafe(tts.interrupt(), self.loop)
+            except Exception as exc:
+                logger.debug("Gesture pause failed: %s", exc)
+                return
+            self._post_event("✋ Paused speech")
+        elif gesture == "closed_fist":
+            try:
+                muted = tts.toggle_muted()
+            except Exception as exc:
+                logger.debug("Gesture mute toggle failed: %s", exc)
+                return
+            self._post_event("🔇 Muted" if muted else "🔊 Unmuted")
+
     def _run(self):
         """Main camera capture loop (runs in separate thread)."""
         cap = None
@@ -720,6 +747,7 @@ class CameraLoop:
                         self.last_gesture_time = now
                         logger.info(f"GESTURE: {gesture}")
                         self._post_event(f"👋 Gesture: {gesture}")
+                        self._dispatch_gesture(gesture)
                 
                 # Dashboard preview: steady cadence (~2 fps) regardless of
                 # motion, so the UI shows a live feed instead of a still
