@@ -1601,6 +1601,11 @@ class LocalLLM:
             logger.info("Vision response suppressed (generic): %s", response)
             self._add_context("vision_quiet", response)
             return False
+        # Record the observation as the current view as well as the spoken
+        # line: _add_context only refreshes _last_vision_description for
+        # vision/vision_quiet, so without this the next "what do you see?"
+        # prompt would inject an older observation.
+        self._add_context("vision", response)
         self._add_context("assistant", response)
         await self.bridge.post(msg_speak(response))
         await self.tts.speak(response)
