@@ -122,7 +122,9 @@ The dead copies are gone: no `autonomous.vision_cooldown`, no
 `ui.vision_cooldown`, no `vision.interesting_keywords` (the VLM-first
 design made keyword triggers obsolete), no duplicated
 `vision.motion_sensitivity` / `vision.snapshot_debounce` (those are
-`ui` keys; the camera loop reads `ui`).
+`ui` keys; the camera loop reads `ui`). `snapshot_debounce` has since
+been replaced by `ui.preview_interval_sec` (finding 9): the dashboard
+preview now runs on a steady ~2 fps cadence instead of only on motion.
 
 ## First run
 

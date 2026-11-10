@@ -86,7 +86,7 @@ DEFAULT: Dict[str, Any] = {
     "memory": {"enable": True, "db_path": "modules/memory/rag.sqlite"},
     "rag": {"enable": True, "db_path": "modules/memory/rag/corpus"},
     "ui": {
-        "snapshot_debounce": 4,
+        "preview_interval_sec": 0.5,
         "motion_sensitivity": 30,
         "tts_enabled": True,
         "vision_enabled": True,

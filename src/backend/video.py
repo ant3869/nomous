@@ -87,7 +87,7 @@ class CameraLoop:
         self.process_height = int(cam.get("process_height", 360))
         self.frame_skip = int(cam.get("frame_skip", 2))
         
-        self.debounce_sec = float(cfg["ui"]["snapshot_debounce"])
+        self.preview_interval_sec = float(cfg["ui"].get("preview_interval_sec", 0.5))
         self.motion_threshold = int(cfg["ui"]["motion_sensitivity"])
 
         self._thr = None
@@ -578,6 +578,14 @@ class CameraLoop:
 
         return description
 
+    def _should_send_preview(self, now: float, last_preview_send: float, gesture: str) -> bool:
+        """Preview cadence: every preview_interval_sec, or immediately on a gesture.
+
+        Motion plays no part — in a still room the dashboard would
+        otherwise freeze on one frame for seconds at a time.
+        """
+        return bool(gesture) or (now - last_preview_send) >= self.preview_interval_sec
+
     def _run(self):
         """Main camera capture loop (runs in separate thread)."""
         cap = None
@@ -636,7 +644,7 @@ class CameraLoop:
             # Resize for processing
             prev_small = cv2.resize(prev, (self.process_width, self.process_height))
             
-            last_frame_send = 0.0
+            last_preview_send = 0.0
             frame_count = 0
             
             # Main capture loop
@@ -713,51 +721,53 @@ class CameraLoop:
                         logger.info(f"GESTURE: {gesture}")
                         self._post_event(f"👋 Gesture: {gesture}")
                 
-                # Send frame if motion detected or debounce time elapsed
-                if motion >= self.motion_threshold or (now - last_frame_send) >= self.debounce_sec or gesture:
-                    last_frame_send = now
-                    
+                # Dashboard preview: steady cadence (~2 fps) regardless of
+                # motion, so the UI shows a live feed instead of a still
+                # frame in a quiet room. A gesture forces an immediate
+                # preview. Analysis is NOT gated on the preview send.
+                if self._should_send_preview(now, last_preview_send, gesture):
+                    last_preview_send = now
                     try:
-                        # Send full resolution frame to UI
                         data_url = to_data_url(frame)
                         asyncio.run_coroutine_threadsafe(
-                            self.bridge.post(msg_image(data_url)), 
+                            self.bridge.post(msg_image(data_url)),
                             self.loop
                         )
-                        
-                        # Trigger vision analysis if gesture detected or cooldown passed
-                        should_analyze = (
-                            self.vision_description_enabled and 
-                            self.llm and 
-                            ((now - self.last_analysis_time) >= self.analysis_cooldown or gesture)
+                    except Exception as e:
+                        logger.error(f"Error posting preview frame: {e}")
+
+                # Vision analysis stays on its own cooldown (or a gesture),
+                # independent of the preview cadence.
+                if (
+                    self.vision_description_enabled
+                    and self.llm
+                    and ((now - self.last_analysis_time) >= self.analysis_cooldown or gesture)
+                ):
+                    self.last_analysis_time = now
+                    try:
+                        description = self._describe_frame(frame_small, motion, gesture)
+                        logger.info(f"Vision: {description}")
+
+                        # Send the actual frame to the vision model when it can take one.
+                        image_data_url = None
+                        if getattr(self.llm, "_vision_available", False):
+                            vision_frame = frame_small
+                            if vision_frame.shape[1] > self.vision_frame_width:
+                                scale = self.vision_frame_width / vision_frame.shape[1]
+                                vision_frame = cv2.resize(
+                                    vision_frame,
+                                    (self.vision_frame_width, int(vision_frame.shape[0] * scale)),
+                                )
+                            try:
+                                image_data_url = to_data_url(vision_frame)
+                            except Exception as exc:
+                                logger.debug("Could not encode vision frame: %s", exc)
+
+                        # Schedule vision processing in LLM
+                        asyncio.run_coroutine_threadsafe(
+                            self.llm.process_vision(description, image_data_url),
+                            self.loop
                         )
-                        
-                        if should_analyze:
-                            self.last_analysis_time = now
-                            description = self._describe_frame(frame_small, motion, gesture)
-                            logger.info(f"Vision: {description}")
-
-                            # Send the actual frame to the vision model when it can take one.
-                            image_data_url = None
-                            if getattr(self.llm, "_vision_available", False):
-                                vision_frame = frame_small
-                                if vision_frame.shape[1] > self.vision_frame_width:
-                                    scale = self.vision_frame_width / vision_frame.shape[1]
-                                    vision_frame = cv2.resize(
-                                        vision_frame,
-                                        (self.vision_frame_width, int(vision_frame.shape[0] * scale)),
-                                    )
-                                try:
-                                    image_data_url = to_data_url(vision_frame)
-                                except Exception as exc:
-                                    logger.debug("Could not encode vision frame: %s", exc)
-
-                            # Schedule vision processing in LLM
-                            asyncio.run_coroutine_threadsafe(
-                                self.llm.process_vision(description, image_data_url),
-                                self.loop
-                            )
-                            
                     except Exception as e:
                         logger.error(f"Error posting frame: {e}")
                 

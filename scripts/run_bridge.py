@@ -167,8 +167,13 @@ class Server:
         if key == "thinking_prompt" and self.llm:
             await self.llm.set_thinking_prompt(str(value))
             return
+        if key == "preview_interval_sec" and self.cam:
+            self.cam.preview_interval_sec = float(value)
+            return
         if key == "snapshot_debounce" and self.cam:
-            self.cam.debounce_sec = float(value)
+            # Alias for old dashboards: snapshot_debounce was renamed to
+            # preview_interval_sec (finding 9).
+            self.cam.preview_interval_sec = float(value)
             return
         if key == "motion_sensitivity" and self.cam:
             self.cam.motion_threshold = int(value)

@@ -79,7 +79,7 @@ autonomous:
   thought_cooldown: 30
 
 ui:
-  snapshot_debounce: 4
+  preview_interval_sec: 0.5
   motion_sensitivity: 30
   vision_enabled: true
   gesture_enabled: false
