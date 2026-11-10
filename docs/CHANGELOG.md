@@ -1,5 +1,41 @@
 # Changelog - Bug Fixes & Optimizations
 
+## v0.4.0 - Frame memory & visible reasoning
+
+### ✨ Frame memory: the camera remembers what it saw
+- Vision calls now carry a rolling memory of the last few analyzed frames
+  (`vision.frame_memory_items`, default 5) as prompt context, so the model
+  can track change over time instead of seeing one amnesiac still per call.
+  Near-duplicate observations refresh the last entry instead of appending.
+  【F:src/backend/llm.py】
+- Frame memory is capped by item count and by tokens
+  (`vision.frame_memory_max_tokens`, default 512), and the token budget
+  check counts it — the history can never blow the Qwen context window.
+  【F:src/backend/llm.py】
+
+### ✨ The thoughts panel shows the model's real reasoning
+- `<think>` content is now streamed into the dashboard thoughts panel as
+  `Thinking: …` lines for chat, audio, and vision replies. The spoken path
+  is unchanged: `_sanitize_response` still strips think blocks before
+  anything reaches Piper, so reasoning is never read aloud.
+  【F:src/backend/llm.py】
+- New `vision.show_thinking` (default true) turns thinking on for vision
+  calls so there is reasoning to display, and reserves
+  `vision.thinking_max_tokens` (default 128) of output budget for it; set
+  `show_thinking: false` to restore the old status-lines-only panel.
+  `llm.show_thinking` (default true) is the same toggle for chat/audio.
+  【F:src/backend/llm.py】【F:config.yaml】
+- The old `Raw output: …` thought line is gone, replaced by the extracted
+  reasoning.【F:src/backend/llm.py】
+
+### 🔌 Ready for a future idle loop (no loop built yet)
+- Frame memory entries are timestamped, and the LLM keeps the last analyzed
+  frame/description, so a future periodic tick can call
+  `process_vision(last_frame_description, last_frame_image_url)` to ask
+  "think or speak?" without a new camera event. The think/speech split
+  above is what makes that safe: the tick's reasoning stays on screen and
+  only a passing observation ever reaches Piper.【F:src/backend/llm.py】
+
 ## v0.3.0 - Qwen vision upgrade
 
 ### ✨ Real vision input

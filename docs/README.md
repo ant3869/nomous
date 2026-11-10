@@ -4,7 +4,7 @@ This document provides a runtime-centric view of how Nomous stitches together th
 
 ## System Components
 - **WebSocket bridge** orchestrates messages between the UI and backend subsystems.【F:scripts/run_bridge.py†L1-L213】
-- **Local LLM (`llama.cpp`)** streams tokens, surfaces thought events, and can reload models at runtime.【F:src/backend/llm.py†L21-L212】
+- **Local LLM (`llama.cpp`)** streams tokens, surfaces the model's real reasoning as thought events (speech is a separate, think-stripped channel), and can reload models at runtime.【F:src/backend/llm.py†L21-L212】
 - **Speech input** converts PCM16 microphone data into transcripts using Vosk and automatically triggers LLM turns.【F:src/backend/audio.py†L33-L118】
 - **Piper TTS** synthesises audio and (on Windows) triggers local playback, with toggles exposed through WebSocket parameters.【F:src/backend/tts.py†L29-L138】【F:scripts/run_bridge.py†L72-L157】
 - **Camera & vision loop** streams preview frames, detects motion/gestures, and prompts the LLM for descriptions.【F:src/backend/video.py†L28-L123】【F:src/backend/video.py†L360-L437】

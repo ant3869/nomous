@@ -131,6 +131,10 @@ vision:
   image_max_tokens: 1024
   frame_width: 640
   enable_thinking: false
+  show_thinking: true
+  thinking_max_tokens: 128
+  frame_memory_items: 5
+  frame_memory_max_tokens: 512
   temperature: 0.5
 ```
 
@@ -139,6 +143,13 @@ The 27B model needs a 2–3-bit quant to fit; see `vision.model: qwen3.8-27b` in
 `config.yaml` and [docs/GPU_SETUP.md](docs/GPU_SETUP.md). The launcher installs
 the vision-capable llama-cpp-python fork wheel automatically — the stock PyPI
 package has no Qwen vision handlers.
+
+Vision calls carry a rolling memory of the last few analyzed frames
+(`frame_memory_items` / `frame_memory_max_tokens`), so the model can track
+change over time instead of seeing one still per call. The dashboard thoughts
+panel shows the model's real reasoning (`show_thinking`, on by default);
+reasoning is stripped before anything reaches Piper, so it is never spoken
+aloud.
 
 See [INSTALL_INSTRUCTIONS.md](docs/INSTALL_INSTRUCTIONS.md) for detailed setup steps.
 
