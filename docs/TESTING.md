@@ -85,13 +85,13 @@ Expected:
 Action: Wave at camera
 
 Expected:
-- Console: "👋 Gesture: waving"
-- AI responds: "I see you waving!"
+- Console: "👋 Gesture: open_hand"
+- AI responds: "I see an open hand!"
 - Response within 1 second
 
 ✅ Working if: Instant recognition
 ❌ Not working if: No gesture detection
-(If not working: run setup_gpu.bat to install MediaPipe)
+(If not working: pip install mediapipe, then restart - Task models auto-download on first run)
 ```
 
 ### 7. ⚡ Test GPU Speed (Optional, if GPU enabled)
@@ -106,7 +106,7 @@ Expected:
 
 ✅ Working if: Fast response + GPU active
 ❌ Not working if: 8-15 second delay + GPU idle
-(If not working: run setup_gpu.bat)
+(If not working: run the launcher - python scripts/start.py - it installs the GPU packages)
 ```
 
 ## Automated Tests
@@ -194,7 +194,7 @@ You should have:
 - ✅ Working microphone
 - ✅ AI with personality
 - ✅ Gesture recognition (if MediaPipe installed)
-- ✅ GPU acceleration (if setup_gpu.bat run)
+- ✅ GPU acceleration (if the launcher installed the GPU packages)
 
 ## Need Help?
 

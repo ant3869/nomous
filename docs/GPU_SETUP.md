@@ -1,237 +1,180 @@
 # GPU Setup and Troubleshooting Guide
 
-## Current Status
+## Current Setup
 
-**GPU Detected:** ✅ RTX 2080 Ti (11GB VRAM)  
-**CUDA Version:** 13.0 (Driver 581.57)  
-**PyTorch CUDA:** ❌ Not working (CPU-only or broken numpy)
+**GPU:** RTX 5070 Ti (16 GB VRAM)
+**CUDA driver:** 13.x (the launcher reads the driver version and picks matching wheels)
+**PyTorch:** CUDA build from the `cu128` wheel index (torch ships no wheels past cu128)
+**LLM runtime:** `llama-cpp-python` **JamePeng fork 0.4.6** — the stock PyPI package has no
+Qwen vision chat handlers, so image input only works with the fork wheel.
 
-## Issues Found
+The launcher (`python scripts/start.py`) does all of this automatically: it detects
+the driver CUDA version, installs the matching torch CUDA build, and installs the
+matching fork wheel from the JamePeng GitHub releases. The steps below are for
+manual setup or troubleshooting when the launcher path fails.
 
-### 1. NumPy Compatibility Error
-```
-ImportError: DLL load failed while importing _multiarray_umath
-```
-This indicates a Python/NumPy architecture mismatch or corrupted installation.
+## Vision model
 
-### 2. PyTorch May Not Have CUDA Support
-The `requirements.txt` just has `torch` without specifying CUDA version.
+Default (fits the 16 GB card, ~7 GB all-in):
 
-## Solution
+- `Qwen3VL-8B-Instruct-Q4_K_M.gguf` + `mmproj-Qwen3VL-8B-Instruct-F16.gguf`
+  from `Qwen/Qwen3-VL-8B-Instruct-GGUF` on Hugging Face
+- Config: `paths.gguf_path` and `paths.mmproj_path` in `config.yaml`
+  (mmproj is also auto-detected next to the model file)
 
-### Step 1: Fix NumPy and PyTorch with CUDA
+Option (tight fit, needs a 2–3-bit quant): Qwen3.8-27B. Set `vision.model: qwen3.8-27b`
+in `config.yaml`; the launcher picks `GenericMTMDChatHandler` for it instead of
+`Qwen3VLChatHandler`. Without an mmproj file the model runs text-only — the camera
+frames never reach it.
 
-Run this command to install proper GPU-enabled packages:
+## Manual setup
 
-```powershell
-# Uninstall potentially broken packages
-pip uninstall torch numpy -y
-
-# Install PyTorch with CUDA 11.8 (compatible with CUDA 13.0 driver)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# Install compatible numpy
-pip install "numpy<2.0" --force-reinstall
-```
-
-### Step 2: Install GPU-Accelerated llama-cpp-python
+### Step 1: Python dependencies
 
 ```powershell
-# Set environment variable for CUDA compilation
-$env:CMAKE_ARGS="-DGGML_CUDA=on"
-
-# Uninstall CPU version
-pip uninstall llama-cpp-python -y
-
-# Install GPU version (this compiles from source, takes 5-10 minutes)
-pip install llama-cpp-python --force-reinstall --upgrade --no-cache-dir --verbose
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### Step 3: Verify Installation
+`requirements.txt` pins every dependency, including `mediapipe==1.2.2` (Tasks API)
+and `opencv-contrib-python==4.12.0.88`. Do not let pip float them: MediaPipe 1.x
+removed `mp.solutions` (the old Hands API the code used to use), and OpenCV 5
+dropped the Haar `CascadeClassifier` the old face detector relied on.
+
+### Step 2: PyTorch with CUDA
 
 ```powershell
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
+pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
-Expected output:
-```
-PyTorch: 2.x.x+cu118
-CUDA Available: True
-GPU: NVIDIA GeForce RTX 2080 Ti
-```
-
-### Step 4: Test GPU Profiler
+The launcher clamps the torch wheel to cu128 even on CUDA 13.x drivers — there is
+no newer torch CUDA wheel. Verify with:
 
 ```powershell
-python tests\test_performance.py
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
 ```
 
-Expected output:
-```
-GPU Enabled: True
-Device Count: 1
-Device Name: NVIDIA GeForce RTX 2080 Ti
-```
+### Step 3: Vision-capable llama-cpp-python (JamePeng fork)
 
-## Updated Requirements
+The fork is never on PyPI. On Windows the launcher downloads the matching wheel
+from <https://github.com/JamePeng/llama-cpp-python/releases> (matched by Python
+version, e.g. `cp312`, and CUDA tag, e.g. `cu132`), for example:
 
-Create `requirements-gpu.txt`:
-
-```txt
-# Core dependencies
-websockets
-numpy<2.0
-opencv-contrib-python
-Pillow
-PyYAML
-requests
-diskcache
-Jinja2
-psutil
-rich
-pynvml
-
-# Audio/VAD/ASR
-sounddevice
-soundfile
-webrtcvad
-vosk
-
-# LLM (install separately with CUDA)
-# llama-cpp-python (see setup instructions)
-sentencepiece
-
-# Visualization
-matplotlib
-mediapipe
-
-# Testing
-pytest-asyncio
-
-# PyTorch with CUDA (install separately)
-# torch (see setup instructions)
+```text
+llama_cpp_python-0.4.6+cu132-cp312-cp312-win_amd64.whl
 ```
 
-## Quick Setup Script
-
-Create `setup_gpu_full.ps1`:
+Manual install:
 
 ```powershell
-# Nomous GPU Setup Script
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  Nomous GPU Optimization Setup" -ForegroundColor Cyan
-Write-Host "  RTX 2080 Ti (CUDA 13.0)" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
+pip install --force-reinstall --no-cache-dir "<wheel URL from the releases page>"
+```
 
-# Step 1: Fix NumPy
-Write-Host "`nStep 1: Fixing NumPy..." -ForegroundColor Yellow
-pip uninstall numpy -y
-pip install "numpy<2.0" --force-reinstall
+On Linux there are no prebuilt wheels — build the fork from source:
 
-# Step 2: Install PyTorch with CUDA
-Write-Host "`nStep 2: Installing PyTorch with CUDA..." -ForegroundColor Yellow
-pip uninstall torch torchvision torchaudio -y
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+```bash
+CMAKE_ARGS="-DGGML_CUDA=on" pip install --force-reinstall --no-cache-dir \
+  "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git@v0.4.6"
+```
 
-# Step 3: Install GPU llama-cpp-python
-Write-Host "`nStep 3: Installing GPU-accelerated llama-cpp-python..." -ForegroundColor Yellow
-Write-Host "This may take 5-10 minutes..." -ForegroundColor Gray
-$env:CMAKE_ARGS="-DGGML_CUDA=on"
-pip uninstall llama-cpp-python -y
-pip install llama-cpp-python --force-reinstall --upgrade --no-cache-dir
+Verify the handlers are present:
 
-# Step 4: Verify
-Write-Host "`nStep 4: Verifying installation..." -ForegroundColor Yellow
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}'); print(f'GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
+```powershell
+python -c "from llama_cpp.llama_multimodal import Qwen3VLChatHandler, GenericMTMDChatHandler; print('vision handlers OK')"
+```
 
-Write-Host "`n========================================" -ForegroundColor Green
-Write-Host "  Setup Complete!" -ForegroundColor Green
-Write-Host "========================================" -ForegroundColor Green
-Write-Host "`nRun: python tests\test_performance.py" -ForegroundColor Cyan
+If that import fails, vision calls fall back to text-only and the log will say so —
+the app still runs, it just cannot see images.
+
+### Step 4: MediaPipe Task models
+
+The gesture recognizer and face detector models auto-download on first run into
+`modules/models/mediapipe/` (gitignored):
+
+- `gesture_recognizer.task` (~8.4 MB)
+- `blaze_face_short_range.tflite` (~230 KB)
+
+If the download fails (no network), gestures and face detection stay off and the
+camera loop keeps running on motion + brightness only.
+
+### Step 5: Verify
+
+```powershell
+python tests\test_gpu.py
+python -m pytest tests/
 ```
 
 ## Troubleshooting
 
-### If PyTorch still shows CPU-only:
+### llama-cpp-python has no vision handlers
 
-1. **Check CUDA version compatibility:**
-   ```powershell
-   nvidia-smi
-   ```
-   Look for "CUDA Version: X.X"
+You have the stock PyPI build. Uninstall it and install the fork wheel (Step 3).
+Do not `pip install "llama-cpp-python[cuda]"` — that is the stock package.
 
-2. **Try different CUDA version:**
-   - CUDA 11.8: `--index-url https://download.pytorch.org/whl/cu118`
-   - CUDA 12.1: `--index-url https://download.pytorch.org/whl/cu121`
+### PyTorch shows CPU-only
 
-3. **Verify PATH includes CUDA:**
-   ```powershell
-   $env:PATH
-   ```
-   Should include paths like `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.x\bin`
+Check `nvidia-smi` for the driver CUDA version, then reinstall torch from the
+cu128 index (Step 2). The launcher prints the detected CUDA tag at startup.
 
-### If llama-cpp-python won't compile with CUDA:
+### MediaPipe import error / `mp.solutions` missing
 
-1. **Install Visual Studio Build Tools:**
-   - Download from: https://visualstudio.microsoft.com/downloads/
-   - Install "Desktop development with C++" workload
+`mp.solutions` was removed in MediaPipe 1.x. Install the pinned version
+(`pip install mediapipe==1.2.2`) — the code uses the Tasks API
+(`GestureRecognizer`, `FaceDetector`) only.
 
-2. **Install CMake:**
-   ```powershell
-   choco install cmake
-   ```
+### NumPy DLL errors on Windows
 
-3. **Restart PowerShell** to refresh environment variables
+A NumPy/architecture mismatch (e.g. mixing a 32-bit interpreter or a venv created
+inside the NumPy source tree). Recreate the venv from a clean directory and
+reinstall from `requirements.txt`.
 
-### If NumPy still breaks:
+### If llama-cpp-python won't build with CUDA (Linux source build)
 
-```powershell
-# Nuclear option: clean reinstall
-pip uninstall numpy -y
-pip cache purge
-pip install "numpy==1.24.3" --force-reinstall --no-cache-dir
-```
-
-## Performance Expectations
-
-Once GPU is working properly:
-
-| Metric | Before (CPU) | After (GPU RTX 2080 Ti) |
-|--------|--------------|-------------------------|
-| Model Loading | 30-60s | 5-15s |
-| Inference (8B model) | 8-15s | 1-3s |
-| Tokens/Second | 5-10 | 40-80 |
-| Memory Usage | 8GB RAM | 6GB VRAM |
-| Concurrent Processing | ❌ | ✅ |
+- Install Visual Studio Build Tools ("Desktop development with C++") on Windows,
+  or a C++ toolchain + CMake on Linux.
+- Restart the shell so the new tools are on PATH, then retry Step 3.
 
 ## Configuration
 
-Update `config.yaml`:
+`config.yaml` (current defaults):
 
 ```yaml
+paths:
+  gguf_path: H:/Models/Qwen3VL-8B-Instruct-Q4_K_M.gguf
+  mmproj_path: H:/Models/mmproj-Qwen3VL-8B-Instruct-F16.gguf
+
 llm:
   enable: true
-  n_ctx: 2048
-  n_gpu_layers: -1  # Use ALL GPU layers (recommended for RTX 2080 Ti)
-  n_threads: 4      # Reduced since GPU handles most work
-  temperature: 0.7
+  n_ctx: 16384
+  n_gpu_layers: -1  # all layers on GPU
+  n_threads: 8
+  temperature: 0.6
   top_p: 0.95
+
+vision:
+  enabled: true
+  model: qwen3-vl-8b
+  image_max_tokens: 1024
+  frame_width: 640
+  enable_thinking: false
+  temperature: 0.5
 ```
 
-## Next Steps
+Notes:
 
-After GPU is working:
+- Qwen disables context shift, so a context overflow is a hard error. The LLM
+  budgets every vision call (frame + prompt + output vs `n_ctx`), trims rolling
+  context first, and retries once after clearing context instead of crashing.
+- Thinking is off by default (`vision.enable_thinking: false`) and `<think>`
+  blocks are stripped from output before it reaches Piper, so reasoning is never
+  read aloud.
 
-1. ✅ Run performance tests
-2. ✅ Monitor GPU usage with `nvidia-smi -l 1`
-3. ✅ Test think/speak separation
-4. ✅ Verify TTS speaks final responses only
-5. ✅ Check GPU memory cleanup between generations
+## Performance Expectations
 
-## Support
-
-If issues persist, check:
-- `logs/nomous.log` for detailed errors
-- GPU temperature (should stay under 80°C)
-- VRAM usage (should leave ~2GB free)
-- Windows Event Viewer for driver issues
+| Metric | CPU-only | GPU (RTX 5070 Ti) |
+|--------|----------|-------------------|
+| Model loading (8B) | 30–60 s | 5–15 s |
+| Inference | 8–15 s | 1–3 s |
+| Tokens/second | 5–10 | 40–80 |
+| Vision frame (640px) | n/a | ~1 s per analysis |

@@ -19,13 +19,10 @@ This document provides a runtime-centric view of how Nomous stitches together th
 - Behaviour metrics, token throughput charts, and reward accounting surfaced in the dashboard.【F:src/backend/handlers.py†L24-L43】【F:src/frontend/App.tsx†L1614-L2158】
 
 ### ⚠️ WIP / Limited
-- Piper auto-playback still depends on Windows PowerShell – replace `_play_audio` for cross-platform support.【F:src/backend/tts.py†L87-L123】
 - GPU telemetry requires `torch`, `pynvml`, and `psutil`; missing dependencies disable metrics and break `tests/test_system.py` during import.【F:src/backend/system.py†L1-L152】【F:tests/test_system.py†L1-L120】
-- Pytest async markers emit warnings until `pytest.ini` declares `asyncio` as a known mark.【F:tests/test_tools.py†L80-L328】
 
 ### 🚧 Not Implemented Yet
 - Additional gesture classes and wake-word activation remain roadmap items from the changelog.【F:docs/CHANGELOG.md†L136-L170】
-- Cross-platform Piper playback so the spoken responses work on Linux/macOS.【F:src/backend/tts.py†L87-L123】
 
 ## Repository Layout
 ```

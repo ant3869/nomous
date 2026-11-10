@@ -11,7 +11,7 @@ Nomous is an offline-first WebSocket bridge that connects a TypeScript React das
 - 🧠 **Local LLM** loading via `llama.cpp`, including live load progress reporting and runtime sampling controls【F:src/backend/llm.py†L21-L115】【F:src/frontend/App.tsx†L330-L401】
 - 🎤 **Speech-to-Text** streaming from the browser microphone to Vosk with configurable sensitivity and automatic LLM triggering【F:src/backend/audio.py†L15-L118】【F:scripts/run_bridge.py†L108-L158】
 - 🗣️ **Text-to-Speech** synthesis through Piper with runtime toggles, voice switching, and optional auto playback【F:src/backend/tts.py†L15-L138】【F:scripts/run_bridge.py†L72-L157】
-- 👁️ **Computer Vision** capture with MediaPipe gesture detection, motion-aware frame streaming, and autonomous vision prompts for the LLM【F:src/backend/video.py†L1-L176】【F:src/backend/video.py†L360-L437】
+- 👁️ **Computer Vision** capture with MediaPipe Tasks gesture/face detection, motion-aware frame streaming, and real image input to a Qwen vision model — the camera frame itself goes to the model, not a text summary of it【F:src/backend/video.py†L1-L176】【F:src/backend/llm.py†L21-L212】
 - 📈 **System telemetry** that surfaces CPU/GPU utilisation and memory pressure inside the dashboard UI【F:src/backend/system.py†L1-L152】【F:src/frontend/components/SystemUsageCard.tsx†L1-L83】
 - 📚 **Persistent memory graph & tool system** that lets the model store observations, run self-evaluations, and surface tool activity in the UI【F:src/backend/memory.py†L1-L170】【F:src/backend/tools.py†L1-L146】【F:src/frontend/App.tsx†L376-L430】
 - 👤 **Person identity tracking** that recognizes individuals, learns names, associates conversations, and builds relationships across sessions【F:src/backend/person_tracker.py†L1-L620】
@@ -36,14 +36,11 @@ Nomous is an offline-first WebSocket bridge that connects a TypeScript React das
 - Persistent memory store that records interactions and streams the graph to the UI via WebSocket events【F:src/backend/memory.py†L13-L167】【F:src/frontend/App.tsx†L403-L430】
 
 ### ⚠️ Work in Progress / Limited Support
-- Piper auto-playback relies on a Windows PowerShell media player shim; audio playback must be replaced for Linux/macOS deployments even though synthesis still works【F:src/backend/tts.py†L87-L123】
 - GPU metrics require `torch`, `pynvml`, and `psutil`; missing dependencies will disable telemetry and cause the Python test suite to fail when system monitoring tests import them【F:src/backend/system.py†L1-L152】【F:tests/test_system.py†L1-L120】【62a53a†L1-L36】
-- Automated tooling around pytest async marks needs configuration – warnings appear until a custom `asyncio` marker is registered in `pytest.ini`【F:tests/test_tools.py†L80-L328】【62a53a†L11-L36】
 
 ### 🚧 Not Yet Implemented / Planned
-- Additional gesture classifiers (thumbs down, fists, etc.) and configurable gesture-to-action mappings noted in the roadmap【F:docs/CHANGELOG.md†L136-L170】
+- Additional gesture classifiers (thumbs down, etc.) and configurable gesture-to-action mappings noted in the roadmap【F:docs/CHANGELOG.md†L136-L170】
 - Custom wake-word activation for hands-free microphone capture【F:docs/CHANGELOG.md†L168-L170】
-- Cross-platform audio playback backend for Piper-generated speech so Linux/macOS users receive spoken feedback without external tools【F:src/backend/tts.py†L87-L123】
 
 ## Quick Start
 
@@ -113,7 +110,8 @@ Key configuration sections in `config.yaml`:
 
 ```yaml
 paths:
-  gguf_path: path/to/model.gguf
+  gguf_path: H:/Models/Qwen3VL-8B-Instruct-Q4_K_M.gguf
+  mmproj_path: H:/Models/mmproj-Qwen3VL-8B-Instruct-F16.gguf
   embed_gguf_path: models/embed/bge-small-en-v1.5-f16.gguf
   vosk_model_dir: path/to/vosk-model
   piper_exe: path/to/piper.exe
@@ -122,17 +120,31 @@ paths:
 
 llm:
   enable: true
-  n_ctx: 2048
-  n_threads: 4
+  n_ctx: 16384
+  n_threads: 8
   temperature: 0.6
   top_p: 0.95
+
+vision:
+  enabled: true
+  model: qwen3-vl-8b
+  image_max_tokens: 1024
+  frame_width: 640
+  enable_thinking: false
+  temperature: 0.5
 ```
+
+The vision model is Qwen3-VL-8B by default (~7 GB all-in, fits a 16 GB card).
+The 27B model needs a 2–3-bit quant to fit; see `vision.model: qwen3.8-27b` in
+`config.yaml` and [docs/GPU_SETUP.md](docs/GPU_SETUP.md). The launcher installs
+the vision-capable llama-cpp-python fork wheel automatically — the stock PyPI
+package has no Qwen vision handlers.
 
 See [INSTALL_INSTRUCTIONS.md](docs/INSTALL_INSTRUCTIONS.md) for detailed setup steps.
 
 ### Optional Components
-- **GPU acceleration** – enable by setting `llm.n_gpu_layers` and installing CUDA-enabled `llama-cpp-python`; telemetry additionally needs `torch` + `pynvml` (see `requirements.txt`).【F:src/backend/llm.py†L89-L115】【F:src/backend/system.py†L1-L152】
-- **Piper text-to-speech** – requires `paths.piper_exe`, `paths.piper_voice`, and `paths.piper_out_dir` to exist; auto playback currently targets Windows PowerShell.【F:src/backend/tts.py†L29-L138】
+- **GPU acceleration** – enable by setting `llm.n_gpu_layers`; the launcher installs the matching torch CUDA build and the vision-capable llama-cpp-python fork wheel automatically (see [docs/GPU_SETUP.md](docs/GPU_SETUP.md)). Telemetry additionally needs `torch` + `pynvml` (see `requirements.txt`).【F:src/backend/llm.py†L89-L115】【F:src/backend/system.py†L1-L152】
+- **Piper text-to-speech** – requires `paths.piper_exe`, `paths.piper_voice`, and `paths.piper_out_dir` to exist; playback is via sounddevice, cross-platform.【F:src/backend/tts.py†L29-L138】
 - **Vision analysis & gestures** – ensure OpenCV can access your camera and install `mediapipe` for gesture detection.【F:src/backend/video.py†L15-L68】
 
 ## Testing
