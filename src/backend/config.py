@@ -67,6 +67,10 @@ DEFAULT: Dict[str, Any] = {
         # cooldown both read vision.vision_cooldown. There is no
         # autonomous.vision_cooldown or ui.vision_cooldown anymore.
         "vision_cooldown": 15,
+        # Minimum cosine similarity between face embeddings to call two
+        # faces the same person (finding 4). MobileNetV3 embeddings are
+        # generic image vectors, not face-specific — tune on real faces.
+        "embedding_match_threshold": 0.7,
     },
     "audio": {
         "sample_rate": 16000,

@@ -116,11 +116,17 @@ class CameraLoop:
         # needs faces even when hand gestures are off.
         self._gesture_recognizer = None
         self._face_detector = None
+        self._face_embedder = None
         if MEDIAPIPE_AVAILABLE:
             self._init_mediapipe_tasks()
+            self._init_face_embedder()
 
         # Person tracking for persistent recognition
-        self.person_tracker = PersonTracker()
+        self.person_tracker = PersonTracker(
+            embedding_match_threshold=float(
+                cfg.get("vision", {}).get("embedding_match_threshold", 0.7)
+            )
+        )
         self._last_person_count = 0
         self._last_person_update = 0
         self._person_tracking_cooldown = 5.0  # Seconds between person tracking updates
@@ -172,6 +178,62 @@ class CameraLoop:
             logger.warning("MediaPipe Tasks init failed: %s", exc)
             self._gesture_recognizer = None
             self._face_detector = None
+
+    def _init_face_embedder(self):
+        """Build the ImageEmbedder used for real person recognition.
+
+        MobileNetV3 (vendored) turns each detected face crop into a
+        1024-dim L2-normalized embedding; the person tracker matches on
+        cosine similarity instead of face size + screen position. Without
+        it, recognition falls back to the old size/position heuristic.
+        """
+        model_path = resolve_model("mobilenet_v3_small.tflite")
+        if model_path is None:
+            logger.warning("Face embedder model unavailable; person recognition falls back to size/position")
+            return
+        try:
+            self._face_embedder = mp_vision.ImageEmbedder.create_from_options(
+                mp_vision.ImageEmbedderOptions(
+                    base_options=MpBaseOptions(model_asset_path=str(model_path)),
+                    running_mode=mp_vision.RunningMode.IMAGE,
+                    l2_normalize=True,
+                    quantize=False,
+                )
+            )
+            logger.info("Face embedder initialized")
+        except Exception as exc:
+            logger.warning("Face embedder init failed: %s", exc)
+            self._face_embedder = None
+
+    def _embed_face_crop(self, frame_rgb, face_rect):
+        """Embed one detected face crop; None when the embedder is unavailable."""
+        if self._face_embedder is None or not MEDIAPIPE_AVAILABLE:
+            return None
+        try:
+            x, y, w, h = (int(v) for v in face_rect)
+            height, width = frame_rgb.shape[:2]
+            # Pad ~20% so the embedding sees the whole face, not a tight box.
+            pad_x, pad_y = int(w * 0.2), int(h * 0.2)
+            x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+            x1, y1 = min(width, x + w + pad_x), min(height, y + h + pad_y)
+            if x1 <= x0 or y1 <= y0:
+                return None
+            crop = frame_rgb[y0:y1, x0:x1]
+            resized = cv2.resize(crop, (224, 224))
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=resized)
+            result = self._face_embedder.embed(mp_image)
+            if not result.embeddings:
+                return None
+            embedding = result.embeddings[0]
+            vector = getattr(embedding, "embedding", None)
+            if vector is None:
+                vector = getattr(embedding, "float_embedding", None)
+            if vector is None:
+                return None
+            return [float(v) for v in vector]
+        except Exception as exc:
+            logger.debug("Face embedding failed: %s", exc)
+            return None
 
     def set_llm(self, llm):
         """Set LLM reference for vision analysis."""
@@ -246,7 +308,7 @@ class CameraLoop:
             self._thr.join(timeout=2)
         self._running = False
 
-        for detector in (self._gesture_recognizer, self._face_detector):
+        for detector in (self._gesture_recognizer, self._face_detector, self._face_embedder):
             if detector is not None:
                 try:
                     detector.close()
@@ -254,6 +316,7 @@ class CameraLoop:
                     pass
         self._gesture_recognizer = None
         self._face_detector = None
+        self._face_embedder = None
 
         logger.info("CameraLoop stopped")
 
@@ -411,11 +474,14 @@ class CameraLoop:
 
         if self._face_detector is not None:
             try:
-                faces = self._detect_faces(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                faces = self._detect_faces(frame_rgb)
                 face_count = len(faces)
 
                 # Convert faces to list of tuples for person tracker
                 faces_list = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+                # One embedding per face: the tracker's real identity signal.
+                face_embeddings = [self._embed_face_crop(frame_rgb, rect) for rect in faces_list]
 
                 # Update person tracker if count changed or enough time passed
                 now = time.time()
@@ -434,7 +500,8 @@ class CameraLoop:
                             self.person_tracker.process_frame(
                                 faces_list,
                                 self.process_width,
-                                self.process_height
+                                self.process_height,
+                                face_embeddings=face_embeddings
                             ),
                             self.loop
                         )
