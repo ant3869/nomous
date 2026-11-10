@@ -12,12 +12,12 @@ Nomous is an offline-first WebSocket bridge that connects a TypeScript React das
 - 👁️ **Computer Vision** capture with MediaPipe Tasks gesture/face detection, motion-aware frame streaming, and real image input to a Qwen vision model — the camera frame itself goes to the model, not a text summary of it
 - 📈 **System telemetry** that surfaces CPU/GPU utilisation and memory pressure inside the dashboard UI
 - 📚 **Persistent memory graph & tool system** that lets the model store observations, run self-evaluations, and surface tool activity in the UI
-- 👤 **Person identity tracking** that recognizes individuals, learns names, associates conversations, and builds relationships across sessions
+- 👤 **Person identity tracking** that recognizes individuals via on-device face embeddings (MediaPipe ImageEmbedder, cosine-matched in the person tracker), learns names, associates conversations, and builds relationships across sessions
 
 ## Feature Highlights
 - ✨ Real-time token streaming, load overlays, and chat playback for every assistant response
 - 🛠️ **25+ built-in LLM tools** covering memory search, observation logging, learning, social safeguards, and person tracking with UI visualisation of tool usage and stats
-- 👤 **Person identity tracking** with visual signature matching, automatic name detection, conversation binding, and relationship building
+- 👤 **Person identity tracking** with face-embedding matching, automatic name detection, conversation binding, and relationship building
 - 📹 Live camera preview with motion thresholds, gesture detection, face detection, and configurable preview-interval/cooldown windows
 - 🎙️ Browser microphone streaming (PCM16) with automatic speech detection and configurable sensitivity
 - 🔊 Optional Piper TTS synthesis with per-session toggles for enablement, auto playback, volume, and voice selection

@@ -64,6 +64,8 @@ vision:
   frame_memory_items: 5
   frame_memory_max_tokens: 512
   vision_cooldown: 15
+  scene_digest_minutes: 10
+  embedding_match_threshold: 0.7
 
 camera:
   backend: dshow

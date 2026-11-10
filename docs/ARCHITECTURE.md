@@ -111,6 +111,31 @@ for later; `set_muted` / `toggle_muted` are what the gesture actions
 use. `piper_out` is pruned to the newest 20 `speech_*.wav` files after
 each synthesis.
 
+## Vision & presence
+
+- **Preview vs analysis.** The dashboard preview is a steady ~2 fps
+  timer (`ui.preview_interval_sec`, default 0.5) regardless of motion;
+  vision analysis stays on its own cooldown (`vision.vision_cooldown`)
+  or a gesture. The two were one gate; they are independent now.
+- **Scene digest.** In a static scene `autonomous_thought` describes
+  the room every `vision.scene_digest_minutes` (default 10), but only
+  when the latest description is similar to the last digested one — a
+  changed scene gets its own vision comment instead.
+- **Describe the scene.** A chat/voice request matching
+  "describe the scene" / "what do you see" / "what's around" bypasses
+  the text model and asks the vision model about the freshest frame
+  (`describe_scene()`), with no suppression or cooldown.
+- **Person recognition.** `CameraLoop` embeds each detected face crop
+  (MobileNetV3, 1024-dim) and `PersonTracker` matches on cosine
+  similarity (≥ `vision.embedding_match_threshold`, default 0.7), with
+  a veto below 0.4 and the size/position heuristic as fallback. Stored
+  embeddings are an exponential moving average, so one wobbly frame
+  cannot re-anchor an identity. When a known face is present, the
+  vision prompt carries a one-line recall of their last conversation.
+- **Gesture actions.** open_hand pauses speech (`tts.interrupt()`),
+  closed_fist toggles the mute (`tts.toggle_muted()`); dispatched from
+  the camera thread, on by default (`ui.gesture_enabled: true`).
+
 ## Config
 
 `ConfigLoader` deep-merges `config.yaml` over `DEFAULT` in
@@ -128,10 +153,14 @@ preview now runs on a steady ~2 fps cadence instead of only on motion.
 
 ## First run
 
-MediaPipe task models auto-download on first run into
-`modules/models/mediapipe/` (pinned URLs, see `video.py`), the Vosk
-model and Piper voice/executable are resolved from `paths` in config,
-and `scripts/start.py` checks the pieces before the bridge starts.
+MediaPipe task models are vendored in `assets/mediapipe/` (pinned URLs
++ sha256 in `assets/mediapipe/manifest.json`, verified by
+`src/backend/mediapipe_assets.py`); the legacy `modules/models/mediapipe/`
+download dir is only a fallback. The Vosk model and Piper
+voice/executable are resolved from `paths` in config, and
+`scripts/start.py` runs a preflight that verifies every local asset
+before the bridge starts — a missing or corrupt MediaPipe model is
+fatal, the Nexus-side assets only warn.
 
 ## Known gaps (deliberately not done in v0.5.0)
 

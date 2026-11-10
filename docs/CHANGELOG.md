@@ -42,6 +42,41 @@
 - Deleted `src/backend/handlers.py`: dead code, nothing imported it, and
   it referenced APIs that no longer exist.
 
+### 🎥 Findings 3, 4, 8, 9, 10, 11
+
+- Scene digest + describe-the-scene (finding 3): in a static scene the
+  vision pipeline stays quiet for minutes, so `autonomous_thought` now
+  describes the room on a timer (`vision.scene_digest_minutes`, default
+  10, 0 disables) — but only when the scene is unchanged, so a digest
+  never interrupts something new. A "describe the scene" / "what do you
+  see?" request in chat or voice goes straight to the vision model
+  about the freshest frame, bypassing suppression and cooldown.
+- Real person recognition (finding 4): each detected face crop is
+  embedded on-device by a vendored MediaPipe ImageEmbedder (MobileNetV3,
+  1024-dim L2-normalized) and matched on cosine similarity
+  (`vision.embedding_match_threshold`, default 0.7). A clearly-different
+  embedding vetoes a size/position match; the ambiguous middle band
+  still lets the heuristic decide. Stored embeddings update by
+  exponential moving average and persist in the memory dicts.
+- First-run robustness (finding 8): the MediaPipe task models are
+  vendored in `assets/mediapipe/` with a manifest pinning each file's
+  URL + sha256; `src/backend/mediapipe_assets.py` resolves and verifies
+  them (vendored → legacy dir → pinned-URL download, all checksum
+  checked). `scripts/start.py` runs a preflight before the bridge
+  starts: a missing or corrupt MediaPipe model is fatal, the
+  Nexus-side assets (Vosk, Piper, GGUF) only warn.
+- Preview cadence decoupled from analysis (finding 9): the dashboard
+  preview now runs on a steady ~2 fps timer (`ui.preview_interval_sec`,
+  default 0.5, replacing `ui.snapshot_debounce`) regardless of motion,
+  while vision analysis stays on its own cooldown. The bridge param
+  `snapshot_debounce` remains as an alias for old dashboards.
+- Gesture actions (finding 10): open palm pauses in-flight speech,
+  fist toggles the mute; `ui.gesture_enabled` is now true by default.
+- Proactive recall (finding 11): when a known face is present, the
+  vision prompt carries a one-line "last time you saw this person"
+  recall built from their most recent conversation; strangers get no
+  recall line.
+
 ### 📚 Docs cleanup
 - Removed the file-citation markers (e.g. `[F:src/backend/llm.py]`) left in
   README.md, docs/README.md, and this changelog by the v0.3.0/v0.4.0 doc
