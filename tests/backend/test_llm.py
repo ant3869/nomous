@@ -121,6 +121,55 @@ def test_frame_memory_trims_after_refresh_grows_entry():
     assert llm._estimate_tokens(llm._frame_memory_block()) <= 64
 
 
+@pytest.mark.asyncio
+async def test_generate_vision_trims_history_to_fit():
+    llm = _bare_llm()
+    llm.model = object()
+    llm._vision_available = True
+    llm.vision_show_thinking = False
+    llm.vision_thinking_max_tokens = 128
+    llm._cfg = {"llm": {"n_ctx": 1200}}
+    llm._run_vision_completion = lambda messages, max_tokens: "I see one person sitting."
+    posts = []
+
+    class FakeBridge:
+        async def post(self, payload):
+            posts.append(payload)
+
+    llm.bridge = FakeBridge()
+    llm._record_frame_observation(
+        "I see 1 person in a moderately lit environment with a red bicycle leaning against the brick wall nearby.",
+        "I see one person sitting near a red bicycle leaning against a brick wall in a moderately lit room.",
+    )
+    assert llm._frame_memory
+    result = await llm._generate_vision("data:image/jpeg;base64,xxx", "Describe what you see.", max_tokens=60)
+    assert result == "I see one person sitting."
+    assert llm._frame_memory == []
+    assert not [p for p in posts if p.get("type") == "event"]
+
+
+@pytest.mark.asyncio
+async def test_generate_vision_still_skips_when_bare_frame_too_big():
+    llm = _bare_llm()
+    llm.model = object()
+    llm._vision_available = True
+    llm.vision_show_thinking = False
+    llm.vision_thinking_max_tokens = 128
+    llm._cfg = {"llm": {"n_ctx": 1000}}
+    llm._run_vision_completion = lambda messages, max_tokens: "I see one person sitting."
+    posts = []
+
+    class FakeBridge:
+        async def post(self, payload):
+            posts.append(payload)
+
+    llm.bridge = FakeBridge()
+    llm._record_frame_observation("I see 1 person in a moderately lit environment.", "I see one person sitting.")
+    result = await llm._generate_vision("data:image/jpeg;base64,xxx", "Describe what you see.", max_tokens=60)
+    assert result == ""
+    assert any("vision skipped" in p.get("message", "") for p in posts if p.get("type") == "event")
+
+
 def test_frame_memory_caps_items():
     llm = _bare_llm(frame_memory_items=2)
     llm._record_frame_observation("A red bicycle leans against a brick wall.", "")

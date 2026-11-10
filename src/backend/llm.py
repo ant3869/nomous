@@ -1523,6 +1523,19 @@ class LocalLLM:
             self.vision_thinking_max_tokens if self.vision_show_thinking else 0
         )
         if not self._vision_fits_budget(full_prompt, output_tokens):
+            # History is the only trimmable part of the request: evict the
+            # oldest entries until it fits. Without this a static scene
+            # stalls forever — every skipped call records an empty
+            # observation while the older history responsible for the
+            # overflow stays put. A bare frame that still doesn't fit is
+            # skipped as before.
+            while self._frame_memory:
+                self._frame_memory.pop(0)
+                history = self._frame_memory_block()
+                full_prompt = f"{history}\n\n{prompt_text}" if history else prompt_text
+                if self._vision_fits_budget(full_prompt, output_tokens):
+                    break
+        if not self._vision_fits_budget(full_prompt, output_tokens):
             logger.warning("Vision call skipped: frame + prompt exceed context window")
             await self.bridge.post(msg_event("vision skipped: frame too large for context window"))
             return ""
