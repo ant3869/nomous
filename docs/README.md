@@ -79,6 +79,9 @@ camera:
 autonomous:
   enabled: true
   thought_cooldown: 30
+  tick_seconds: 30
+  speak_enabled: true
+  min_speak_interval_seconds: 300
 
 ui:
   preview_interval_sec: 0.5

@@ -277,15 +277,21 @@ class Server:
             raise
 
     async def _autonomous_loop(self):
-        """Background task for autonomous thoughts."""
-        logger.info("Autonomous loop running")
-        await asyncio.sleep(30)  # Initial delay
-        
+        """Background task for autonomous thoughts.
+
+        Free-running idle tick: wakes the model on a schedule (no user or
+        camera event needed) so it can think, speak, or act on its own.
+        Cadence comes from autonomous.tick_seconds in config.yaml.
+        """
+        tick = max(5, int((CFG.get("autonomous", {}) or {}).get("tick_seconds", 30) or 30))
+        logger.info("Autonomous idle loop started/running (tick %ss)", tick)
+        await asyncio.sleep(tick)  # Initial delay
+
         while True:
             try:
                 if self.llm and self.llm.autonomous_mode:
                     await self.llm.autonomous_thought()
-                await asyncio.sleep(30)  # Check every 30 seconds
+                await asyncio.sleep(tick)
             except asyncio.CancelledError:
                 logger.info("Autonomous loop cancelled")
                 break
