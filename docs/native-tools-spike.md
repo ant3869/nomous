@@ -89,8 +89,9 @@ different wire format, and it leaves the door open to true native calls
 later if the fork gains a parser (or Nomous patches the fork's
 `MTMDChatHandler.__call__` to parse the blocks before converting).
 
-Concretely: pass `tools=` (the template and the model handle the rest),
-parse in the adapter, execute, feed results back for the follow-up turn
+Concretely: pass `tools=` with each registry definition wrapped as
+`{"type": "function", "function": definition}` (the template and the
+model handle the rest), parse in the adapter, execute, feed results back for the follow-up turn
 exactly as `_generate` does today. Do not wait for an upstream fork fix
 to do this — the parsing is ~20 lines and fully in Nomous's control.
 
@@ -147,7 +148,7 @@ Verified against master `b2117f4` (26 tools registered in
 | `llm.py:1366–1376` | `_generate` detects `TOOL_CALL:` in the raw response, `self.tools.parse_tool_calls()` (`tools.py:854`), `self.tools.execute_tool()` (`tools.py:600`), then re-generates a follow-up with results (tool calls disabled on the follow-up) |
 | `llm.py:1583` (`_run_vision_completion`) | Vision path already uses `create_chat_completion` — but without `tools=` |
 | `llm.py:1712, 1790, 2139, 2298, 2381` | `_build_prompt` callers with tools: `chat`, `process_audio`, vision, `_idle_act`/autonomous |
-| `tools.py:530 / 539 / 555` | `get_mcp_tools` / `get_tools_schema` / `get_tools_prompt` — all three derive from the same MCP-style definitions, so they cannot disagree about parameters. The OpenAI-compatible schema `get_tools_schema` already returns is exactly what `tools=` needs; no schema conversion work is required |
+| `tools.py:530 / 539 / 555` | `get_mcp_tools` / `get_tools_schema` / `get_tools_prompt` — all three derive from the same MCP-style definitions, so they cannot disagree about parameters. The per-tool content (`name`, `description`, `parameters`) that `get_tools_schema` returns is already OpenAI-shaped, but each flat definition must be wrapped as `{"type": "function", "function": definition}` before passing it to `tools=` — the spike did this wrapping; it is a one-line envelope, not a schema translation |
 | `scripts/run_bridge.py:599, 612` | Dashboard `tools/list` serves `get_mcp_tools()`; `tools/call` executes via `execute_tool` |
 
 ## MCP client adapter — placement and estimate
