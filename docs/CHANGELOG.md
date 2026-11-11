@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### 🔧 Native-tools spike: `tools=` fails structured, model emits native calls 30/30
+
+- Ran native llama-cpp `tools=` against the shipped Qwen3-VL build
+  (JamePeng fork 0.4.6 + Qwen3-VL-8B-Instruct Q4_K_M) with 3 registry
+  schemas × 10 prompts: structured `tool_calls` rate **0/30** — the fork
+  never parses them. But the model emitted well-formed native Qwen
+  `<tool_call>` JSON on **30/30** trials, so the failure is the fork's
+  response parsing, not the model (full results, root cause with
+  file/line citations, and the MCP-adapter estimate in
+  `docs/native-tools-spike.md`).
+- Recommendation: keep a parser behind one adapter, but parse the
+  model's native `<tool_call>` JSON instead of the custom `TOOL_CALL:`
+  text format; do not adopt bare `create_chat_completion(tools=)`.
+  Adapter estimate ~2 days, living in a new file outside `llm.py`.
+- Side findings recorded in the spike note: `scripts/start.py` pins a
+  nonexistent `@v0.4.6` fork ref, the fork needs its llama.cpp submodule
+  checked out before a source build, and F16 mmproj + 8B model thrash on
+  an 8 GB RAM box (Q8_0 mmproj + `n_ctx` 2048 fixed it for the spike).
+
 ### 🎧 Hearing: ambient audio as a second sense
 
 - The host mic is now a sense on its own, alongside vision — not chat
