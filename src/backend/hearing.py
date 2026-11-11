@@ -203,6 +203,17 @@ class AmbientHearing:
         except Exception as exc:  # pragma: no cover - dashboard already gone
             logger.debug("hearing state post failed: %s", exc)
 
+    @property
+    def state(self) -> str:
+        """Current capture state: off | listening | error."""
+        return self._state
+
+    async def announce_state(self) -> None:
+        """Re-broadcast the current state (e.g. to a newly connected
+        dashboard) so its mic indicator shows the real capture state,
+        not its defaults."""
+        await self._post_state(self._state)
+
     async def start(self) -> bool:
         """Start ambient capture. Returns False (hearing stays off) when
         the mic stack is unavailable — never raises into startup."""
@@ -280,10 +291,23 @@ class AmbientHearing:
             logger.debug("hearing stream close failed: %s", exc)
         finally:
             self._stream = None
+        # The sentinel is the drain task's only exit signal when the queue
+        # is empty, so it must get in even when the queue is full
+        # (transcription behind): drop a stale frame to make room. If the
+        # queue refills before the retry (an in-flight mic callback), the
+        # drain still exits via the _running check on the next frame it
+        # consumes, so a failed retry is safe to swallow.
         try:
-            self._queue.put_nowait(None)  # sentinel unblocks the drain task
+            self._queue.put_nowait(None)
         except queue.Full:
-            pass
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
         if self._drain_task is not None:
             try:
                 await self._drain_task
@@ -317,7 +341,7 @@ class AmbientHearing:
         """Consume queued frames, segment, transcribe, deliver evidence."""
         while True:
             frame = await asyncio.to_thread(self._queue.get)
-            if frame is None:  # stop() sentinel
+            if frame is None or not self._running:  # stop() sentinel / shutdown
                 break
             if self._segmenter is None:
                 continue
@@ -353,7 +377,13 @@ class AmbientHearing:
 
     async def _emit_evidence(self, text: str, kind: str) -> None:
         """Hand one heard thing to the idle loop + dashboard."""
-        logger.info("Hearing (%s): '%s'", kind, text[:80])
+        if self._cfg.get("retain_transcripts", True):
+            logger.info("Hearing (%s): '%s'", kind, text[:80])
+        else:
+            # Retention off: room speech must not land in persistent logs
+            # either — the bridge writes INFO to logs/nomous.log. Metadata
+            # only; the transcript itself goes to the idle loop in memory.
+            logger.info("Hearing (%s): %d chars (transcript retention off)", kind, len(text))
         await self._post_state("listening", text=text, kind=kind)
         if self._llm is not None:
             try:

@@ -1178,7 +1178,11 @@ function useNomousBridge() {
         }
         case "hearing": {
           // Ambient hearing (host mic as a sense): state drives the
-          // mic-live indicator; heard lines feed the hearing log.
+          // mic-live indicator; heard lines feed the hearing log. The
+          // control follows the backend state too, so a dashboard that
+          // connects while hearing is already live (config-enabled, or
+          // another client enabled it) shows the real mic state — and a
+          // failed start flips the toggle back off.
           const hearingState = msg.state === "listening" ? "listening" : msg.state === "error" ? "error" : "off";
           const heardText = typeof msg.text === "string" ? msg.text : "";
           const kind = typeof msg.kind === "string" ? msg.kind : "speech";
@@ -1186,6 +1190,10 @@ function useNomousBridge() {
           setState(p => ({
             ...p,
             hearingState,
+            settings: {
+              ...p.settings,
+              hearingEnabled: hearingState === "listening" ? true : hearingState === "off" || hearingState === "error" ? false : p.settings.hearingEnabled,
+            },
             hearingLines: heardText
               ? [`${stamp} 🎧 Heard (${kind}): "${heardText}"`, ...p.hearingLines.slice(0, 49)]
               : p.hearingLines,

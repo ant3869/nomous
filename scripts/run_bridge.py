@@ -511,9 +511,14 @@ class Server:
         
         self.clients.add(ws)
         await self.bridge.register_ws(ws)
-        
+
         try:
             await self.bridge.post(msg_event("connected"))
+            # A new dashboard must see the real mic state, not its
+            # defaults: hearing may already be listening (config-enabled,
+            # or another client enabled it) before this client connected.
+            if self.hearing is not None:
+                await self.hearing.announce_state()
             if self.memory and self.memory.enabled:
                 await self.memory.publish_graph()
 

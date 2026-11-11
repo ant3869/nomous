@@ -221,6 +221,53 @@ async def test_emit_evidence_posts_hearing_message_and_fills_slot():
     assert llm._last_audio_evidence == "hello from the room"
 
 
+@pytest.mark.asyncio
+async def test_emit_evidence_keeps_transcript_out_of_logs_when_retention_off(caplog):
+    # Codex P1: with retain_transcripts off, room speech must not land in
+    # the persistent INFO log (the bridge writes it to logs/nomous.log).
+    import logging
+
+    bridge = SimpleNamespace(post=AsyncMock())
+    llm = _bare_hearing_llm(autonomous_mode=False)
+    hearing = AmbientHearing({"hearing": {"retain_transcripts": False}}, bridge)
+    hearing.set_llm(llm)
+    with caplog.at_level(logging.INFO, logger="src.backend.hearing"):
+        await hearing._emit_evidence("secret room conversation", "speech")
+    assert "secret room conversation" not in caplog.text
+    assert "transcript retention off" in caplog.text
+    # The evidence still reaches the idle loop (in memory, transient).
+    assert llm._last_audio_evidence == "secret room conversation"
+
+
+@pytest.mark.asyncio
+async def test_emit_evidence_logs_transcript_when_retention_on(caplog):
+    import logging
+
+    bridge = SimpleNamespace(post=AsyncMock())
+    llm = _bare_hearing_llm(autonomous_mode=False)
+    hearing = AmbientHearing({}, bridge)
+    hearing.set_llm(llm)
+    with caplog.at_level(logging.INFO, logger="src.backend.hearing"):
+        await hearing._emit_evidence("hello from the room", "speech")
+    assert "hello from the room" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stop_with_full_queue_still_shuts_down():
+    # Codex P2: a backed-up transcriber fills the bounded queue; stop()
+    # must still deliver its shutdown signal and return, never hang.
+    bridge = SimpleNamespace(post=AsyncMock())
+    hearing = AmbientHearing({}, bridge)
+    hearing._running = True
+    hearing._segmenter = HearingSegmenter(lambda frame: False)
+    hearing._drain_task = asyncio.create_task(hearing._drain())
+    for _ in range(200):  # fill the bounded queue to capacity
+        hearing._queue.put_nowait(FRAME)
+    await asyncio.wait_for(hearing.stop(), timeout=5)
+    assert hearing._running is False
+    assert hearing._drain_task is None
+
+
 # --- LLM: evidence slot, prompt tick, retention gate -----------------------
 
 
