@@ -23,6 +23,31 @@ from .gpu_profiler import profiler as gpu_profiler
 logger = logging.getLogger(__name__)
 
 
+# Phrases that unambiguously ask what the camera sees right now.
+_DESCRIBE_SCENE_PATTERNS = (
+    "describe the scene",
+    "describe what you see",
+    "describe the room",
+    "what do you see",
+    "what can you see",
+    "what's around",
+    "what is around",
+    "what's in front of you",
+)
+# 'What's happening' on its own is a general question ('...in the
+# news?', '...with my project?'); it only routes to the camera with a
+# spatial anchor, so normal generation keeps those.
+_HAPPENING_PATTERNS = ("what's happening", "what is happening")
+_VISUAL_ANCHORS = (
+    "here",
+    "there",
+    "around",
+    "in the room",
+    "in front of you",
+    "over there",
+)
+
+
 if TYPE_CHECKING:  # pragma: no cover - typing aid only
     from .analytics import ConversationAnalytics
 
@@ -1838,23 +1863,19 @@ class LocalLLM:
 
     @staticmethod
     def _is_describe_scene_request(text: str) -> bool:
-        """True when the user is asking what the camera sees right now."""
+        """True when the user is asking what the camera sees right now.
+
+        A bare 'what's happening' is not enough — 'what's happening in
+        the news?' or '...with my project?' are general questions that
+        must keep normal generation and tools. 'Happening' only counts
+        with a spatial anchor ('here', 'around you', ...).
+        """
         lowered = text.lower()
-        return any(
-            phrase in lowered
-            for phrase in (
-                "describe the scene",
-                "describe what you see",
-                "describe the room",
-                "what do you see",
-                "what can you see",
-                "what's around",
-                "what is around",
-                "what's happening",
-                "what is happening",
-                "what's in front of you",
-            )
-        )
+        if any(phrase in lowered for phrase in _DESCRIBE_SCENE_PATTERNS):
+            return True
+        if any(phrase in lowered for phrase in _HAPPENING_PATTERNS):
+            return any(anchor in lowered for anchor in _VISUAL_ANCHORS)
+        return False
 
     async def describe_scene(self) -> str:
         """Fresh one-sentence description of the current frame, on demand.

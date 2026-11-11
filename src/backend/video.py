@@ -110,6 +110,10 @@ class CameraLoop:
         self.gesture_enabled = bool(cfg["ui"].get("gesture_enabled", True))
         self.last_gesture_time = 0
         self.gesture_cooldown = float(cfg["ui"].get("gesture_cooldown", 3))
+        # Last dispatched gesture; "" means the hand was released. A held
+        # gesture re-triggers every cooldown interval — only the
+        # transition dispatches, so a sustained fist toggles mute once.
+        self._last_gesture = ""
 
         # MediaPipe Tasks detectors (gestures + faces); None when unavailable.
         # Face detection is independent of the gesture toggle: person tracking
@@ -622,6 +626,24 @@ class CameraLoop:
         """
         return bool(gesture) or (now - last_preview_send) >= self.preview_interval_sec
 
+    def _handle_detected_gesture(self, gesture: str, now: float) -> None:
+        """Act on a detected gesture, once per press.
+
+        A held gesture re-triggers every cooldown interval; only the
+        transition dispatches, so a sustained fist toggles mute once
+        instead of alternating it every few seconds. An empty detection
+        means the hand was released and resets the tracker.
+        """
+        if gesture:
+            self.last_gesture_time = now
+            if gesture != self._last_gesture:
+                self._last_gesture = gesture
+                logger.info(f"GESTURE: {gesture}")
+                self._post_event(f"👋 Gesture: {gesture}")
+                self._dispatch_gesture(gesture)
+        elif self._last_gesture:
+            self._last_gesture = ""
+
     def _dispatch_gesture(self, gesture: str) -> None:
         """Map a detected hand gesture to an action.
 
@@ -778,12 +800,8 @@ class CameraLoop:
                 if self.gesture_enabled and (now - self.last_gesture_time) >= self.gesture_cooldown:
                     frame_rgb = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
                     gesture = self._detect_gesture(frame_small, frame_rgb)
-                    
-                    if gesture:
-                        self.last_gesture_time = now
-                        logger.info(f"GESTURE: {gesture}")
-                        self._post_event(f"👋 Gesture: {gesture}")
-                        self._dispatch_gesture(gesture)
+
+                    self._handle_detected_gesture(gesture, now)
                 
                 # Dashboard preview: steady cadence (~2 fps) regardless of
                 # motion, so the UI shows a live feed instead of a still

@@ -125,7 +125,10 @@ each synthesis.
 - **Describe the scene.** A chat/voice request matching
   "describe the scene" / "what do you see" / "what's around" bypasses
   the text model and asks the vision model about the freshest frame
-  (`describe_scene()`), with no suppression or cooldown. The frame
+  (`describe_scene()`), with no suppression or cooldown. A bare
+  "what's happening" does not route here — it needs a spatial anchor
+  ("here", "around you", ...), so general questions keep normal
+  generation. The frame
   cache refreshes on every preview send, not just on analysis, so the
   answer is current.
 - **Person recognition.** `CameraLoop` embeds each detected face crop
@@ -138,7 +141,9 @@ each synthesis.
   vision prompt carries a one-line recall of their last conversation.
 - **Gesture actions.** open_hand pauses speech (`tts.interrupt()`),
   closed_fist toggles the mute (`tts.toggle_muted()`); dispatched from
-  the camera thread, on by default (`ui.gesture_enabled: true`).
+  the camera thread, on by default (`ui.gesture_enabled: true`), once
+  per press — a held gesture re-triggering every cooldown interval does
+  not re-dispatch until the hand is released.
 
 ## Config
 

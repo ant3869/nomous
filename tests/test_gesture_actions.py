@@ -60,6 +60,8 @@ def camera_with_loop():
     camera.loop = loop
     camera.bridge = FakeBridge()
     camera.llm = types.SimpleNamespace(tts=FakeTTS())
+    camera._last_gesture = ""
+    camera.last_gesture_time = 0
     yield camera
     loop.call_soon_threadsafe(loop.stop)
     thread.join(timeout=5)
@@ -95,6 +97,36 @@ def test_unmapped_gesture_does_nothing(camera_with_loop):
     assert camera.llm.tts.interrupts == 0
     assert camera.llm.tts.muted is False
     assert camera.bridge.messages == []
+
+
+def test_held_fist_toggles_mute_only_once(camera_with_loop):
+    camera = camera_with_loop
+    camera._handle_detected_gesture("closed_fist", 100.0)
+    assert camera.llm.tts.muted is True
+    assert _wait_until(lambda: "🔇 Muted" in _event_texts(camera))
+    events_after_first = len(camera.bridge.messages)
+    # Held fist, re-detected after the cooldown: no second toggle.
+    camera._handle_detected_gesture("closed_fist", 104.0)
+    time.sleep(0.2)
+    assert camera.llm.tts.muted is True
+    assert len(camera.bridge.messages) == events_after_first
+    # Released, then a fresh fist: toggles again.
+    camera._handle_detected_gesture("", 108.0)
+    camera._handle_detected_gesture("closed_fist", 112.0)
+    assert camera.llm.tts.muted is False
+    assert _wait_until(lambda: "🔊 Unmuted" in _event_texts(camera))
+
+
+def test_open_hand_interrupt_fires_once_per_press(camera_with_loop):
+    camera = camera_with_loop
+    camera._handle_detected_gesture("open_hand", 100.0)
+    assert _wait_until(lambda: camera.llm.tts.interrupts == 1)
+    camera._handle_detected_gesture("open_hand", 104.0)
+    time.sleep(0.2)
+    assert camera.llm.tts.interrupts == 1
+    camera._handle_detected_gesture("", 108.0)
+    camera._handle_detected_gesture("open_hand", 112.0)
+    assert _wait_until(lambda: camera.llm.tts.interrupts == 2)
 
 
 def test_gesture_dispatch_without_llm_or_tts_is_silent():

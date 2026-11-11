@@ -55,6 +55,9 @@
   model about the freshest frame, bypassing suppression and cooldown —
   and the frame cache now refreshes on every preview send, not just on
   analysis, so the answer is never about a 15s-old frame (Codex review).
+  A bare 'what's happening' no longer routes to the camera — it needs a
+  spatial anchor ('here', 'around you', ...) or the question keeps
+  normal generation and tools (Codex review).
 - Real person recognition (finding 4): each detected face crop is
   embedded on-device by a vendored MediaPipe ImageEmbedder (MobileNetV3,
   1024-dim L2-normalized) and matched on cosine similarity
@@ -78,6 +81,8 @@
   `snapshot_debounce` remains as an alias for old dashboards.
 - Gesture actions (finding 10): open palm pauses in-flight speech,
   fist toggles the mute; `ui.gesture_enabled` is now true by default.
+  Actions fire once per press — a held fist re-triggering every
+  cooldown interval no longer alternates mute/unmute (Codex review).
 - Proactive recall (finding 11): when a known face is present, the
   vision prompt carries a one-line "last time you saw this person"
   recall built from their most recent conversation; strangers get no
