@@ -140,7 +140,12 @@ over WebSocket runs one pass immediately). Three phases, in order:
   `min_unique_days` 2). Promotion is the only write: one consolidated
   concept node (`category: dream_consolidated`, `milestone: 1`) linked
   to its sources with `consolidates` edges. Rejected candidates decay
-  (strength × 0.9, floor 0.1); nothing is ever deleted.
+  (strength × 0.9, floor 0.1); nothing is ever deleted. Graph writes
+  are batched — all promotion edges in one `create_edges` call and all
+  decays in one `update_node_strengths` call, one graph publish each —
+  so a busy window doesn't broadcast the full graph once per node. The
+  pass skips when the chat lane is busy, yielding to live conversation
+  the way the autonomous loop does.
 
 Every decision lands in the Dream Diary (`data/dreams/DREAMS.md`,
 append-only) and as `dream_diary` lines in the dashboard's Dreams

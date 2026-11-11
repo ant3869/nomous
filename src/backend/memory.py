@@ -869,6 +869,31 @@ class MemoryStore:
             await self.publish_graph()
         return updated
 
+    async def update_node_strengths(self, strengths: Dict[str, float]) -> int:
+        """Bulk strength update in one transaction, one graph publish.
+
+        Used by dreaming decay: per-node update_node() would reload and
+        broadcast the whole graph once per node (hundreds of full-graph
+        messages per nightly pass)."""
+        if not self.enabled or self._conn is None or not strengths:
+            return 0
+        async with self._lock:
+            updated = await asyncio.to_thread(self._update_node_strengths_sync, strengths)
+        if updated:
+            await self.publish_graph()
+        return updated
+
+    def _update_node_strengths_sync(self, strengths: Dict[str, float]) -> int:
+        updated = 0
+        for node_id, strength in strengths.items():
+            try:
+                value = max(0.1, min(5.0, float(strength)))
+            except (TypeError, ValueError):
+                continue
+            if self._update_node_sync(node_id, {"strength": value}):
+                updated += 1
+        return updated
+
     async def delete_node(self, node_id: str) -> bool:
         if not self.enabled or self._conn is None or not node_id:
             return False
@@ -895,6 +920,36 @@ class MemoryStore:
             )
         if created:
             await self.publish_graph()
+        return created
+
+    async def create_edges(self, edges: Sequence[Dict[str, Any]]) -> int:
+        """Bulk edge creation in one transaction, one graph publish.
+
+        Used by dreaming promotion: per-source create_edge() would reload
+        and broadcast the whole graph once per edge."""
+        if not self.enabled or self._conn is None or not edges:
+            return 0
+        async with self._lock:
+            created = await asyncio.to_thread(self._create_edges_sync, list(edges))
+        if created:
+            await self.publish_graph()
+        return created
+
+    def _create_edges_sync(self, edges: Sequence[Dict[str, Any]]) -> int:
+        created = 0
+        for edge in edges:
+            from_id = edge.get("from_id")
+            to_id = edge.get("to_id")
+            if not from_id or not to_id:
+                continue
+            try:
+                weight = float(edge.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            if self._create_edge_sync(
+                from_id, to_id, weight, edge.get("relationship"), edge.get("context")
+            ):
+                created += 1
         return created
 
     async def delete_edge(self, edge_id: str) -> bool:

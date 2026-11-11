@@ -39,6 +39,9 @@ class FakeLLM:
     def _release_lane(self, lane):
         self._lanes[lane] = False
 
+    def _lane_busy(self, lane):
+        return bool(self._lanes.get(lane))
+
     async def _generate(self, prompt, max_tokens=200, allow_tool_calls=False):
         self.generate_calls.append(prompt)
         return self._themes_response
@@ -474,3 +477,78 @@ async def test_second_run_skips_already_consolidated(tmp_path):
     assert len(consolidated) == 1  # no duplicate milestone node
     diary = (tmp_path / "DREAMS.md").read_text(encoding="utf-8")
     assert "### Already consolidated" in diary
+
+
+@pytest.mark.asyncio
+async def test_run_once_skips_when_chat_lane_busy(tmp_path):
+    """Dreaming yields to conversations: no REM generation while the
+    chat lane is busy, and the autonomous lane is released."""
+    store, bridge = _memory(tmp_path)
+    await _seed(
+        store,
+        [
+            ("autonomous", "Maya arrived home", ["importance_8"]),
+            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("autonomous", "Maya arrived home late", ["importance_8"]),
+        ],
+    )
+    llm = FakeLLM()
+    llm._lanes["chat"] = True  # a conversation is in progress
+    dreamer = _dreamer(llm, store, bridge, tmp_path)
+
+    summary = await dreamer.run_once(datetime.now(timezone.utc))
+
+    assert summary["skipped"] == "chat lane busy"
+    assert summary["promoted"] == 0 and summary["reviewed"] == 0
+    assert llm._lanes["autonomous"] is False  # lane released, not leaked
+    assert not (tmp_path / "DREAMS.md").exists()  # no diary for a skipped run
+    assert not [
+        n for n in _all_nodes(store, "concept") if n.get("category") == "dream_consolidated"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dream_run_publishes_graph_once_per_batch(tmp_path):
+    """One promotion (3 edges) + one decay must publish the graph 3
+    times total during the run: 1 create_node + 1 bulk edges + 1 bulk
+    strengths — not once per edge/node (was 5)."""
+    store, bridge = _memory(tmp_path)
+    await _seed(
+        store,
+        [
+            ("autonomous", "Maya arrived home", ["importance_8"]),
+            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("autonomous", "Maya arrived home late", ["importance_8"]),
+            ("vision", "The dog slept on the rug all afternoon", ["importance_4"]),
+        ],
+    )
+    now = datetime.now(timezone.utc)
+    _retimestamp(
+        store,
+        [
+            (now - timedelta(days=1)).replace(tzinfo=None).isoformat(timespec="seconds"),
+            (now - timedelta(hours=2)).replace(tzinfo=None).isoformat(timespec="seconds"),
+            now.replace(tzinfo=None).isoformat(timespec="seconds"),
+            now.replace(tzinfo=None).isoformat(timespec="seconds"),
+        ],
+    )
+    llm = FakeLLM("- Maya arriving home\\n- Dog sleeping\\n")
+    dreamer = _dreamer(llm, store, bridge, tmp_path)
+
+    before = len([p for p in bridge.posts if p.get("type") == "memory"])
+    summary = await dreamer.run_once(now)
+    after = len([p for p in bridge.posts if p.get("type") == "memory"])
+
+    assert summary["promoted"] == 1 and summary["decayed"] == 1
+    assert after - before == 3
+    # The batched writes still landed.
+    consolidated = [
+        n for n in _all_nodes(store, "concept") if n.get("category") == "dream_consolidated"
+    ]
+    assert len(consolidated) == 1
+    edges = store._conn.execute(
+        "SELECT * FROM memory_edges WHERE from_id = ?", (consolidated[0]["id"],)
+    ).fetchall()
+    assert len(edges) == 3
+    dog = [n for n in _all_nodes(store, "stimulus") if "dog slept" in n["description"]]
+    assert dog[0]["strength"] == pytest.approx(0.9)

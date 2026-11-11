@@ -37,7 +37,12 @@
     500 silently dropped the newest material in a busy window). A second
     run skips already-consolidated sources instead of minting a duplicate
     milestone node. Promotion metadata is passed as a dict — a JSON
-    string was stored as NULL.
+    string was stored as NULL. Second round: Deep batches graph writes
+    (one bulk edges + one bulk strengths call per pass, one graph
+    publish each — a 500-rejection run was 500 full-graph broadcasts);
+    a dream run skips when the chat lane is busy, as the autonomous
+    loop does, so REM never holds the shared model lock behind a live
+    reply.
 - `MemoryStore.recent_nodes()` (`src/backend/memory.py`) returns nodes
   in a time window for the pass. `scripts/run_bridge.py` gains the
   `_dreaming_loop` scheduler (sleeps until the next configured time),

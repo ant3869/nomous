@@ -182,6 +182,14 @@ class Dreamer:
                 return summary
 
         try:
+            # Chat lane busy — dreaming yields to conversations, as the
+            # ordinary autonomous loop does; its REM generation would
+            # otherwise hold the shared model lock behind a live reply.
+            lane_busy = getattr(self.llm, "_lane_busy", None) if self.llm else None
+            if lane_busy is not None and lane_busy("chat"):
+                summary["skipped"] = "chat lane busy"
+                logger.info("Dreaming skipped: chat lane busy")
+                return summary
             await self.bridge.post(
                 {"type": "thought", "text": "🌙 Dreaming: reviewing the day's notes…"}
             )
@@ -372,7 +380,12 @@ class Dreamer:
     async def _deep(
         self, clusters: Sequence[Dict[str, Any]], themes: Sequence[str], now: datetime
     ) -> List[Dict[str, Any]]:
-        """Score every candidate; promote the durable ones, decay the rest."""
+        """Score every candidate; promote the durable ones, decay the rest.
+
+        Graph writes are batched: all promotion edges and all decay
+        strengths are applied in two bulk calls at the end, so the pass
+        publishes the graph once per batch instead of once per node/edge.
+        """
         decisions = []
         # Already-consolidated sources (from past runs) are skipped, not
         # re-promoted: the overlapping lookback would otherwise mint a
@@ -381,6 +394,8 @@ class Dreamer:
             n.get("id") for c in clusters for n in c["nodes"] if n.get("id")
         ]
         consolidated = await self.memory.consolidated_source_ids(all_sources)
+        edge_batch: List[Dict[str, Any]] = []
+        strength_updates: Dict[str, float] = {}
         for cluster in clusters:
             result = self._score_candidate(cluster, themes, now)
             label = cluster["representative"][:80]
@@ -401,7 +416,8 @@ class Dreamer:
                 continue
             reason = self._gate_reason(result)
             if reason is None:
-                node_id = await self._promote(cluster, result, now)
+                node_id, edges = await self._promote(cluster, result, now)
+                edge_batch.extend(edges)
                 decisions.append(
                     {
                         "outcome": "promoted",
@@ -416,7 +432,8 @@ class Dreamer:
                     }
                 )
             else:
-                decayed = await self._decay(cluster)
+                strengths = self._decay_strengths(cluster)
+                strength_updates.update(strengths)
                 decisions.append(
                     {
                         "outcome": "rejected",
@@ -427,15 +444,23 @@ class Dreamer:
                         "modalities": result["modalities"],
                         "reason": reason,
                         "node_id": None,
-                        "decayed": decayed,
+                        "decayed": len(strengths),
                     }
                 )
+        if edge_batch:
+            await self.memory.create_edges(edge_batch)
+        if strength_updates:
+            await self.memory.update_node_strengths(strength_updates)
         return decisions
 
     async def _promote(
         self, cluster: Dict[str, Any], result: Dict[str, Any], now: datetime
-    ) -> Optional[str]:
-        """Write one consolidated long-term node, linked to its sources."""
+    ) -> tuple[Optional[str], List[Dict[str, Any]]]:
+        """Write one consolidated long-term node, linked to its sources.
+
+        Returns the node id plus the 'consolidates' edges to create — the
+        caller applies all edges in one bulk call (one graph publish),
+        rather than one publish per source."""
         sources = [n.get("id") for n in cluster["nodes"] if n.get("id")]
         node_id = await self.memory.create_node(
             {
@@ -462,20 +487,27 @@ class Dreamer:
             }
         )
         if node_id:
-            for source_id in sources:
-                await self.memory.create_edge(
-                    node_id,
-                    source_id,
-                    weight=1.0,
-                    relationship="consolidates",
-                    context={"dream": now.isoformat(timespec="seconds")},
-                )
+            edges = [
+                {
+                    "from_id": node_id,
+                    "to_id": source_id,
+                    "weight": 1.0,
+                    "relationship": "consolidates",
+                    "context": {"dream": now.isoformat(timespec="seconds")},
+                }
+                for source_id in sources
+            ]
+        else:
+            edges = []
         logger.info("Dreaming promoted '%s' (score %s)", cluster["representative"][:60], result["score"])
-        return node_id
+        return node_id, edges
 
-    async def _decay(self, cluster: Dict[str, Any]) -> int:
-        """Gently weaken reviewed-but-rejected sources. Never deletes."""
-        decayed = 0
+    def _decay_strengths(self, cluster: Dict[str, Any]) -> Dict[str, float]:
+        """Compute decayed strengths for reviewed-but-rejected sources.
+
+        Pure computation — the caller applies the whole batch with one
+        graph publish. Never deletes."""
+        strengths: Dict[str, float] = {}
         for node in cluster["nodes"]:
             node_id = node.get("id")
             if not node_id:
@@ -484,10 +516,8 @@ class Dreamer:
                 strength = float(node.get("strength") or 1.0)
             except (TypeError, ValueError):
                 strength = 1.0
-            new_strength = max(0.1, round(strength * self.decay_factor, 3))
-            if await self.memory.update_node(node_id, {"strength": new_strength}):
-                decayed += 1
-        return decayed
+            strengths[node_id] = max(0.1, round(strength * self.decay_factor, 3))
+        return strengths
 
     # ------------------------------------------------------------------
     # Diary + dashboard
