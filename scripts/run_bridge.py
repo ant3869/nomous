@@ -278,17 +278,10 @@ class Server:
             self._autonomous_task = asyncio.create_task(self._autonomous_loop())
             logger.info("Autonomous thinking loop started")
 
-            # Start nightly dreaming (memory consolidation) if enabled
-            dreaming_cfg = CFG.get("dreaming", {}) or {}
-            if dreaming_cfg.get("enabled", True) and self.memory is not None:
-                self.dreamer = Dreamer(self.llm, self.memory, self.bridge, CFG)
-                self._dreaming_task = asyncio.create_task(self._dreaming_loop())
-                logger.info(
-                    "Dreaming nightly pass scheduled for %s",
-                    self.dreamer.time,
-                )
-            else:
-                logger.info("Dreaming disabled or no memory store")
+            # Start nightly dreaming (memory consolidation) whenever a
+            # memory store exists — _start_dreaming gates execution on
+            # the enabled flag instead of skipping setup.
+            self._start_dreaming()
             
         except Exception as e:
             logger.error(f"Error starting workers: {e}", exc_info=True)
@@ -316,6 +309,24 @@ class Server:
             except Exception as e:
                 logger.error(f"Error in autonomous loop: {e}")
                 await asyncio.sleep(10)
+
+    def _start_dreaming(self) -> None:
+        """Create the dreamer + scheduler whenever a memory store exists.
+
+        The enabled flag gates execution (the loop and run_once both
+        check it), so a later WebSocket toggle can enable dreaming
+        after a disabled startup — the dreamer must exist for the
+        toggle to work."""
+        if self.memory is None:
+            logger.info("Dreaming disabled: no memory store")
+            return
+        self.dreamer = Dreamer(self.llm, self.memory, self.bridge, CFG)
+        self._dreaming_task = asyncio.create_task(self._dreaming_loop())
+        logger.info(
+            "Dreaming nightly pass scheduled for %s (enabled=%s)",
+            self.dreamer.time,
+            self.dreamer.enabled,
+        )
 
     async def _dreaming_loop(self):
         """Nightly memory-consolidation pass (dreaming).

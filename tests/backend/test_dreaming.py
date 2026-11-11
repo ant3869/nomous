@@ -652,3 +652,53 @@ async def test_light_uses_vlm_response_for_vision(tmp_path):
         "A person is reading a book on the couch",
     ]
     assert not any("well lit" in r for r in reps)
+
+
+@pytest.mark.asyncio
+async def test_dreaming_toggle_after_disabled_startup(tmp_path):
+    """Codex P2 on PR #88: starting with dreaming.enabled=false left
+    self.dreamer unset, so a later WebSocket toggle to enable it was
+    logged as an unknown toggle and did nothing."""
+    import scripts.run_bridge as rb
+    from scripts.run_bridge import Server
+
+    store, bridge = _memory(tmp_path)
+    server = Server()
+    server.bridge = bridge  # fake bridge captures toggle events
+    server.memory = store
+    server.llm = None  # Dreamer tolerates a missing LLM (REM skipped)
+
+    disabled_cfg = {
+        "dreaming": {
+            "enabled": False,
+            "time": "03:00",
+            "lookback_hours": 72,
+            "min_score": 0.55,
+            "min_occurrences": 2,
+            "min_unique_days": 2,
+            "decay_factor": 0.9,
+            "diary_path": str(tmp_path / "DREAMS.md"),
+        }
+    }
+    old_cfg = rb.CFG
+    rb.CFG = disabled_cfg
+    try:
+        # A disabled startup must still create the dreamer, with
+        # execution gated by the flag.
+        server._start_dreaming()
+        assert server.dreamer is not None
+        assert server.dreamer.enabled is False
+        assert server._dreaming_task is not None
+
+        # The toggle now activates it (previously: "Unknown toggle target").
+        await server.handle_toggle("dreaming", True)
+        assert server.dreamer.enabled is True
+        assert any(
+            p.get("type") == "event" and "dreaming enabled" in p.get("message", "")
+            for p in bridge.posts
+        )
+        await server.handle_toggle("dreaming", False)
+        assert server.dreamer.enabled is False
+    finally:
+        rb.CFG = old_cfg
+        await server.stop_workers()

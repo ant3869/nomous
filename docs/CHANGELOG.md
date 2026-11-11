@@ -45,7 +45,11 @@
     reply. Third round: normalization is Unicode-aware (CJK text no
     longer collapses to an empty grouping key); vision candidates use
     the linked VLM observation (the response) instead of the coarse
-    frame description stored as the stimulus.
+    frame description stored as the stimulus. Fourth round: the dreamer
+    + scheduler are created whenever a memory store exists, with the
+    enabled flag gating execution — a toggle can now enable dreaming
+    after a disabled startup (previously the toggle was logged as
+    unknown and did nothing).
 - `MemoryStore.recent_nodes()` (`src/backend/memory.py`) returns nodes
   in a time window for the pass. `scripts/run_bridge.py` gains the
   `_dreaming_loop` scheduler (sleeps until the next configured time),
