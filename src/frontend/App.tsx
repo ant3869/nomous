@@ -1120,10 +1120,26 @@ function useNomousBridge() {
             ? `${statusEmoji} Tool ${displayName} — ${summarySnippet}`
             : `${statusEmoji} Tool ${displayName}`;
 
+          // Silent ticks must be visible, not invisible: mirror the tool
+          // call into the thoughts stream too (name, key args, outcome),
+          // so reasoning + actions read as one trace in the Think view.
+          // The thought accumulator assumes the newest thought line is its
+          // own, so clear it — otherwise the next thought would merge
+          // into (and clobber) this tool line.
+          const argEntries = Object.entries(toolResult.args).slice(0, 3).map(([key, value]) => {
+            const raw = typeof value === "string" ? value : JSON.stringify(value) ?? "";
+            const short = raw.length > 40 ? `${raw.slice(0, 37)}...` : raw;
+            return `${key}=${JSON.stringify(short)}`;
+          });
+          const outcome = summarySnippet || (toolResult.success ? "done" : "failed");
+          const thoughtToolLine = `[${new Date().toLocaleTimeString()}] ${toolResult.success ? "🔧" : "⚠️"} ${toolId}(${argEntries.join(", ")}) → ${outcome}`;
+          thoughtAccumulatorRef.current = null;
+
           setState(p => ({
             ...p,
             toolActivity: [...p.toolActivity, toolResult].slice(-100),
-            systemLines: [`[${new Date().toLocaleTimeString()}] ${toolLine}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)]
+            systemLines: [`[${new Date().toLocaleTimeString()}] ${toolLine}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)],
+            thoughtLines: [thoughtToolLine, ...p.thoughtLines.slice(0, MAX_CHAT_HISTORY - 1)]
           }));
           break;
         }
@@ -2237,7 +2253,7 @@ function ConversationStreamPanel({ thoughtLines, speechLines, systemLines }: Con
     {
       id: "thoughts" as const,
       title: "Cognitive Stream",
-      description: "Trace intermediate reasoning, decisions, and planning notes in real time.",
+      description: "Trace intermediate reasoning, decisions, tool calls, and planning notes in real time.",
       icon: Brain,
       lines: thoughtLines,
       empty: "Waiting for thoughts...",

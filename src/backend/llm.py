@@ -148,10 +148,10 @@ class LocalLLM:
         self.frame_memory_items = max(1, int(vision_cfg.get("frame_memory_items", 5) or 5))
         self.frame_memory_max_tokens = max(64, int(vision_cfg.get("frame_memory_max_tokens", 512) or 512))
         self._frame_memory: list[dict] = []
-        # Last analyzed frame, kept so a future idle loop can ask the model
-        # "think or speak?" on a timer without a new camera event: call
-        # process_vision(self._last_frame_description,
-        # self._last_frame_image_url). No loop lives here yet.
+        # Last analyzed frame, kept so the idle loop can ask the model
+        # "think or speak?" on a timer without a new camera event: the
+        # tick in _idle_decide reads _last_frame_description and
+        # _last_frame_image_url and decides via _generate_vision.
         self._last_frame_description: str = ""
         self._last_frame_image_url: Optional[str] = None
         self.mmproj_path = str(cfg.get("paths", {}).get("mmproj_path") or "")
@@ -185,8 +185,16 @@ class LocalLLM:
         self._auto_gpu_layers = False
         self._resolved_gpu_layers = 0
 
-        # Autonomous behavior
-        self.autonomous_mode = True
+        # Autonomous behavior (idle loop): the bridge ticks
+        # autonomous_thought() on a timer; the tick looks at the freshest
+        # frame + frame memory and decides whether to think quietly or
+        # speak aloud. Config keys live under `autonomous:` in config.yaml.
+        autonomous_cfg = cfg.get("autonomous", {})
+        self.autonomous_mode = bool(autonomous_cfg.get("enabled", True))
+        self.thought_cooldown = max(1, int(autonomous_cfg.get("thought_cooldown", 30) or 30))
+        self.idle_speak_enabled = bool(autonomous_cfg.get("speak_enabled", True))
+        self.idle_min_speak_interval = max(0, int(autonomous_cfg.get("min_speak_interval_seconds", 300) or 0))
+        self._last_autonomous_speech = 0.0
         self.last_vision_analysis = 0
         self._last_spoken_vision: tuple[str, float] | None = None
         self.vision_cooldown = int(vision_cfg.get("vision_cooldown", 15))  # seconds between autonomous vision checks
@@ -196,7 +204,6 @@ class LocalLLM:
         self._last_scene_digest = time.time()  # digest clock starts at boot
         self._last_digest_signature = ""  # description the last digest covered
         self.last_thought = 0
-        self.thought_cooldown = 30  # seconds between unprompted thoughts
 
         # Context memory
         self.recent_context = []
@@ -1187,7 +1194,22 @@ class LocalLLM:
         elif context_type == "autonomous":
             scenario = (
                 f"Recent context:\n{context_summary}\n\n"
-                "Produce a short internal reflection or tool call that keeps momentum going."
+                "You are thinking to yourself on your own schedule, unprompted. "
+                "Produce a short internal reflection or tool call that keeps momentum going.\n\n"
+                "Start your reply with exactly one of these markers, then one short line:\n"
+                "- SAY: <one short sentence> — only if something is genuinely worth saying aloud right now. Be sparing: most ticks should not speak.\n"
+                "- THINK: <one short private observation> — your quiet thought. This stays on screen only, never spoken.\n"
+                "If you make a tool call instead, write it plainly; it will be handled as a silent action, never spoken."
+            )
+        elif context_type == "autonomous_act":
+            scenario = (
+                f"Recent context:\n{context_summary}\n\n"
+                f"What you just observed:\n{user_input}\n\n"
+                "You are thinking privately about what you just saw — nothing you "
+                "write here will be spoken aloud. If there is anything worth doing "
+                "about it — recall what is known about a person you see, store an "
+                "observation worth remembering, jot down a note for later — make "
+                "the tool call. Otherwise reply with a brief private thought."
             )
         elif input_class and input_class.get("is_greeting"):
             # Simplified greeting scenario - no tools, no complexity
@@ -2137,6 +2159,137 @@ class LocalLLM:
         # If >60% word overlap, consider it similar (lowered from 70%)
         return (overlap / max_len) > 0.6 if max_len > 0 else False
 
+    @staticmethod
+    def _parse_idle_decision(response: str) -> tuple[str, str]:
+        """Split an idle-loop reply into (kind, line).
+
+        "SAY: <line>" -> ("speak", line); "THINK: <line>" -> ("think", line).
+        Anything unmarked is treated as a quiet thought — never spoken.
+        """
+        text = (response or "").strip()
+        if not text:
+            return ("think", "")
+        first_line = text.split("\n", 1)[0].strip()
+        upper = first_line.upper()
+        if upper.startswith("SAY:"):
+            return ("speak", first_line[4:].strip())
+        if upper.startswith("THINK:"):
+            return ("think", first_line[6:].strip())
+        return ("think", first_line)
+
+    def _idle_speech_allowed(self, now: float) -> bool:
+        """True when the loop may speak aloud on this tick.
+
+        Speech is opt-in per tick: the `speak_enabled` toggle plus a
+        minimum interval since the last spoken idle line, so the model
+        cannot get chatty even if it keeps choosing SAY:.
+        """
+        if not self.idle_speak_enabled:
+            return False
+        return (now - self._last_autonomous_speech) >= self.idle_min_speak_interval
+
+    async def _idle_speak(self, line: str, now: float) -> None:
+        """Speak one idle-loop line through Piper and stamp the rate limit."""
+        self._add_context("assistant_autonomous", line)
+        await self.bridge.post(msg_speak(line))
+        if self.tts:
+            await self.tts.speak(line)
+        self._last_autonomous_speech = now
+        if self.memory and len(line) > 15:
+            await self.memory.record_interaction("autonomous", "internal_reflection", line)
+
+    async def _idle_act(self, observation: str) -> None:
+        """Silent follow-up to a quiet tick: let the model act on what it saw.
+
+        Thinking + tool use with zero speech. Runs the text generation loop
+        — which already executes TOOL_CALL:s against the tool registry, so
+        the model can recall what is known about a person or store a new
+        observation entirely on its own — and posts whatever comes back as
+        a thought, never as speech. The tool loop itself posts each tool
+        call to the panel (tool name, args, outcome), so the full trace —
+        reasoning plus actions — stays visible on screen.
+        """
+        prompt = self._build_prompt(observation, "autonomous_act")
+        response = await self._generate(prompt, max_tokens=80)
+        if not response or len(response) <= 3:
+            return
+        _, line = self._parse_idle_decision(response)
+        if not line:
+            return
+        self._add_context("assistant_autonomous", line)
+        await self.bridge.post({"type": "thought", "text": line})
+        if self.memory and len(line) > 15:
+            await self.memory.record_interaction("autonomous", "internal_reflection", line)
+
+    async def _idle_decide(self, now: float) -> None:
+        """One idle tick: look at the freshest frame and decide think/speak/act.
+
+        Vision path (a frame is available): the model decides with a SAY: /
+        THINK: marker on the current view. SAY: speaks through Piper when
+        the speech gate allows; THINK: posts as a thought and then gets a
+        silent chance to act via _idle_act — recall/store against the memory
+        DB with nothing spoken. Text fallback (no frame, or vision
+        unavailable): the text generation loop, which already runs tool
+        calls, decides the same way.
+        """
+        person_context = ""
+        try:
+            person_context = await self._get_person_context()
+        except Exception:
+            person_context = ""
+        if person_context:
+            person_context = f"\nPeople present: {person_context}\n"
+
+        if self._last_frame_image_url and self._vision_available:
+            idle_prompt = (
+                "You are Nomous, quietly observing the room on your own schedule. "
+                "Look at the current view and decide what to do."
+                f"{person_context}\n"
+                "Start your reply with exactly one of these markers, then one short line:\n"
+                "- SAY: <one short sentence> — only if something is genuinely worth saying aloud right now (someone new arrived, something changed, a greeting is due). Be sparing: most ticks should not speak.\n"
+                "- THINK: <one short private observation> — your quiet thought about what you see. This stays on screen only, never spoken.\n"
+                "Reply with the marker and one line only."
+            )
+            response = await self._generate_vision(
+                self._last_frame_image_url, idle_prompt, max_tokens=60
+            )
+            if response:
+                kind, line = self._parse_idle_decision(response)
+                if kind == "speak" and line:
+                    if self._idle_speech_allowed(now):
+                        await self._idle_speak(line, now)
+                    else:
+                        # Wanted to speak but the rate limit holds: keep it
+                        # as a visible thought instead of dropping it.
+                        self._add_context("assistant_autonomous", line)
+                        await self.bridge.post({"type": "thought", "text": line})
+                        if self.memory and len(line) > 15:
+                            await self.memory.record_interaction("autonomous", "internal_reflection", line)
+                    return
+                if line:
+                    self._add_context("assistant_autonomous", line)
+                    await self.bridge.post({"type": "thought", "text": line})
+                    if self.memory and len(line) > 15:
+                        await self.memory.record_interaction("autonomous", "internal_reflection", line)
+                    # Silent tick, still able to act: give the model a chance
+                    # to recall/store against the memory DB. Nothing here speaks.
+                    await self._idle_act(line)
+            return
+
+        # No frame (or vision unavailable): text-only decision. The text loop
+        # already runs tool calls, so this path can act in the same call.
+        prompt = self._build_prompt("", "autonomous")
+        response = await self._generate(prompt, max_tokens=50)
+        if response and len(response) > 3:
+            kind, line = self._parse_idle_decision(response)
+            if kind == "speak" and line and self._idle_speech_allowed(now):
+                await self._idle_speak(line, now)
+            elif line:
+                self._add_context("assistant_autonomous", line)
+                await self.bridge.post({"type": "thought", "text": line})
+                if self.memory and len(line) > 15:
+                    await self.memory.record_interaction("autonomous", "internal_reflection", line)
+
     async def autonomous_thought(self):
         """Generate unprompted thought based on context."""
         now = time.time()
@@ -2170,29 +2323,12 @@ class LocalLLM:
                         await self.memory.record_interaction("autonomous", "scene_digest", digest)
                     return
                 # Vision unavailable: leave the digest clock alone and fall
-                # through to the normal silence/random branch.
+                # through to the idle tick below.
 
-            # Random chance to skip (stay quiet 70% of the time)
-            import random
-            if random.random() < 0.7:
-                logger.info("Autonomous thought: choosing silence")
-                await self.bridge.post({"type": "thought", "text": "Quietly observing..."})
-                return
-            
-            logger.info("Autonomous thought: speaking")
-            
-            prompt = self._build_prompt("", "autonomous")
-            response = await self._generate(prompt, max_tokens=50)
-
-            if response and len(response) > 3:
-                self._add_context("assistant_autonomous", response)
-                await self.bridge.post({"type": "thought", "text": response})
-                # Only record substantial autonomous thoughts to memory (>15 chars)
-                # Skip recording trivial outputs or silence decisions
-                if self.memory and len(response) > 15:
-                    await self.memory.record_interaction("autonomous", "internal_reflection", response)
-            else:
-                logger.info("Autonomous thought: no output")
+            # The free-running idle tick: look at the freshest frame and
+            # decide think / speak / act. Speech is rate-limited and the
+            # silent path still gets to act via the tool loop.
+            await self._idle_decide(now)
 
         finally:
             self._release_lane("autonomous")

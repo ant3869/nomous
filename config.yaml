@@ -5,9 +5,15 @@ audio:
   vad_aggressiveness: 2
 autonomous:
   enabled: true
-  min_engagement: 0.4
-  proactive_questions: true
   thought_cooldown: 30
+  # Seconds between idle-loop ticks. The tick looks at the freshest frame
+  # and decides think / speak / act; most ticks stay silent.
+  tick_seconds: 30
+  # Whether the loop may speak aloud at all. Thoughts and silent tool
+  # actions keep working with this off.
+  speak_enabled: true
+  # Minimum seconds between spoken idle lines, so the model can't get chatty.
+  min_speak_interval_seconds: 300
 camera:
   backend: dshow
   height: 720

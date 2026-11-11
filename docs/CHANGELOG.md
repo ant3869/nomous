@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### 🤖 Autonomous idle loop (think, speak — and act)
+
+- The loop Ant remembered already existed, but it never saw anything
+  and never spoke: `_autonomous_loop()` in `scripts/run_bridge.py`
+  called `autonomous_thought()` every 30s, which stayed quiet 70% of
+  the time and otherwise generated a 50-token text-only thought. It now
+  runs a real free-running tick (`_idle_decide` in `src/backend/llm.py`):
+  each tick looks at the freshest frame (`_last_frame_image_url`, with
+  frame memory and person context) and the model decides with a SAY: /
+  THINK: marker. SAY: speaks through Piper only when the speech gate
+  allows; THINK: posts as a thought and then gets a silent chance to act
+  via the text tool loop (`_idle_act`) — recall what is known about a
+  person, store an observation — with nothing spoken. The text fallback
+  (no frame) already ran tool calls inside `_generate`, so it can act in
+  the same call. Unmarked output is always a thought, never speech.
+- Tool calls are visible, not invisible: the vision path
+  (`_generate_vision`) still generates text only — it has no tool loop —
+  so the tick acts through `_generate`'s existing tool loop instead of a
+  parallel mechanism. The frontend (`src/frontend/App.tsx`) now mirrors
+  every `tool_result` into the thoughts stream (tool name, key args,
+  outcome) as well as the Signals view, so a silent tick's reasoning and
+  actions read as one trace in the Think view. Nothing on the silent
+  path reaches TTS.
+- Config (`autonomous:` in `config.yaml`): `tick_seconds` (default 30,
+  min 5), `speak_enabled` (default true), `min_speak_interval_seconds`
+  (default 300). Removed the dead `min_engagement` /
+  `proactive_questions` keys (never read anywhere). The bridge loop reads
+  its cadence from config instead of a hardcoded 30s.
+- Token-budgeted: the vision tick reuses `_generate_vision`'s existing
+  budget check (frame memory + prompt + image tokens), and the act phase
+  is a short 80-token text generation through the same budgeted path.
+
 ### 🏗️ Architecture: MCP-style tool registry, processing lanes, TTS queue
 
 - Tool registry modernized (`src/backend/tools.py`): tool definitions are

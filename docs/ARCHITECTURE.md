@@ -87,8 +87,18 @@ plus a model lock:
   the queue one frame at a time and waits for the chat lane to clear
   before running `_process_vision_impl`, so camera observations queue
   behind conversation instead of being dropped.
-- **autonomous** — `autonomous_thought()` (the 30s loop in the bridge)
-  skips when the chat lane is busy or its own lane is held.
+- **autonomous** — `autonomous_thought()` (the idle-loop tick in the
+  bridge, cadence `autonomous.tick_seconds`, default 30s) skips when the
+  chat lane is busy or its own lane is held. Each tick looks at the
+  freshest frame and the model decides think / speak / act: a THINK:
+  line posts to the thoughts panel and then gets a silent chance to act
+  via the text tool loop (`_idle_act` — recall/store against the memory
+  DB, nothing spoken); a SAY: line speaks through Piper only when the
+  speech gate allows (`autonomous.speak_enabled` and
+  `autonomous.min_speak_interval_seconds`, default 300s). Tool calls
+  made on any path are mirrored into the thoughts stream (name, key
+  args, outcome) as well as the Signals view, so a silent tick is
+  visible, never invisible.
 
 - **model lock** — `_model_lock` wraps the actual inference calls in
   `_generate` (streaming text) and `_generate_vision` (threaded chat

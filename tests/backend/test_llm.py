@@ -1,7 +1,9 @@
 import asyncio
 import sys
+import time
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -292,3 +294,207 @@ def test_init_respects_show_thinking_false():
         None, None, None, loop=asyncio.new_event_loop(), load_immediately=False,
     )
     assert llm.vision_show_thinking is False
+
+
+# ---------------------------------------------------------------------------
+# Autonomous idle loop (think / speak / act)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTTS:
+    def __init__(self):
+        self.spoken = []
+
+    async def speak(self, text):
+        self.spoken.append(text)
+
+
+def _idle_llm(**overrides):
+    """_bare_llm rigged for idle-loop tests: lanes, context, bridge, tts."""
+    posts = []
+    tts = _FakeTTS()
+
+    class FakeBridge:
+        async def post(self, payload):
+            posts.append(payload)
+
+    base = dict(
+        recent_context=[],
+        max_context_items=20,
+        thinking_prompt="",
+        prompt_style="plain",
+        tools_enabled=False,
+        tools=None,
+        person_tracker=None,
+        memory=None,
+        tts=tts,
+        bridge=FakeBridge(),
+        _lanes={"chat": False, "vision": False, "autonomous": False},
+        _lane_lock=asyncio.Lock(),
+        last_thought=0.0,
+        thought_cooldown=30,
+        autonomous_mode=True,
+        idle_speak_enabled=True,
+        idle_min_speak_interval=300,
+        _last_autonomous_speech=0.0,
+        scene_digest_seconds=0,
+        _last_frame_description="",
+        _last_frame_image_url="data:image/jpeg;base64,xxx",
+        _vision_available=True,
+    )
+    base.update(overrides)
+    llm = _bare_llm(**base)
+    llm._idle_posts = posts
+    llm._idle_tts = tts
+    return llm
+
+
+def test_parse_idle_decision_say_think_unmarked():
+    assert LocalLLM._parse_idle_decision("SAY: Hello there.") == ("speak", "Hello there.")
+    assert LocalLLM._parse_idle_decision("THINK: Quiet room.") == ("think", "Quiet room.")
+    assert LocalLLM._parse_idle_decision("say: lower case works") == ("speak", "lower case works")
+    assert LocalLLM._parse_idle_decision("Just looking around.") == ("think", "Just looking around.")
+    assert LocalLLM._parse_idle_decision("") == ("think", "")
+    assert LocalLLM._parse_idle_decision("SAY: First line\nTHINK: second line") == ("speak", "First line")
+
+
+def test_idle_speech_allowed_respects_toggle_and_interval():
+    llm = _idle_llm(idle_speak_enabled=False)
+    assert llm._idle_speech_allowed(1000.0) is False
+    llm = _idle_llm(idle_speak_enabled=True, idle_min_speak_interval=300, _last_autonomous_speech=1000.0)
+    assert llm._idle_speech_allowed(1100.0) is False
+    assert llm._idle_speech_allowed(1300.0) is True
+    llm = _idle_llm(idle_speak_enabled=True, idle_min_speak_interval=0, _last_autonomous_speech=1000.0)
+    assert llm._idle_speech_allowed(1000.0) is True
+
+
+def test_init_wires_idle_loop_config():
+    cfg = _minimal_cfg()
+    cfg["autonomous"] = {
+        "enabled": False,
+        "thought_cooldown": 45,
+        "speak_enabled": False,
+        "min_speak_interval_seconds": 60,
+    }
+    llm = LocalLLM(cfg, None, None, None, loop=asyncio.new_event_loop(), load_immediately=False)
+    assert llm.autonomous_mode is False
+    assert llm.thought_cooldown == 45
+    assert llm.idle_speak_enabled is False
+    assert llm.idle_min_speak_interval == 60
+    assert llm._last_autonomous_speech == 0.0
+
+
+def test_init_idle_loop_defaults():
+    llm = LocalLLM(_minimal_cfg(), None, None, None, loop=asyncio.new_event_loop(), load_immediately=False)
+    assert llm.autonomous_mode is True
+    assert llm.thought_cooldown == 30
+    assert llm.idle_speak_enabled is True
+    assert llm.idle_min_speak_interval == 300
+    assert llm._last_autonomous_speech == 0.0
+
+
+def test_build_prompt_autonomous_act_includes_tools_and_silent_framing():
+    class FakeTools:
+        def get_tools_prompt(self):
+            return 'Use TOOL_CALL: {"tool": "recall_person", "args": {}} to recall.'
+
+    llm = _bare_llm(
+        recent_context=[],
+        max_context_items=20,
+        thinking_prompt="",
+        prompt_style="plain",
+        tools_enabled=True,
+        tools=FakeTools(),
+    )
+    prompt = llm._build_prompt("A new face at the door.", "autonomous_act")
+    assert "A new face at the door." in prompt
+    assert "TOOL_CALL" in prompt
+    assert "nothing you write here will be spoken aloud" in prompt
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_vision_say_speaks():
+    llm = _idle_llm()
+    llm._generate_vision = AsyncMock(return_value="SAY: Hey, good to see you.")
+    llm._generate = AsyncMock(return_value="should not be called")
+    await llm.autonomous_thought()
+    speak_posts = [p for p in llm._idle_posts if p.get("type") == "speak"]
+    assert len(speak_posts) == 1
+    assert speak_posts[0]["text"] == "Hey, good to see you."
+    assert llm._idle_tts.spoken == ["Hey, good to see you."]
+    llm._generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_vision_say_held_by_speech_gate_posts_thought():
+    llm = _idle_llm(_last_autonomous_speech=time.time())
+    llm._generate_vision = AsyncMock(return_value="SAY: Hello again.")
+    llm._generate = AsyncMock(return_value="unused")
+    await llm.autonomous_thought()
+    assert not [p for p in llm._idle_posts if p.get("type") == "speak"]
+    assert llm._idle_tts.spoken == []
+    thoughts = [p.get("text", "") for p in llm._idle_posts if p.get("type") == "thought"]
+    assert any("Hello again." in t for t in thoughts)
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_vision_think_posts_thought_and_runs_act_phase():
+    llm = _idle_llm()
+    llm._generate_vision = AsyncMock(return_value="THINK: A new face at the door.")
+    llm._generate = AsyncMock(return_value="No match in memory; nothing to store.")
+    await llm.autonomous_thought()
+    thoughts = [p.get("text", "") for p in llm._idle_posts if p.get("type") == "thought"]
+    assert any("A new face at the door." in t for t in thoughts)
+    assert any("No match in memory" in t for t in thoughts)
+    assert not [p for p in llm._idle_posts if p.get("type") == "speak"]
+    assert llm._idle_tts.spoken == []
+    # The act phase saw the vision observation.
+    act_prompt = llm._generate.call_args[0][0]
+    assert "A new face at the door." in act_prompt
+
+
+@pytest.mark.asyncio
+async def test_idle_act_forces_say_output_silent():
+    llm = _idle_llm()
+    llm._generate_vision = AsyncMock(return_value="THINK: Someone new.")
+    llm._generate = AsyncMock(return_value="SAY: Hello, stranger!")
+    await llm.autonomous_thought()
+    assert not [p for p in llm._idle_posts if p.get("type") == "speak"]
+    assert llm._idle_tts.spoken == []
+    thoughts = [p.get("text", "") for p in llm._idle_posts if p.get("type") == "thought"]
+    assert any("Hello, stranger!" in t for t in thoughts)
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_unmarked_vision_stays_quiet():
+    llm = _idle_llm()
+    llm._generate_vision = AsyncMock(return_value="Just looking around.")
+    llm._generate = AsyncMock(return_value="Quiet room.")
+    await llm.autonomous_thought()
+    assert not [p for p in llm._idle_posts if p.get("type") == "speak"]
+    thoughts = [p.get("text", "") for p in llm._idle_posts if p.get("type") == "thought"]
+    assert any("Just looking around." in t for t in thoughts)
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_text_fallback_when_no_frame():
+    llm = _idle_llm(_last_frame_image_url=None)
+    llm._generate = AsyncMock(return_value="THINK: Quiet room, nothing happening.")
+    await llm.autonomous_thought()
+    thoughts = [p.get("text", "") for p in llm._idle_posts if p.get("type") == "thought"]
+    assert any("Quiet room" in t for t in thoughts)
+    assert not [p for p in llm._idle_posts if p.get("type") == "speak"]
+    # The text fallback prompt carries the SAY:/THINK: decision instruction.
+    assert "SAY:" in llm._generate.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_autonomous_thought_skips_when_chat_lane_busy():
+    llm = _idle_llm()
+    llm._lanes["chat"] = True
+    llm._generate_vision = AsyncMock(return_value="SAY: Hi.")
+    llm._generate = AsyncMock(return_value="Hi.")
+    await llm.autonomous_thought()
+    assert llm._idle_posts == []
+    llm._generate_vision.assert_not_called()
+    llm._generate.assert_not_called()
