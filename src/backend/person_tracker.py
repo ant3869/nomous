@@ -555,13 +555,17 @@ class PersonTracker:
         # identity. In the ambiguous middle band the heuristic still
         # decides, so a wobbly embedding (bad light, sharp angle) does
         # not split one person in two.
+        # The embedding loop considers absent identities too: a known
+        # person who left and came back must re-identify by face, not
+        # spawn a new anonymous person (and lose their name, history,
+        # and recall). The presence restriction stays on the geometric
+        # fallback below — position/size of someone who left says
+        # nothing about who is here now.
         vetoed = set()
         if embedding:
             best_person = None
             best_sim = 0.0
             for person in self.active_persons.values():
-                if not person.is_present and person.presence_confidence < 0.5:
-                    continue
                 stored = person.visual_signature.face_embedding
                 if not stored:
                     continue

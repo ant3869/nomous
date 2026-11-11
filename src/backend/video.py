@@ -669,6 +669,15 @@ class CameraLoop:
             except Exception as exc:
                 logger.debug("Gesture mute toggle failed: %s", exc)
                 return
+            if muted:
+                # Muting only flips the flag: speech already synthesizing
+                # or playing would keep going (the worker checks the flag
+                # before synthesis, playback does not). Cut it now so
+                # 'Muted' means silent.
+                try:
+                    asyncio.run_coroutine_threadsafe(tts.interrupt(), self.loop)
+                except Exception as exc:
+                    logger.debug("Gesture mute interrupt failed: %s", exc)
             self._post_event("🔇 Muted" if muted else "🔊 Unmuted")
 
     def _run(self):

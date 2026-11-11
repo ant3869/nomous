@@ -162,6 +162,24 @@ async def test_veto_applies_per_candidate_not_globally():
     assert second["present"][0]["id"] not in known_ids
 
 
+@pytest.mark.asyncio
+async def test_embedding_recognizes_returning_absent_person():
+    tracker = PersonTracker(embedding_match_threshold=0.7)
+    emb = _unit_vector(5)
+    first = await tracker.process_frame([(10, 10, 50, 50)], 640, 360, [emb])
+    person_id = first["present"][0]["id"]
+    # The person leaves long enough for presence to decay away.
+    person = tracker.active_persons[person_id]
+    person.decay_presence(30.0)
+    assert person.is_present is False
+    # Same face returns: the embedding must re-identify them, not spawn
+    # a new anonymous person (which would lose their name and history).
+    second = await tracker.process_frame([(10, 10, 50, 50)], 640, 360, [_near(emb)])
+    assert second["new_arrivals"] == []
+    assert second["present"][0]["id"] == person_id
+    assert tracker.active_persons[person_id].is_present is True
+
+
 def test_embedding_persists_through_memory_dict():
     emb = _unit_vector(3)
     person = TrackedPerson(person_id="person_1")

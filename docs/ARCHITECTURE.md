@@ -135,7 +135,8 @@ each synthesis.
   (MobileNetV3, 1024-dim) and `PersonTracker` matches on cosine
   similarity (≥ `vision.embedding_match_threshold`, default 0.7), with
   a per-candidate veto below 0.4 and the size/position heuristic as
-  fallback. Stored
+  fallback. The embedding loop considers absent identities too, so a
+  known person who left and came back re-identifies by face. Stored
   embeddings are an exponential moving average, so one wobbly frame
   cannot re-anchor an identity. When a known face is present, the
   vision prompt carries a one-line recall of their last conversation.
@@ -143,7 +144,8 @@ each synthesis.
   closed_fist toggles the mute (`tts.toggle_muted()`); dispatched from
   the camera thread, on by default (`ui.gesture_enabled: true`), once
   per press — a held gesture re-triggering every cooldown interval does
-  not re-dispatch until the hand is released.
+  not re-dispatch until the hand is released. Muting with a fist also
+  interrupts in-flight speech, so 'Muted' means silent immediately.
 
 ## Config
 

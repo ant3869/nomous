@@ -84,9 +84,14 @@ def test_closed_fist_toggles_mute(camera_with_loop):
     camera._dispatch_gesture("closed_fist")
     assert camera.llm.tts.muted is True
     assert _wait_until(lambda: "🔇 Muted" in _event_texts(camera))
+    # Muting also cuts in-flight speech, not just future speech.
+    assert _wait_until(lambda: camera.llm.tts.interrupts == 1)
     camera._dispatch_gesture("closed_fist")
     assert camera.llm.tts.muted is False
     assert _wait_until(lambda: "🔊 Unmuted" in _event_texts(camera))
+    # Unmuting does not interrupt anything.
+    time.sleep(0.2)
+    assert camera.llm.tts.interrupts == 1
 
 
 def test_unmapped_gesture_does_nothing(camera_with_loop):

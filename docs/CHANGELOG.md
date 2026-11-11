@@ -65,7 +65,10 @@
   embedding vetoes a size/position match — per candidate, so with
   several people tracked one ambiguous similarity cannot shield a
   clearly-different face from the veto (Codex review); the ambiguous
-  middle band still lets the heuristic decide. Stored embeddings update by
+  middle band still lets the heuristic decide. The embedding loop also
+  considers absent identities, so a known person who left and came
+  back re-identifies by face instead of spawning a new anonymous
+  person (Codex review). Stored embeddings update by
   exponential moving average and persist in the memory dicts.
 - First-run robustness (finding 8): the MediaPipe task models are
   vendored in `assets/mediapipe/` with a manifest pinning each file's
@@ -83,6 +86,8 @@
   fist toggles the mute; `ui.gesture_enabled` is now true by default.
   Actions fire once per press — a held fist re-triggering every
   cooldown interval no longer alternates mute/unmute (Codex review).
+  Muting with a fist also interrupts in-flight speech, so 'Muted'
+  means silent now, not just quiet later (Codex review).
 - Proactive recall (finding 11): when a known face is present, the
   vision prompt carries a one-line "last time you saw this person"
   recall built from their most recent conversation; strangers get no
