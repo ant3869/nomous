@@ -8,6 +8,7 @@
 Nomous is an offline-first WebSocket bridge that connects a TypeScript React dashboard to local AI services. The runtime wires together:
 - 🧠 **Local LLM** loading via `llama.cpp`, including live load progress reporting and runtime sampling controls
 - 🎤 **Speech-to-Text** streaming from the browser microphone to Vosk with configurable sensitivity and automatic LLM triggering
+- 🎧 **Ambient hearing** — the host mic as a second sense alongside vision: continuous capture with VAD segmentation and Vosk transcription, feeding the idle loop so a noise can trigger a look and a new sighting can trigger listening harder. Opt-in (off by default), with a dashboard mic-live indicator; raw audio is never written to disk
 - 🗣️ **Text-to-Speech** synthesis through Piper with runtime toggles, voice switching, and optional auto playback
 - 👁️ **Computer Vision** capture with MediaPipe Tasks gesture/face detection, motion-aware frame streaming, and real image input to a Qwen vision model — the camera frame itself goes to the model, not a text summary of it
 - 📈 **System telemetry** that surfaces CPU/GPU utilisation and memory pressure inside the dashboard UI

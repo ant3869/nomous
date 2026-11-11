@@ -18,7 +18,7 @@ dashboard (frontend/) ──WebSocket──► bridge (scripts/run_bridge.py)
               reasoning core      tool layer            I/O
               src/backend/llm.py  src/backend/tools.py  camera / mic / TTS
               LocalLLM            ToolExecutor          video.py, audio.py,
-                                  ToolContext           tts.py, person_tracker.py
+                                  ToolContext           hearing.py, tts.py, person_tracker.py
 ```
 
 - **Reasoning core — `LocalLLM` (`src/backend/llm.py`).** Owns the model
@@ -32,12 +32,14 @@ dashboard (frontend/) ──WebSocket──► bridge (scripts/run_bridge.py)
   the same safety with far less churn. See "Known gaps".
 - **Tool layer — `ToolExecutor` + `ToolContext` (`src/backend/tools.py`).**
   The registry. See "Tools" below.
-- **I/O — `CameraLoop`, `audio.py`, `PiperTTS`, `PersonTracker`.**
+- **I/O — `CameraLoop`, `audio.py`, `hearing.py`, `PiperTTS`, `PersonTracker`.**
   Sensors and actuators. They never call the model directly; the camera
   loop hands frames/descriptions to `LocalLLM.process_vision`, audio
-  hands transcripts to `LocalLLM.process_audio`, and speech goes out
-  through `PiperTTS.speak`. The bridge (`scripts/run_bridge.py`) owns
-  the WebSocket and routes dashboard messages to these pieces.
+  hands transcripts to `LocalLLM.process_audio`, ambient hearing hands
+  heard transcripts and noise events to `LocalLLM.note_audio_evidence`,
+  and speech goes out through `PiperTTS.speak`. The bridge
+  (`scripts/run_bridge.py`) owns the WebSocket and routes dashboard
+  messages to these pieces.
 
 ## Tools
 
@@ -98,7 +100,21 @@ plus a model lock:
   `autonomous.min_speak_interval_seconds`, default 300s). The tick's
   input is a shared sensory context, not vision-only: fresh audio
   evidence (`_last_audio_evidence`, 60s TTL) rides along with the frame
-  so one sense can cue the other. Tool calls
+  so one sense can cue the other. Hearing is a sense in its own right,
+  not a chat feature: `AmbientHearing` (`src/backend/hearing.py`)
+  captures the host mic continuously with sounddevice, segments with
+  webrtcvad (`HearingSegmenter`, pure logic, injectable VAD), and
+  transcribes finished segments with its own Vosk recognizer (reusing
+  AudioSTT's loaded Model when available). A heard thing fills the
+  audio-evidence slot and prompts an immediate tick
+  (`autonomous_thought(force=True)`, one prompt tick per 10 s) so
+  hearing can trigger a look; the other way, a new sighting boosts VAD
+  sensitivity by one step for `hearing.listen_boost_seconds` so the
+  matching sound is more likely to be caught. Hearing is opt-in
+  (`hearing.enabled`, default false), raw audio is never written to
+  disk, and audio-derived idle-tick lines are only persisted to memory
+  when `hearing.retain_transcripts` is true. A missing mic stack fails
+  soft — hearing stays off, startup continues. Tool calls
   made on any path are mirrored into the thoughts stream (name, key
   args, outcome) as well as the Signals view, so a silent tick is
   visible, never invisible.

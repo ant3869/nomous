@@ -199,10 +199,17 @@ class LocalLLM:
         # from every sense, not just vision — audio evidence arrives here
         # (filled in by the hearing work) and rides along with the frame so
         # one sense can cue the other. Audio is transient: the tick only
-        # trusts it while fresh (see _idle_audio_evidence).
+        # trusts it while fresh (see _idle_audio_evidence). TTL and
+        # transcript retention come from hearing.* config; the prompt tick
+        # that lets hearing trigger a look is rate-limited separately so a
+        # noisy room can't spin the autonomous lane.
+        hearing_cfg = cfg.get("hearing", {}) or {}
         self._last_audio_evidence: str = ""
         self._last_audio_at: float = 0.0
-        self._audio_evidence_ttl_s = 60
+        self._audio_evidence_ttl_s = max(5, int(hearing_cfg.get("evidence_ttl_s", 60) or 60))
+        self._audio_retain_transcripts = bool(hearing_cfg.get("retain_transcripts", True))
+        self._hearing = None
+        self._last_audio_prompt_tick = 0.0
         self.last_vision_analysis = 0
         self._last_spoken_vision: tuple[str, float] | None = None
         self.vision_cooldown = int(vision_cfg.get("vision_cooldown", 15))  # seconds between autonomous vision checks
@@ -2080,7 +2087,14 @@ class LocalLLM:
             word in normalized_description 
             for word in interesting_changes
         )
-        
+
+        # Cross-sense (vision -> listen): something new appeared — listen
+        # harder for the sound that goes with it. Hearing drops its VAD
+        # threshold for a while so the matching audio is more likely
+        # to be caught. A no-op when hearing is stopped.
+        if has_interesting_change and self._hearing is not None:
+            self._hearing.listen_boost()
+
         # Check if we've seen this person count/environment combo recently
         static_patterns = [
             'i see 1 person', 'i see one person',
@@ -2187,6 +2201,48 @@ class LocalLLM:
             return ("think", first_line[6:].strip())
         return ("think", first_line)
 
+    def set_hearing(self, hearing) -> None:
+        """Connect the ambient-hearing sense (vision can boost it)."""
+        self._hearing = hearing
+
+    async def note_audio_evidence(self, text: str, kind: str = "speech") -> None:
+        """Fill the shared audio-evidence slot (hearing sense -> idle loop).
+
+        Also the hearing->vision cross-wire: when autonomous mode is on,
+        a fresh heard thing prompts an immediate idle tick (look at what
+        made the noise) instead of waiting for the next 30 s cycle. The
+        prompt tick is rate-limited to one per 10 s and the tick itself
+        still respects the speak gate and lane dedup, so a noisy room
+        can't make it chatter.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        now = time.time()
+        self._last_audio_evidence = text if kind == "speech" else "a loud noise"
+        self._last_audio_at = now
+        if not self.autonomous_mode:
+            return
+        if now - self._last_audio_prompt_tick < 10:
+            return
+        self._last_audio_prompt_tick = now
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:  # called outside the event loop (tests)
+            return
+        asyncio.create_task(self.autonomous_thought(force=True))
+
+    def _should_record_autonomous(self, now: float) -> bool:
+        """Memory recording gate for idle-tick lines.
+
+        Lines about fresh audio evidence are only persisted when
+        transcript retention is on (hearing.retain_transcripts). Without
+        fresh audio evidence the answer is always yes.
+        """
+        if self._last_audio_evidence and now - self._last_audio_at <= self._audio_evidence_ttl_s:
+            return self._audio_retain_transcripts
+        return True
+
     def _idle_audio_evidence(self, now: float) -> str:
         """Fresh audio evidence for the tick, or "" when none/stale.
 
@@ -2225,10 +2281,10 @@ class LocalLLM:
         if self.tts:
             await self.tts.speak(line)
         self._last_autonomous_speech = now
-        if self.memory and len(line) > 15:
+        if self.memory and len(line) > 15 and self._should_record_autonomous(now):
             await self.memory.record_interaction("autonomous", "internal_reflection", line)
 
-    async def _idle_act(self, observation: str) -> None:
+    async def _idle_act(self, observation: str, now: float | None = None) -> None:
         """Silent follow-up to a quiet tick: let the model act on what it saw.
 
         Thinking + tool use with zero speech. Runs the text generation loop
@@ -2248,7 +2304,7 @@ class LocalLLM:
             return
         self._add_context("assistant_autonomous", line)
         await self.bridge.post({"type": "thought", "text": line})
-        if self.memory and len(line) > 15:
+        if self.memory and len(line) > 15 and self._should_record_autonomous(now if now is not None else time.time()):
             await self.memory.record_interaction("autonomous", "internal_reflection", line)
 
     async def _idle_decide(self, now: float) -> None:
@@ -2304,17 +2360,17 @@ class LocalLLM:
                         # as a visible thought instead of dropping it.
                         self._add_context("assistant_autonomous", line)
                         await self.bridge.post({"type": "thought", "text": line})
-                        if self.memory and len(line) > 15:
+                        if self.memory and len(line) > 15 and self._should_record_autonomous(now):
                             await self.memory.record_interaction("autonomous", "internal_reflection", line)
                     return
                 if line:
                     self._add_context("assistant_autonomous", line)
                     await self.bridge.post({"type": "thought", "text": line})
-                    if self.memory and len(line) > 15:
+                    if self.memory and len(line) > 15 and self._should_record_autonomous(now):
                         await self.memory.record_interaction("autonomous", "internal_reflection", line)
                     # Silent tick, still able to act: give the model a chance
                     # to recall/store against the memory DB. Nothing here speaks.
-                    await self._idle_act(line)
+                    await self._idle_act(line, now)
             return
 
         # No frame (or vision unavailable): text-only decision. The text loop
@@ -2331,15 +2387,20 @@ class LocalLLM:
             elif line:
                 self._add_context("assistant_autonomous", line)
                 await self.bridge.post({"type": "thought", "text": line})
-                if self.memory and len(line) > 15:
+                if self.memory and len(line) > 15 and self._should_record_autonomous(now):
                     await self.memory.record_interaction("autonomous", "internal_reflection", line)
 
-    async def autonomous_thought(self):
-        """Generate unprompted thought based on context."""
+    async def autonomous_thought(self, force: bool = False):
+        """Generate unprompted thought based on context.
+
+        force=True skips the thought cooldown — used by the hearing
+        prompt tick, so a heard thing gets a look now instead of at the
+        next 30 s cycle. The speak gate and lane dedup still apply.
+        """
         now = time.time()
-        if now - self.last_thought < self.thought_cooldown:
+        if not force and now - self.last_thought < self.thought_cooldown:
             return
-        
+
         if not self.autonomous_mode:
             return
         
