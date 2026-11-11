@@ -37,7 +37,9 @@
   only); `stop()` guarantees its drain-task shutdown signal gets into a
   full queue (drops one stale frame) and the drain also exits on
   `_running == False`, so a backed-up transcriber can't hang the toggle
-  or server shutdown; the bridge re-broadcasts the current hearing state
+  or server shutdown — and the queue is cleared on stop/start so a stale
+  sentinel can't kill a restarted capture session while the dashboard
+  reports "Mic live"; the bridge re-broadcasts the current hearing state
   on every new dashboard connection and the frontend reconciles its
   toggle from backend state, so a mic that is already live never shows
   as "Off — mic not listening".

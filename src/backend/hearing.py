@@ -214,6 +214,18 @@ class AmbientHearing:
         not its defaults."""
         await self._post_state(self._state)
 
+    def _clear_queue(self) -> None:
+        """Drop everything queued (stale frames, leftover shutdown sentinel).
+
+        The queue is reused across restarts: a stale sentinel would make a
+        new drain task exit immediately while capture reports "Mic live".
+        """
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+
     async def start(self) -> bool:
         """Start ambient capture. Returns False (hearing stays off) when
         the mic stack is unavailable — never raises into startup."""
@@ -273,6 +285,7 @@ class AmbientHearing:
             return False
 
         self._running = True
+        self._clear_queue()  # never start a session on stale frames/sentinel
         self._drain_task = asyncio.create_task(self._drain())
         logger.info("Ambient hearing started (device=%s, vad=%d)", self.device, self.vad_aggressiveness)
         await self._post_state("listening")
@@ -314,6 +327,7 @@ class AmbientHearing:
             except asyncio.CancelledError:
                 pass
             self._drain_task = None
+        self._clear_queue()  # stale frames / leftover sentinel must not survive into the next start
         self._recognizer = None
         logger.info("Ambient hearing stopped")
         await self._post_state("off")

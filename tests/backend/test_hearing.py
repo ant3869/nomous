@@ -268,6 +268,28 @@ async def test_stop_with_full_queue_still_shuts_down():
     assert hearing._drain_task is None
 
 
+@pytest.mark.asyncio
+async def test_restart_after_stop_does_not_exit_on_stale_sentinel():
+    # Codex re-review: stopping with frames queued leaves the shutdown
+    # sentinel behind; a restarted drain must not consume it and die
+    # while capture reports "Mic live".
+    bridge = SimpleNamespace(post=AsyncMock())
+    hearing = AmbientHearing({}, bridge)
+    hearing._running = True
+    hearing._segmenter = HearingSegmenter(lambda frame: False)
+    hearing._drain_task = asyncio.create_task(hearing._drain())
+    for _ in range(3):
+        hearing._queue.put_nowait(FRAME)
+    await asyncio.wait_for(hearing.stop(), timeout=5)
+    assert hearing._queue.empty()  # stale frames + sentinel cleared
+    hearing._running = True
+    hearing._segmenter = HearingSegmenter(lambda frame: False)
+    hearing._drain_task = asyncio.create_task(hearing._drain())
+    await asyncio.sleep(0.1)
+    assert not hearing._drain_task.done()  # new drain stays alive
+    await hearing.stop()
+
+
 # --- LLM: evidence slot, prompt tick, retention gate -----------------------
 
 
