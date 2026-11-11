@@ -29,6 +29,15 @@
     `dream_diary` lines in a new Dreams stream on the conversation
     panel. Manual trigger: `dream_now` WebSocket message; toggle:
     `dreaming` via the existing toggle path.
+  - Review fixes (Codex, PR #88): Light resolves placeholder stimuli —
+    autonomous thoughts store their content in the linked response node
+    (`internal_reflection` / `scene_digest`), so candidates use the real
+    text, never the placeholder, and boilerplate observation replies are
+    excluded. `recent_nodes` paginates in 500-row batches (the old LIMIT
+    500 silently dropped the newest material in a busy window). A second
+    run skips already-consolidated sources instead of minting a duplicate
+    milestone node. Promotion metadata is passed as a dict — a JSON
+    string was stored as NULL.
 - `MemoryStore.recent_nodes()` (`src/backend/memory.py`) returns nodes
   in a time window for the pass. `scripts/run_bridge.py` gains the
   `_dreaming_loop` scheduler (sleeps until the next configured time),

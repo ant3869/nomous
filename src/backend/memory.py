@@ -774,16 +774,20 @@ class MemoryStore:
         self,
         since_iso: str,
         kinds: Sequence[str] = ("stimulus", "concept"),
-        limit: int = 500,
+        limit: int = 20000,
     ) -> List[Dict[str, Any]]:
         """Nodes created at/after `since_iso` (naive UTC ISO strings compare
-        lexicographically). Used by the dreaming pass for short-term material."""
+        lexicographically), paginated in 500-row batches so a long window is
+        never silently truncated at the first batch. Each row also carries
+        `response_description`: the linked interaction response, so callers
+        can resolve placeholder stimuli (e.g. autonomous thoughts, whose
+        content lives in the response node). Used by the dreaming pass."""
         if not self.enabled or self._conn is None:
             return []
         kinds = tuple(kinds) or ("stimulus", "concept")
         async with self._lock:
             return await asyncio.to_thread(
-                self._recent_nodes_sync, since_iso, kinds, max(1, int(limit or 500))
+                self._recent_nodes_sync, since_iso, kinds, max(1, int(limit or 20000))
             )
 
     def _recent_nodes_sync(
@@ -791,19 +795,61 @@ class MemoryStore:
     ) -> List[Dict[str, Any]]:
         assert self._conn is not None
         placeholders = ",".join("?" for _ in kinds)
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        batch = 500
+        while len(rows) < limit:
+            take = min(batch, limit - len(rows))
+            with closing(self._conn.cursor()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT s.id, s.label, s.kind, s.strength, s.description,
+                           s.tags, s.source, s.timestamp, s.importance,
+                           s.last_accessed, r.description AS response_description
+                    FROM memory_nodes s
+                    LEFT JOIN memory_edges e
+                           ON e.from_id = s.id AND e.relationship = 'interaction'
+                    LEFT JOIN memory_nodes r
+                           ON r.id = e.to_id AND r.kind = 'concept'
+                    WHERE s.kind IN ({placeholders}) AND s.timestamp >= ?
+                    ORDER BY s.timestamp ASC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (*kinds, since_iso, take, offset),
+                )
+                fetched = [dict(row) for row in cur.fetchall()]
+            rows.extend(fetched)
+            offset += len(fetched)
+            if len(fetched) < take:
+                break
+        if len(rows) >= limit:
+            logger.warning(
+                "recent_nodes hit the %d-node cap; window material may be truncated",
+                limit,
+            )
+        return rows
+
+    async def consolidated_source_ids(self, source_ids: Sequence[str]) -> set:
+        """Subset of `source_ids` already covered by a `consolidates` edge
+        (i.e. already promoted into long-term memory by a past dream run)."""
+        ids = [str(i) for i in source_ids if i]
+        if not self.enabled or self._conn is None or not ids:
+            return set()
+        async with self._lock:
+            return await asyncio.to_thread(self._consolidated_source_ids_sync, ids)
+
+    def _consolidated_source_ids_sync(self, source_ids: Sequence[str]) -> set:
+        assert self._conn is not None
+        placeholders = ",".join("?" for _ in source_ids)
         with closing(self._conn.cursor()) as cur:
             cur.execute(
                 f"""
-                SELECT id, label, kind, strength, description, tags, source,
-                       timestamp, importance, last_accessed
-                FROM memory_nodes
-                WHERE kind IN ({placeholders}) AND timestamp >= ?
-                ORDER BY timestamp ASC
-                LIMIT ?
+                SELECT DISTINCT to_id FROM memory_edges
+                WHERE relationship = 'consolidates' AND to_id IN ({placeholders})
                 """,
-                (*kinds, since_iso, limit),
+                tuple(source_ids),
             )
-            return [dict(row) for row in cur.fetchall()]
+            return {str(row[0]) for row in cur.fetchall()}
 
     async def create_node(self, payload: Dict[str, Any]) -> Optional[str]:
         if not self.enabled or self._conn is None:

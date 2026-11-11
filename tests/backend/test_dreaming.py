@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -362,3 +363,114 @@ async def test_diary_appends_across_runs(tmp_path):
     diary = (tmp_path / "DREAMS.md").read_text(encoding="utf-8")
     assert diary.count("## Dream ") == 2
     assert diary.count("# Dream Diary") == 1
+
+
+@pytest.mark.asyncio
+async def test_light_uses_response_text_for_placeholder_stimuli(tmp_path):
+    # Codex P1 on PR #88: autonomous thoughts record the observation as
+    # the RESPONSE ("internal_reflection" stimulus). Candidates must use
+    # the real text, never the placeholder.
+    store, bridge = _memory(tmp_path)
+    for text in ("Maya arrived home", "Maya arrived home again", "Maya arrived home late"):
+        await store.record_interaction("autonomous", "internal_reflection", text)
+    now = datetime.now(timezone.utc)
+    _retimestamp(
+        store,
+        [
+            (now - timedelta(days=1)).replace(tzinfo=None).isoformat(timespec="seconds"),
+            (now - timedelta(hours=2)).replace(tzinfo=None).isoformat(timespec="seconds"),
+            now.replace(tzinfo=None).isoformat(timespec="seconds"),
+        ],
+    )
+    llm = FakeLLM("- Maya arriving home\n")
+    dreamer = _dreamer(llm, store, bridge, tmp_path)
+    summary = await dreamer.run_once(now)
+
+    assert summary["promoted"] == 1
+    consolidated = [
+        n for n in _all_nodes(store, "concept") if n.get("category") == "dream_consolidated"
+    ]
+    assert len(consolidated) == 1
+    assert "Maya arrived home" in consolidated[0]["description"]
+    assert "internal_reflection" not in consolidated[0]["description"]
+    # P2 metadata fix: the dict survives (a JSON string would store NULL).
+    meta = json.loads(consolidated[0]["metadata"])
+    assert meta["dream_score"] >= 0.55
+    assert meta["occurrences"] == 3
+    assert len(meta["sources"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_light_prefers_stimulus_over_boilerplate_response(tmp_path):
+    store, bridge = _memory(tmp_path)
+    await store.record_interaction(
+        "observation", "[PEOPLE] Maya likes tea",
+        "Recorded observation (importance: 8/10)", tags=["importance_8"],
+    )
+    await store.record_interaction(
+        "observation", "[PEOPLE] Maya likes tea a lot",
+        "Recorded observation (importance: 8/10)", tags=["importance_8"],
+    )
+    dreamer = _dreamer(FakeLLM(), store, bridge, tmp_path)
+    clusters = await dreamer._light(datetime.now(timezone.utc))
+    assert len(clusters) == 1
+    assert "Maya likes tea" in clusters[0]["representative"]
+    assert "Recorded observation" not in clusters[0]["representative"]
+
+
+@pytest.mark.asyncio
+async def test_recent_nodes_paginates_past_500(tmp_path):
+    # Codex P2 on PR #88: the old LIMIT 500 silently dropped the newest
+    # material in a busy window.
+    store, bridge = _memory(tmp_path)
+    conn = store._conn
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    for i in range(600):
+        conn.execute(
+            "INSERT INTO memory_nodes(id, label, kind, strength, description, source, timestamp)"
+            " VALUES (?, ?, 'stimulus', 1.0, ?, 'test', ?)",
+            (f"n{i}", f"node {i}", f"observation number {i}", now),
+        )
+    conn.commit()
+    nodes = await store.recent_nodes("2020-01-01T00:00:00", kinds=("stimulus",))
+    assert len(nodes) == 600
+
+
+@pytest.mark.asyncio
+async def test_second_run_skips_already_consolidated(tmp_path):
+    # Codex P2 on PR #88: the overlapping 72h lookback must not mint a
+    # duplicate milestone node every night.
+    store, bridge = _memory(tmp_path)
+    await _seed(
+        store,
+        [
+            ("autonomous", "Maya arrived home", ["importance_8"]),
+            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("autonomous", "Maya arrived home late", ["importance_8"]),
+            ("vision", "The dog slept on the rug all afternoon", ["importance_4"]),
+        ],
+    )
+    now = datetime.now(timezone.utc)
+    _retimestamp(
+        store,
+        [
+            (now - timedelta(days=1)).replace(tzinfo=None).isoformat(timespec="seconds"),
+            (now - timedelta(hours=2)).replace(tzinfo=None).isoformat(timespec="seconds"),
+            now.replace(tzinfo=None).isoformat(timespec="seconds"),
+            now.replace(tzinfo=None).isoformat(timespec="seconds"),
+        ],
+    )
+    dreamer = _dreamer(FakeLLM("- Maya arriving home\n- Dog sleeping\n"), store, bridge, tmp_path)
+
+    summary1 = await dreamer.run_once(now)
+    assert summary1["promoted"] == 1
+    summary2 = await dreamer.run_once(now)
+    assert summary2["promoted"] == 0
+    assert summary2["already_consolidated"] == 1
+    assert summary2["rejected"] == 1  # the dog, rejected again
+    consolidated = [
+        n for n in _all_nodes(store, "concept") if n.get("category") == "dream_consolidated"
+    ]
+    assert len(consolidated) == 1  # no duplicate milestone node
+    diary = (tmp_path / "DREAMS.md").read_text(encoding="utf-8")
+    assert "### Already consolidated" in diary

@@ -16,7 +16,13 @@ Nomous adaptation notes:
   idle loop's act phase via record_observation). Responses ('concept'
   nodes) are not candidates on their own — each stimulus carries its
   response via the interaction edge, and the record_observation
-  boilerplate reply would otherwise cluster into junk.
+  boilerplate reply would otherwise cluster into junk. Exception:
+  autonomous thoughts store their content IN the response node
+  (stimulus 'internal_reflection' / 'scene_digest'), so Light resolves
+  those via the edge instead of promoting the placeholder.
+- A second run never re-promotes already-consolidated sources: the
+  overlapping lookback would otherwise mint a duplicate milestone
+  node every night.
 - Unpromoted memories decay (strength *= 0.9, floor 0.1); they are
   NEVER deleted.
 - The Dream Diary (DREAMS.md) logs every consolidation decision —
@@ -27,7 +33,6 @@ Nomous adaptation notes:
 """
 
 import asyncio
-import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -69,6 +74,33 @@ def _similar(a: str, b: str) -> bool:
         return False
     overlap = len(wa & wb)
     return (overlap / max(len(wa), len(wb))) > SIMILARITY_THRESHOLD
+
+
+# Stimulus labels that carry no content of their own: autonomous thoughts
+# and scene digests record the observation as the RESPONSE node
+# (record_interaction("autonomous", "internal_reflection", <thought>)).
+# The candidate text comes from the linked response instead.
+_PLACEHOLDER_STIMULI = frozenset({"internal_reflection", "scene_digest", "internal reflection"})
+
+
+def _effective_text(node: Dict[str, Any]) -> str:
+    """Candidate text for a stimulus node.
+
+    Real stimuli speak for themselves. Placeholder stimuli resolve to
+    their linked interaction response; boilerplate responses ("Thought",
+    "Recorded observation...") resolve to "" so the node is skipped.
+    """
+    text = (node.get("description") or node.get("label") or "").strip()
+    if not text or text.lower() in _PLACEHOLDER_STIMULI:
+        response = (node.get("response_description") or "").strip()
+        if not response or response.lower() == "thought":
+            return ""
+        return response
+    return text
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", "", text.lower())).strip()
 
 
 def seconds_until_next_run(time_str: str, now: Optional[datetime] = None) -> float:
@@ -124,6 +156,7 @@ class Dreamer:
             "promoted": 0,
             "rejected": 0,
             "decayed": 0,
+            "already_consolidated": 0,
             "themes": [],
             "decisions": [],
             "skipped": None,
@@ -163,6 +196,9 @@ class Dreamer:
             summary["decisions"] = decisions
             summary["promoted"] = sum(1 for d in decisions if d["outcome"] == "promoted")
             summary["rejected"] = sum(1 for d in decisions if d["outcome"] == "rejected")
+            summary["already_consolidated"] = sum(
+                1 for d in decisions if d["outcome"] == "skipped"
+            )
             summary["decayed"] = sum(d.get("decayed", 0) for d in decisions)
 
             await self._write_diary(now, summary)
@@ -189,19 +225,35 @@ class Dreamer:
             .isoformat(timespec="seconds")
         )  # stored timestamps are naive UTC ISO; keep the comparison naive too
         nodes = await self.memory.recent_nodes(since, kinds=("stimulus",))
-        clusters: List[Dict[str, Any]] = []
+        # Resolve each node to its effective (candidate) text, deduping by id.
+        effective: List[Dict[str, Any]] = []
+        seen_ids = set()
         for node in nodes:
-            text = (node.get("description") or node.get("label") or "").strip()
+            node_id = node.get("id")
+            if node_id in seen_ids:
+                continue
+            seen_ids.add(node_id)
+            text = _effective_text(node)
             if not text:
                 continue
+            node["effective_text"] = text
+            effective.append(node)
+        # Cheap exact grouping first (most repeats are near-identical), so
+        # the pairwise similarity merge only runs over distinct texts.
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for node in effective:
+            groups.setdefault(_normalize_text(node["effective_text"]), []).append(node)
+        clusters: List[Dict[str, Any]] = []
+        for group_nodes in groups.values():
+            representative = group_nodes[0]["effective_text"]
             placed = False
             for cluster in clusters:
-                if _similar(text, cluster["representative"]):
-                    cluster["nodes"].append(node)
+                if _similar(representative, cluster["representative"]):
+                    cluster["nodes"].extend(group_nodes)
                     placed = True
                     break
             if not placed:
-                clusters.append({"representative": text, "nodes": [node]})
+                clusters.append({"representative": representative, "nodes": list(group_nodes)})
         logger.info("Dreaming light: %d nodes -> %d candidates", len(nodes), len(clusters))
         return clusters
 
@@ -262,7 +314,9 @@ class Dreamer:
                 if latest is None or parsed > latest:
                     latest = parsed
             importances.append(float(node.get("importance") or 0.0))
-            lengths.append(len(str(node.get("description") or "")))
+            lengths.append(
+                len(str(node.get("effective_text") or node.get("description") or ""))
+            )
 
         relevance = max(importances) if importances else 0.0
         if themes:
@@ -320,9 +374,31 @@ class Dreamer:
     ) -> List[Dict[str, Any]]:
         """Score every candidate; promote the durable ones, decay the rest."""
         decisions = []
+        # Already-consolidated sources (from past runs) are skipped, not
+        # re-promoted: the overlapping lookback would otherwise mint a
+        # duplicate milestone node every night.
+        all_sources = [
+            n.get("id") for c in clusters for n in c["nodes"] if n.get("id")
+        ]
+        consolidated = await self.memory.consolidated_source_ids(all_sources)
         for cluster in clusters:
             result = self._score_candidate(cluster, themes, now)
             label = cluster["representative"][:80]
+            if any(n.get("id") in consolidated for n in cluster["nodes"]):
+                decisions.append(
+                    {
+                        "outcome": "skipped",
+                        "label": label,
+                        "score": result["score"],
+                        "occurrences": result["occurrences"],
+                        "unique_days": result["unique_days"],
+                        "modalities": result["modalities"],
+                        "reason": "already consolidated in a past dream run",
+                        "node_id": None,
+                        "decayed": 0,
+                    }
+                )
+                continue
             reason = self._gate_reason(result)
             if reason is None:
                 node_id = await self._promote(cluster, result, now)
@@ -373,17 +449,16 @@ class Dreamer:
                 "importance": result["score"],
                 "tags": ["dream", "consolidated"],
                 "timestamp": now.isoformat(timespec="seconds"),
-                "metadata": json.dumps(
-                    {
-                        "dream_score": result["score"],
-                        "signals": result["signals"],
-                        "occurrences": result["occurrences"],
-                        "unique_days": result["unique_days"],
-                        "modalities": result["modalities"],
-                        "sources": sources,
-                    },
-                    ensure_ascii=False,
-                ),
+                # Pass the dict itself: the store only serializes dict/list
+                # metadata (a JSON string would be stored as NULL).
+                "metadata": {
+                    "dream_score": result["score"],
+                    "signals": result["signals"],
+                    "occurrences": result["occurrences"],
+                    "unique_days": result["unique_days"],
+                    "modalities": result["modalities"],
+                    "sources": sources,
+                },
             }
         )
         if node_id:
@@ -431,6 +506,7 @@ class Dreamer:
             lines.append("")
         promoted = [d for d in summary["decisions"] if d["outcome"] == "promoted"]
         rejected = [d for d in summary["decisions"] if d["outcome"] == "rejected"]
+        skipped = [d for d in summary["decisions"] if d["outcome"] == "skipped"]
         if promoted:
             lines.append("### Promoted")
             for d in promoted:
@@ -442,6 +518,14 @@ class Dreamer:
         if rejected:
             lines.append("### Rejected")
             for d in rejected:
+                lines.append(
+                    f"- {d['label']} (score {d['score']}, {d['occurrences']}x, "
+                    f"{d['unique_days']} day(s), {','.join(d['modalities'])}) — {d['reason']}"
+                )
+            lines.append("")
+        if skipped:
+            lines.append("### Already consolidated")
+            for d in skipped:
                 lines.append(
                     f"- {d['label']} (score {d['score']}, {d['occurrences']}x, "
                     f"{d['unique_days']} day(s), {','.join(d['modalities'])}) — {d['reason']}"
@@ -469,6 +553,8 @@ class Dreamer:
         for decision in summary["decisions"]:
             if decision["outcome"] == "promoted":
                 line = f"🌙 promoted: {decision['label']} — {decision['reason']}"
+            elif decision["outcome"] == "skipped":
+                line = f"🌙 already consolidated: {decision['label']} — {decision['reason']}"
             else:
                 line = f"💤 rejected: {decision['label']} — {decision['reason']}"
             try:

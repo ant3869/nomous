@@ -123,7 +123,12 @@ over WebSocket runs one pass immediately). Three phases, in order:
   `dreaming.lookback_hours` (default 72) and dedupes near-duplicates
   (word-overlap > 0.5) into candidate clusters. Never writes long-term.
   The raw material is the day's interactions, including observations
-  the idle loop jotted down via `record_observation`.
+  the idle loop jotted down via `record_observation`. Autonomous
+  thoughts store their content in the linked response node (stimulus
+  `internal_reflection` / `scene_digest`), so Light resolves those via
+  the interaction edge and skips boilerplate responses; the query
+  paginates in 500-row batches so a busy window is never silently
+  truncated.
 - **REM** — one text `_generate` call (tools off) over the candidates
   extracts up to 5 recurring themes. Best-effort: if the model is
   unavailable the pass continues with no themes and scoring falls back
