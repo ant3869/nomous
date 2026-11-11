@@ -86,8 +86,10 @@
   fist toggles the mute; `ui.gesture_enabled` is now true by default.
   Actions fire once per press — a held fist re-triggering every
   cooldown interval no longer alternates mute/unmute (Codex review).
-  Muting with a fist also interrupts in-flight speech, so 'Muted'
-  means silent now, not just quiet later (Codex review).
+  Detection runs every frame so releases are observed promptly: a
+  release-and-repress between dispatches counts as a fresh press
+  (Codex review). Muting with a fist also interrupts in-flight speech,
+  so 'Muted' means silent now, not just quiet later (Codex review).
 - Proactive recall (finding 11): when a known face is present, the
   vision prompt carries a one-line "last time you saw this person"
   recall built from their most recent conversation; strangers get no

@@ -144,7 +144,10 @@ each synthesis.
   closed_fist toggles the mute (`tts.toggle_muted()`); dispatched from
   the camera thread, on by default (`ui.gesture_enabled: true`), once
   per press — a held gesture re-triggering every cooldown interval does
-  not re-dispatch until the hand is released. Muting with a fist also
+  not re-dispatch until the hand is released. Detection runs every
+  frame so releases are observed promptly; only dispatch is paced by
+  the cooldown, so a press landing inside it still fires once it
+  clears. Muting with a fist also
   interrupts in-flight speech, so 'Muted' means silent immediately.
 
 ## Config

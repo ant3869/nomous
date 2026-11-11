@@ -110,10 +110,12 @@ class CameraLoop:
         self.gesture_enabled = bool(cfg["ui"].get("gesture_enabled", True))
         self.last_gesture_time = 0
         self.gesture_cooldown = float(cfg["ui"].get("gesture_cooldown", 3))
-        # Last dispatched gesture; "" means the hand was released. A held
-        # gesture re-triggers every cooldown interval — only the
-        # transition dispatches, so a sustained fist toggles mute once.
+        # Last observed gesture ("" = hand released) and last dispatched
+        # one. Detection runs every frame so releases are observed
+        # promptly; only dispatch is paced by gesture_cooldown, so a
+        # press landing inside the cooldown still fires once it clears.
         self._last_gesture = ""
+        self._dispatched_gesture = ""
 
         # MediaPipe Tasks detectors (gestures + faces); None when unavailable.
         # Face detection is independent of the gesture toggle: person tracking
@@ -626,23 +628,33 @@ class CameraLoop:
         """
         return bool(gesture) or (now - last_preview_send) >= self.preview_interval_sec
 
-    def _handle_detected_gesture(self, gesture: str, now: float) -> None:
-        """Act on a detected gesture, once per press.
+    def _handle_detected_gesture(self, gesture: str, now: float) -> bool:
+        """Act on a detected gesture, once per press. True when dispatched.
 
-        A held gesture re-triggers every cooldown interval; only the
-        transition dispatches, so a sustained fist toggles mute once
-        instead of alternating it every few seconds. An empty detection
-        means the hand was released and resets the tracker.
+        Detection runs every frame, so releases are observed promptly:
+        an empty detection resets both trackers, and a re-formed gesture
+        counts as a fresh press even if it lands between cooldown-spaced
+        dispatches. Dispatch itself is paced by gesture_cooldown, so a
+        press landing inside the cooldown still fires once the cooldown
+        clears instead of being consumed — and a held gesture never
+        re-dispatches, so a sustained fist toggles mute once.
         """
-        if gesture:
-            self.last_gesture_time = now
-            if gesture != self._last_gesture:
-                self._last_gesture = gesture
-                logger.info(f"GESTURE: {gesture}")
-                self._post_event(f"👋 Gesture: {gesture}")
-                self._dispatch_gesture(gesture)
-        elif self._last_gesture:
+        if not gesture:
+            # Hand released: a later gesture of the same kind is a new press.
             self._last_gesture = ""
+            self._dispatched_gesture = ""
+            return False
+        self._last_gesture = gesture
+        if gesture == self._dispatched_gesture:
+            return False
+        if (now - self.last_gesture_time) < self.gesture_cooldown:
+            return False
+        self.last_gesture_time = now
+        self._dispatched_gesture = gesture
+        logger.info(f"GESTURE: {gesture}")
+        self._post_event(f"👋 Gesture: {gesture}")
+        self._dispatch_gesture(gesture)
+        return True
 
     def _dispatch_gesture(self, gesture: str) -> None:
         """Map a detected hand gesture to an action.
@@ -804,19 +816,27 @@ class CameraLoop:
                 
                 now = time.time()
                 
-                # Gesture detection (lightweight, runs every frame)
+                # Gesture detection runs every processed frame: release
+                # tracking must be continuous — if detection were gated
+                # by the action cooldown, a release-and-repress between
+                # detections would never be observed and the second press
+                # could not dispatch. The cooldown paces dispatch only
+                # (inside _handle_detected_gesture); only a dispatched
+                # press forces a preview / analysis, so a held gesture
+                # does not spam either.
                 gesture = ""
-                if self.gesture_enabled and (now - self.last_gesture_time) >= self.gesture_cooldown:
+                gesture_press = ""
+                if self.gesture_enabled:
                     frame_rgb = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
                     gesture = self._detect_gesture(frame_small, frame_rgb)
+                    if self._handle_detected_gesture(gesture, now):
+                        gesture_press = gesture
 
-                    self._handle_detected_gesture(gesture, now)
-                
                 # Dashboard preview: steady cadence (~2 fps) regardless of
                 # motion, so the UI shows a live feed instead of a still
-                # frame in a quiet room. A gesture forces an immediate
-                # preview. Analysis is NOT gated on the preview send.
-                if self._should_send_preview(now, last_preview_send, gesture):
+                # frame in a quiet room. A gesture press forces an
+                # immediate preview. Analysis is NOT gated on the preview send.
+                if self._should_send_preview(now, last_preview_send, gesture_press):
                     last_preview_send = now
                     try:
                         data_url = to_data_url(frame)
@@ -828,16 +848,16 @@ class CameraLoop:
                         logger.error(f"Error posting preview frame: {e}")
                     self._refresh_live_frame(frame_small)
 
-                # Vision analysis stays on its own cooldown (or a gesture),
+                # Vision analysis stays on its own cooldown (or a gesture press),
                 # independent of the preview cadence.
                 if (
                     self.vision_description_enabled
                     and self.llm
-                    and ((now - self.last_analysis_time) >= self.analysis_cooldown or gesture)
+                    and ((now - self.last_analysis_time) >= self.analysis_cooldown or gesture_press)
                 ):
                     self.last_analysis_time = now
                     try:
-                        description = self._describe_frame(frame_small, motion, gesture)
+                        description = self._describe_frame(frame_small, motion, gesture_press)
                         logger.info(f"Vision: {description}")
 
                         # Send the actual frame to the vision model when it can take one.

@@ -61,7 +61,9 @@ def camera_with_loop():
     camera.bridge = FakeBridge()
     camera.llm = types.SimpleNamespace(tts=FakeTTS())
     camera._last_gesture = ""
+    camera._dispatched_gesture = ""
     camera.last_gesture_time = 0
+    camera.gesture_cooldown = 3
     yield camera
     loop.call_soon_threadsafe(loop.stop)
     thread.join(timeout=5)
@@ -132,6 +134,42 @@ def test_open_hand_interrupt_fires_once_per_press(camera_with_loop):
     camera._handle_detected_gesture("", 108.0)
     camera._handle_detected_gesture("open_hand", 112.0)
     assert _wait_until(lambda: camera.llm.tts.interrupts == 2)
+
+
+def test_release_between_cooldowns_allows_repress(camera_with_loop):
+    """Codex review: a release-and-repress between dispatches must count.
+
+    Fist at 100 dispatches; held through 103 (no re-dispatch); released
+    at 104-105 and re-formed at 106. Detection runs every frame, so the
+    release is observed and the second press dispatches — under the old
+    cooldown-gated detection the release was never seen and the second
+    fist could not unmute.
+    """
+    camera = camera_with_loop
+    assert camera._handle_detected_gesture("closed_fist", 100.0) is True
+    assert camera.llm.tts.muted is True
+    assert camera._handle_detected_gesture("closed_fist", 103.0) is False
+    assert camera.llm.tts.muted is True
+    assert camera._handle_detected_gesture("", 104.0) is False
+    assert camera._handle_detected_gesture("closed_fist", 106.0) is True
+    assert camera.llm.tts.muted is False
+
+
+def test_press_inside_cooldown_fires_once_it_clears(camera_with_loop):
+    """A press landing inside the cooldown is not consumed: it fires
+    once the cooldown clears while the gesture is still held."""
+    camera = camera_with_loop
+    assert camera._handle_detected_gesture("closed_fist", 100.0) is True
+    assert camera.llm.tts.muted is True
+    camera._handle_detected_gesture("", 101.0)
+    # Re-press at 102, inside the 3s cooldown: held, not dispatched yet.
+    assert camera._handle_detected_gesture("closed_fist", 102.0) is False
+    assert camera.llm.tts.muted is True
+    # Still held at 103, cooldown cleared: fires now, exactly once.
+    assert camera._handle_detected_gesture("closed_fist", 103.0) is True
+    assert camera.llm.tts.muted is False
+    assert camera._handle_detected_gesture("closed_fist", 104.0) is False
+    assert camera.llm.tts.muted is False
 
 
 def test_gesture_dispatch_without_llm_or_tts_is_silent():
