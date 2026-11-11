@@ -195,6 +195,14 @@ class LocalLLM:
         self.idle_speak_enabled = bool(autonomous_cfg.get("speak_enabled", True))
         self.idle_min_speak_interval = max(0, int(autonomous_cfg.get("min_speak_interval_seconds", 300) or 0))
         self._last_autonomous_speech = 0.0
+        # Shared sensory context: the idle tick reads the freshest evidence
+        # from every sense, not just vision — audio evidence arrives here
+        # (filled in by the hearing work) and rides along with the frame so
+        # one sense can cue the other. Audio is transient: the tick only
+        # trusts it while fresh (see _idle_audio_evidence).
+        self._last_audio_evidence: str = ""
+        self._last_audio_at: float = 0.0
+        self._audio_evidence_ttl_s = 60
         self.last_vision_analysis = 0
         self._last_spoken_vision: tuple[str, float] | None = None
         self.vision_cooldown = int(vision_cfg.get("vision_cooldown", 15))  # seconds between autonomous vision checks
@@ -1192,10 +1200,12 @@ class LocalLLM:
                 "Reply in one or two warm, collaborative sentences."
             )
         elif context_type == "autonomous":
+            noticed = f"\n\nWhat you just noticed:\n{user_input}" if user_input else ""
             scenario = (
                 f"Recent context:\n{context_summary}\n\n"
                 "You are thinking to yourself on your own schedule, unprompted. "
-                "Produce a short internal reflection or tool call that keeps momentum going.\n\n"
+                "Produce a short internal reflection or tool call that keeps momentum going."
+                f"{noticed}\n\n"
                 "Start your reply with exactly one of these markers, then one short line:\n"
                 "- SAY: <one short sentence> — only if something is genuinely worth saying aloud right now. Be sparing: most ticks should not speak.\n"
                 "- THINK: <one short private observation> — your quiet thought. This stays on screen only, never spoken.\n"
@@ -2177,14 +2187,34 @@ class LocalLLM:
             return ("think", first_line[6:].strip())
         return ("think", first_line)
 
+    def _idle_audio_evidence(self, now: float) -> str:
+        """Fresh audio evidence for the tick, or "" when none/stale.
+
+        Hearing fills _last_audio_evidence/_last_audio_at when it hears
+        something; the tick only trusts it while fresh, so a stale
+        transcript never steers a decision.
+        """
+        if not self._last_audio_evidence:
+            return ""
+        if now - self._last_audio_at > self._audio_evidence_ttl_s:
+            return ""
+        return self._last_audio_evidence
+
     def _idle_speech_allowed(self, now: float) -> bool:
         """True when the loop may speak aloud on this tick.
 
         Speech is opt-in per tick: the `speak_enabled` toggle plus a
         minimum interval since the last spoken idle line, so the model
-        cannot get chatty even if it keeps choosing SAY:.
+        cannot get chatty even if it keeps choosing SAY:. It also
+        rechecks the chat lane at decision time: if the user started
+        talking while the idle vision call was running, the line stays a
+        thought instead of queueing speech over (or ahead of) the live
+        conversation — an earlier TTS interrupt cannot cancel speech
+        queued afterward.
         """
         if not self.idle_speak_enabled:
+            return False
+        if self._lane_busy("chat"):
             return False
         return (now - self._last_autonomous_speech) >= self.idle_min_speak_interval
 
@@ -2240,11 +2270,22 @@ class LocalLLM:
         if person_context:
             person_context = f"\nPeople present: {person_context}\n"
 
+        # Shared sensory context: the tick's input carries every sense's
+        # freshest evidence together, so one sense can cue the other — an
+        # audio event rides along with the frame, and the model can use
+        # the frame to see what made the noise.
+        audio_evidence = self._idle_audio_evidence(now)
+        audio_section = ""
+        if audio_evidence:
+            audio_section = f"\nAudio heard recently: \"{audio_evidence}\"\n"
+
         if self._last_frame_image_url and self._vision_available:
             idle_prompt = (
                 "You are Nomous, quietly observing the room on your own schedule. "
                 "Look at the current view and decide what to do."
-                f"{person_context}\n"
+                f"{person_context}"
+                f"{audio_section}\n"
+                "Your senses are cross-wired: if you heard something, use the frame to see what made the noise; if you see something, note what sound would go with it.\n"
                 "Start your reply with exactly one of these markers, then one short line:\n"
                 "- SAY: <one short sentence> — only if something is genuinely worth saying aloud right now (someone new arrived, something changed, a greeting is due). Be sparing: most ticks should not speak.\n"
                 "- THINK: <one short private observation> — your quiet thought about what you see. This stays on screen only, never spoken.\n"
@@ -2278,7 +2319,10 @@ class LocalLLM:
 
         # No frame (or vision unavailable): text-only decision. The text loop
         # already runs tool calls, so this path can act in the same call.
-        prompt = self._build_prompt("", "autonomous")
+        # Audio evidence still rides along here, so a tick with something
+        # heard but nothing seen can still decide on the sound alone.
+        notice = f"Audio heard recently: \"{audio_evidence}\"" if audio_evidence else ""
+        prompt = self._build_prompt(notice, "autonomous")
         response = await self._generate(prompt, max_tokens=50)
         if response and len(response) > 3:
             kind, line = self._parse_idle_decision(response)

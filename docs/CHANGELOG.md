@@ -16,7 +16,11 @@
   via the text tool loop (`_idle_act`) — recall what is known about a
   person, store an observation — with nothing spoken. The text fallback
   (no frame) already ran tool calls inside `_generate`, so it can act in
-  the same call. Unmarked output is always a thought, never speech.
+  the same call. Unmarked output is always a thought, never speech. The
+  speech gate also rechecks the chat lane at decision time (Codex P2 on
+  this PR): if the user started talking while the idle vision call was
+  running, the line stays a thought instead of queueing speech over — or
+  ahead of — the live conversation.
 - Tool calls are visible, not invisible: the vision path
   (`_generate_vision`) still generates text only — it has no tool loop —
   so the tick acts through `_generate`'s existing tool loop instead of a
@@ -33,6 +37,16 @@
 - Token-budgeted: the vision tick reuses `_generate_vision`'s existing
   budget check (frame memory + prompt + image tokens), and the act phase
   is a short 80-token text generation through the same budgeted path.
+- Shared sensory context, not vision-only inputs: the tick's decision
+  input carries every sense's freshest evidence together.
+  `_last_audio_evidence` / `_last_audio_at` (filled in by the hearing
+  work) ride along with the frame in the vision prompt and in the text
+  fallback, so one sense can cue the other — audio can trigger a vision
+  check of what made the noise, and the model notes what sound goes
+  with what it sees. Audio evidence is transient: the tick only trusts
+  it while fresh (60s TTL), so a stale transcript never steers a
+  decision. The reverse direction (a visual event triggering a listen)
+  needs the audio-capture path and lands with the hearing PR.
 
 ### 🏗️ Architecture: MCP-style tool registry, processing lanes, TTS queue
 

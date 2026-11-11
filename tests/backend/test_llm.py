@@ -337,6 +337,9 @@ def _idle_llm(**overrides):
         idle_speak_enabled=True,
         idle_min_speak_interval=300,
         _last_autonomous_speech=0.0,
+        _last_audio_evidence="",
+        _last_audio_at=0.0,
+        _audio_evidence_ttl_s=60,
         scene_digest_seconds=0,
         _last_frame_description="",
         _last_frame_image_url="data:image/jpeg;base64,xxx",
@@ -368,6 +371,12 @@ def test_idle_speech_allowed_respects_toggle_and_interval():
     assert llm._idle_speech_allowed(1000.0) is True
 
 
+def test_idle_speech_allowed_suppressed_when_chat_lane_busy():
+    llm = _idle_llm()
+    llm._lanes["chat"] = True
+    assert llm._idle_speech_allowed(10000.0) is False
+
+
 def test_init_wires_idle_loop_config():
     cfg = _minimal_cfg()
     cfg["autonomous"] = {
@@ -391,6 +400,16 @@ def test_init_idle_loop_defaults():
     assert llm.idle_speak_enabled is True
     assert llm.idle_min_speak_interval == 300
     assert llm._last_autonomous_speech == 0.0
+    assert llm._last_audio_evidence == ""
+    assert llm._last_audio_at == 0.0
+
+
+def test_idle_audio_evidence_fresh_stale_empty():
+    llm = _idle_llm(_last_audio_evidence="someone knocked", _last_audio_at=1000.0)
+    assert llm._idle_audio_evidence(1010.0) == "someone knocked"
+    assert llm._idle_audio_evidence(1070.0) == ""
+    llm = _idle_llm(_last_audio_evidence="", _last_audio_at=1000.0)
+    assert llm._idle_audio_evidence(1010.0) == ""
 
 
 def test_build_prompt_autonomous_act_includes_tools_and_silent_framing():
@@ -498,3 +517,56 @@ async def test_autonomous_thought_skips_when_chat_lane_busy():
     assert llm._idle_posts == []
     llm._generate_vision.assert_not_called()
     llm._generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_vision_prompt_carries_fresh_audio_evidence():
+    llm = _idle_llm(_last_audio_evidence="someone knocked twice", _last_audio_at=time.time())
+    llm._generate_vision = AsyncMock(return_value="THINK: A knock at the door.")
+    llm._generate = AsyncMock(return_value="Probably a visitor.")
+    await llm.autonomous_thought()
+    vision_prompt = llm._generate_vision.call_args[0][1]
+    assert "someone knocked twice" in vision_prompt
+    assert "cross-wired" in vision_prompt
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_vision_prompt_drops_stale_audio_evidence():
+    llm = _idle_llm(_last_audio_evidence="someone knocked twice", _last_audio_at=0.0)
+    llm._generate_vision = AsyncMock(return_value="THINK: Quiet room.")
+    llm._generate = AsyncMock(return_value="Quiet room.")
+    await llm.autonomous_thought()
+    vision_prompt = llm._generate_vision.call_args[0][1]
+    assert "someone knocked twice" not in vision_prompt
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_text_fallback_carries_audio_when_no_frame():
+    llm = _idle_llm(
+        _last_frame_image_url=None,
+        _last_audio_evidence="a dog barking outside",
+        _last_audio_at=time.time(),
+    )
+    llm._generate = AsyncMock(return_value="THINK: A dog barking outside.")
+    await llm.autonomous_thought()
+    text_prompt = llm._generate.call_args[0][0]
+    assert "a dog barking outside" in text_prompt
+
+
+@pytest.mark.asyncio
+async def test_idle_decide_say_suppressed_when_chat_starts_mid_call():
+    # Codex P2 on PR #87: chat input arriving during the idle vision call
+    # must not end up as speech queued over (or ahead of) the live reply.
+    llm = _idle_llm()
+
+    async def vision_with_chat_arriving(*args, **kwargs):
+        llm._lanes["chat"] = True  # user started talking mid-call
+        return "SAY: Hey there."
+
+    llm._generate_vision = vision_with_chat_arriving
+    llm._generate = AsyncMock(return_value="unused")
+    await llm.autonomous_thought()
+    assert not [p for p in llm._idle_posts if p.get("type") == "speak"]
+    assert llm._idle_tts.spoken == []
+    thoughts = [p.get("text", "") for p in llm._idle_posts if p.get("type") == "thought"]
+    assert any("Hey there." in t for t in thoughts)

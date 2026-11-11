@@ -95,7 +95,10 @@ plus a model lock:
   via the text tool loop (`_idle_act` — recall/store against the memory
   DB, nothing spoken); a SAY: line speaks through Piper only when the
   speech gate allows (`autonomous.speak_enabled` and
-  `autonomous.min_speak_interval_seconds`, default 300s). Tool calls
+  `autonomous.min_speak_interval_seconds`, default 300s). The tick's
+  input is a shared sensory context, not vision-only: fresh audio
+  evidence (`_last_audio_evidence`, 60s TTL) rides along with the frame
+  so one sense can cue the other. Tool calls
   made on any path are mirrored into the thoughts stream (name, key
   args, outcome) as well as the Signals view, so a silent tick is
   visible, never invisible.
