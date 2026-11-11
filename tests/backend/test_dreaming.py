@@ -47,13 +47,24 @@ class FakeLLM:
         return self._themes_response
 
 
-def _memory(tmp_path):
+def _memory(tmp_path, name="test.sqlite"):
     bridge = FakeBridge()
     cfg = {
-        "memory": {"enable": True, "db_path": str(tmp_path / "test.sqlite")},
+        "memory": {"enable": True, "db_path": str(tmp_path / name)},
         "paths": {},
     }
     return MemoryStore(cfg, bridge), bridge
+
+
+def _response_text(store, node_id):
+    """Linked interaction response for a stimulus node."""
+    row = store._conn.execute(
+        "SELECT r.description FROM memory_edges e "
+        "JOIN memory_nodes r ON r.id = e.to_id "
+        "WHERE e.from_id = ? AND e.relationship = 'interaction'",
+        (node_id,),
+    ).fetchone()
+    return row[0] if row else ""
 
 
 def _dreamer(llm, store, bridge, tmp_path, **overrides):
@@ -74,9 +85,13 @@ def _dreamer(llm, store, bridge, tmp_path, **overrides):
 
 
 async def _seed(store, items):
-    """items: (modality, stimulus_text, tags). Timestamps are 'now'."""
-    for modality, text, tags in items:
-        await store.record_interaction(modality, text, "noted.", tags=tags)
+    """items: (modality, stimulus_text, tags[, response]).
+    Timestamps are 'now'. Vision items carry the production shape:
+    coarse frame description as stimulus, VLM observation as response."""
+    for item in items:
+        modality, text, tags = item[0], item[1], item[2]
+        response = item[3] if len(item) > 3 else "noted."
+        await store.record_interaction(modality, text, response, tags=tags)
 
 
 def _retimestamp(store, timestamps):
@@ -122,9 +137,9 @@ async def test_light_clusters_near_duplicates(tmp_path):
         store,
         [
             ("autonomous", "Maya arrived home", ["importance_8"]),
-            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_8"], "Maya arrived home again"),
             ("autonomous", "Maya arrived home late", ["importance_8"]),
-            ("vision", "The dog slept on the rug all afternoon", ["importance_4"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_4"], "The dog slept on the rug all afternoon"),
         ],
     )
     dreamer = _dreamer(FakeLLM(), store, bridge, tmp_path)
@@ -243,9 +258,9 @@ async def test_run_once_promotes_durable_and_decays_rest(tmp_path):
         store,
         [
             ("autonomous", "Maya arrived home", ["importance_8"]),
-            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_8"], "Maya arrived home again"),
             ("autonomous", "Maya arrived home late", ["importance_8"]),
-            ("vision", "The dog slept on the rug all afternoon", ["importance_4"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_4"], "The dog slept on the rug all afternoon"),
         ],
     )
     now = datetime.now(timezone.utc)
@@ -284,7 +299,11 @@ async def test_run_once_promotes_durable_and_decays_rest(tmp_path):
     assert len(edges) == 3
 
     # The rejected one-off decayed (never deleted).
-    dog = [n for n in _all_nodes(store, "stimulus") if "dog slept" in n["description"]]
+    dog = [
+        n
+        for n in _all_nodes(store, "stimulus")
+        if "dog slept" in _response_text(store, n["id"])
+    ]
     assert len(dog) == 1
     assert dog[0]["strength"] == pytest.approx(0.9)
 
@@ -310,7 +329,7 @@ async def test_run_once_without_llm_still_promotes(tmp_path):
         store,
         [
             ("autonomous", "Maya arrived home", ["importance_8"]),
-            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_8"], "Maya arrived home again"),
         ],
     )
     now = datetime.now(timezone.utc)
@@ -448,9 +467,9 @@ async def test_second_run_skips_already_consolidated(tmp_path):
         store,
         [
             ("autonomous", "Maya arrived home", ["importance_8"]),
-            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_8"], "Maya arrived home again"),
             ("autonomous", "Maya arrived home late", ["importance_8"]),
-            ("vision", "The dog slept on the rug all afternoon", ["importance_4"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_4"], "The dog slept on the rug all afternoon"),
         ],
     )
     now = datetime.now(timezone.utc)
@@ -488,7 +507,7 @@ async def test_run_once_skips_when_chat_lane_busy(tmp_path):
         store,
         [
             ("autonomous", "Maya arrived home", ["importance_8"]),
-            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_8"], "Maya arrived home again"),
             ("autonomous", "Maya arrived home late", ["importance_8"]),
         ],
     )
@@ -517,9 +536,9 @@ async def test_dream_run_publishes_graph_once_per_batch(tmp_path):
         store,
         [
             ("autonomous", "Maya arrived home", ["importance_8"]),
-            ("vision", "Maya arrived home again", ["importance_8"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_8"], "Maya arrived home again"),
             ("autonomous", "Maya arrived home late", ["importance_8"]),
-            ("vision", "The dog slept on the rug all afternoon", ["importance_4"]),
+            ("vision", "The space looks well lit, with complex visuals.", ["importance_4"], "The dog slept on the rug all afternoon"),
         ],
     )
     now = datetime.now(timezone.utc)
@@ -550,5 +569,86 @@ async def test_dream_run_publishes_graph_once_per_batch(tmp_path):
         "SELECT * FROM memory_edges WHERE from_id = ?", (consolidated[0]["id"],)
     ).fetchall()
     assert len(edges) == 3
-    dog = [n for n in _all_nodes(store, "stimulus") if "dog slept" in n["description"]]
+    dog = [
+        n
+        for n in _all_nodes(store, "stimulus")
+        if "dog slept" in _response_text(store, n["id"])
+    ]
     assert dog[0]["strength"] == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_light_keeps_non_ascii_candidates_distinct(tmp_path):
+    """Codex P2 on PR #88: the old [a-z0-9] normalization stripped CJK
+    text to an empty grouping key, so unrelated observations collapsed
+    into one candidate and could pass the recurrence gates."""
+    from src.backend.dreaming import _normalize_text
+
+    assert _normalize_text("我喜欢喝茶") == "我喜欢喝茶"
+    assert _normalize_text("明天要去医院") == "明天要去医院"
+    assert _normalize_text("!!!") != _normalize_text("???")
+
+    store, bridge = _memory(tmp_path)
+    await _seed(
+        store,
+        [
+            ("autonomous", "我喜欢喝茶", ["importance_8"]),
+            ("autonomous", "明天要去医院", ["importance_8"]),
+        ],
+    )
+    dreamer = _dreamer(FakeLLM(), store, bridge, tmp_path)
+    clusters = await dreamer._light(datetime.now(timezone.utc))
+    assert len(clusters) == 2  # unrelated CJK texts must not merge
+    assert sorted(c["representative"] for c in clusters) == [
+        "我喜欢喝茶",
+        "明天要去医院",
+    ]
+
+    # Identical CJK text still groups into one candidate.
+    store2, bridge2 = _memory(tmp_path, name="test2.sqlite")
+    await _seed(
+        store2,
+        [
+            ("autonomous", "我喜欢喝茶", ["importance_8"]),
+            ("autonomous", "我喜欢喝茶", ["importance_8"]),
+        ],
+    )
+    dreamer2 = _dreamer(FakeLLM(), store2, bridge2, tmp_path)
+    clusters2 = await dreamer2._light(datetime.now(timezone.utc))
+    assert len(clusters2) == 1
+    assert len(clusters2[0]["nodes"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_light_uses_vlm_response_for_vision(tmp_path):
+    """Codex P2 on PR #88: vision interactions store the coarse frame
+    description as stimulus and the VLM observation as response. Two
+    activities in the same lighting must not collapse into one generic
+    candidate."""
+    store, bridge = _memory(tmp_path)
+    await _seed(
+        store,
+        [
+            (
+                "vision",
+                "The space looks well lit, with complex visuals.",
+                ["importance_8"],
+                "A person is reading a book on the couch",
+            ),
+            (
+                "vision",
+                "The space looks well lit, with complex visuals.",
+                ["importance_8"],
+                "A child is playing with a ball on the floor",
+            ),
+        ],
+    )
+    dreamer = _dreamer(FakeLLM(), store, bridge, tmp_path)
+    clusters = await dreamer._light(datetime.now(timezone.utc))
+    assert len(clusters) == 2
+    reps = sorted(c["representative"] for c in clusters)
+    assert reps == [
+        "A child is playing with a ball on the floor",
+        "A person is reading a book on the couch",
+    ]
+    assert not any("well lit" in r for r in reps)

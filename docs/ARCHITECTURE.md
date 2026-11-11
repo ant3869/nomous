@@ -126,9 +126,12 @@ over WebSocket runs one pass immediately). Three phases, in order:
   the idle loop jotted down via `record_observation`. Autonomous
   thoughts store their content in the linked response node (stimulus
   `internal_reflection` / `scene_digest`), so Light resolves those via
-  the interaction edge and skips boilerplate responses; the query
-  paginates in 500-row batches so a busy window is never silently
-  truncated.
+  the interaction edge and skips boilerplate responses; vision
+  interactions are the same shape in reverse — the stimulus is the
+  coarse frame description, so Light uses the linked VLM observation
+  instead. Normalization is Unicode-aware, so non-Latin text never
+  collapses to an empty grouping key. The query paginates in 500-row
+  batches so a busy window is never silently truncated.
 - **REM** — one text `_generate` call (tools off) over the candidates
   extracts up to 5 recurring themes. Best-effort: if the model is
   unavailable the pass continues with no themes and scoring falls back

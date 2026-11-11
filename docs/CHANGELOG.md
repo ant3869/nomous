@@ -42,7 +42,10 @@
     publish each — a 500-rejection run was 500 full-graph broadcasts);
     a dream run skips when the chat lane is busy, as the autonomous
     loop does, so REM never holds the shared model lock behind a live
-    reply.
+    reply. Third round: normalization is Unicode-aware (CJK text no
+    longer collapses to an empty grouping key); vision candidates use
+    the linked VLM observation (the response) instead of the coarse
+    frame description stored as the stimulus.
 - `MemoryStore.recent_nodes()` (`src/backend/memory.py`) returns nodes
   in a time window for the pass. `scripts/run_bridge.py` gains the
   `_dreaming_loop` scheduler (sleeps until the next configured time),

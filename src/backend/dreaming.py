@@ -19,7 +19,11 @@ Nomous adaptation notes:
   boilerplate reply would otherwise cluster into junk. Exception:
   autonomous thoughts store their content IN the response node
   (stimulus 'internal_reflection' / 'scene_digest'), so Light resolves
-  those via the edge instead of promoting the placeholder.
+  those via the edge instead of promoting the placeholder. Vision is
+  the same shape in reverse: the stimulus is the coarse frame
+  description, so Light uses the linked VLM observation (the response)
+  instead, or different activities in the same lighting collapse into
+  one generic candidate.
 - A second run never re-promotes already-consolidated sources: the
   overlapping lookback would otherwise mint a duplicate milestone
   node every night.
@@ -61,9 +65,12 @@ _STOPWORDS = frozenset(
 
 
 def _words(text: str) -> set:
+    # \w is Unicode-aware: CJK text is one word per unspaced run, so
+    # distinct CJK observations share no words and never falsely merge,
+    # while identical ones still overlap fully.
     return {
         w
-        for w in re.findall(r"[a-z0-9']+", (text or "").lower())
+        for w in re.findall(r"[\w']+", (text or "").lower())
         if w not in _STOPWORDS and len(w) > 1
     }
 
@@ -86,21 +93,35 @@ _PLACEHOLDER_STIMULI = frozenset({"internal_reflection", "scene_digest", "intern
 def _effective_text(node: Dict[str, Any]) -> str:
     """Candidate text for a stimulus node.
 
-    Real stimuli speak for themselves. Placeholder stimuli resolve to
-    their linked interaction response; boilerplate responses ("Thought",
+    Real stimuli speak for themselves — except vision: the stimulus is
+    the coarse frame description and the substantive observation lives
+    in the linked response. Placeholder stimuli resolve to their linked
+    interaction response; boilerplate responses ("Thought",
     "Recorded observation...") resolve to "" so the node is skipped.
     """
     text = (node.get("description") or node.get("label") or "").strip()
+    response = (node.get("response_description") or "").strip()
     if not text or text.lower() in _PLACEHOLDER_STIMULI:
-        response = (node.get("response_description") or "").strip()
         if not response or response.lower() == "thought":
             return ""
+        return response
+    if (node.get("source") or "") == "vision" and response:
+        # The stimulus is the coarse _describe_frame() output; the VLM's
+        # actual observation is the response. Different activities in the
+        # same lighting collapse into one generic candidate otherwise.
+        if response.lower() == "thought":
+            return text
         return response
     return text
 
 
 def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", "", text.lower())).strip()
+    # \w is Unicode-aware, so CJK text survives normalization instead of
+    # collapsing to an empty grouping key. A text with no word characters
+    # at all keeps its raw form, so unrelated punctuation-only texts
+    # don't group together under "".
+    normalized = re.sub(r"\s+", " ", re.sub(r"[^\w ]+", "", text.lower())).strip()
+    return normalized or (text or "").lower().strip()
 
 
 def seconds_until_next_run(time_str: str, now: Optional[datetime] = None) -> float:
