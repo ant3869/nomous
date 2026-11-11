@@ -770,6 +770,41 @@ class MemoryStore:
                     msg_event(f"behavior {status}: {label}")
                 )
 
+    async def recent_nodes(
+        self,
+        since_iso: str,
+        kinds: Sequence[str] = ("stimulus", "concept"),
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """Nodes created at/after `since_iso` (naive UTC ISO strings compare
+        lexicographically). Used by the dreaming pass for short-term material."""
+        if not self.enabled or self._conn is None:
+            return []
+        kinds = tuple(kinds) or ("stimulus", "concept")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._recent_nodes_sync, since_iso, kinds, max(1, int(limit or 500))
+            )
+
+    def _recent_nodes_sync(
+        self, since_iso: str, kinds: Sequence[str], limit: int
+    ) -> List[Dict[str, Any]]:
+        assert self._conn is not None
+        placeholders = ",".join("?" for _ in kinds)
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                f"""
+                SELECT id, label, kind, strength, description, tags, source,
+                       timestamp, importance, last_accessed
+                FROM memory_nodes
+                WHERE kind IN ({placeholders}) AND timestamp >= ?
+                ORDER BY timestamp ASC
+                LIMIT ?
+                """,
+                (*kinds, since_iso, limit),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
     async def create_node(self, payload: Dict[str, Any]) -> Optional[str]:
         if not self.enabled or self._conn is None:
             return None

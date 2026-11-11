@@ -112,6 +112,35 @@ plus a model lock:
 `LocalLLM.stop()` cancels the vision worker and stops TTS.
 `reload_model()` refuses while any lane is busy.
 
+## Dreaming (nightly consolidation)
+
+`Dreamer` (`src/backend/dreaming.py`) runs once a night at
+`dreaming.time` (default 03:00) on the autonomous lane, scheduled by
+`_dreaming_loop` in the bridge (sleeps until the next run; `dream_now`
+over WebSocket runs one pass immediately). Three phases, in order:
+
+- **Light** — ingests recent `stimulus` nodes inside
+  `dreaming.lookback_hours` (default 72) and dedupes near-duplicates
+  (word-overlap > 0.5) into candidate clusters. Never writes long-term.
+  The raw material is the day's interactions, including observations
+  the idle loop jotted down via `record_observation`.
+- **REM** — one text `_generate` call (tools off) over the candidates
+  extracts up to 5 recurring themes. Best-effort: if the model is
+  unavailable the pass continues with no themes and scoring falls back
+  to node importance.
+- **Deep** — scores each candidate with six weighted signals
+  (relevance 0.30, frequency 0.24, modality diversity 0.15, recency
+  0.15, consolidation across days 0.10, richness 0.06) and promotes
+  only when ALL gates pass (`min_score` 0.55, `min_occurrences` 2,
+  `min_unique_days` 2). Promotion is the only write: one consolidated
+  concept node (`category: dream_consolidated`, `milestone: 1`) linked
+  to its sources with `consolidates` edges. Rejected candidates decay
+  (strength × 0.9, floor 0.1); nothing is ever deleted.
+
+Every decision lands in the Dream Diary (`data/dreams/DREAMS.md`,
+append-only) and as `dream_diary` lines in the dashboard's Dreams
+stream. The pass posts thoughts/events only and never speaks.
+
 ## Speech
 
 `PiperTTS.speak()` enqueues and returns immediately. One worker task

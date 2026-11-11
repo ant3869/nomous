@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### 🌙 Dreaming: nightly memory consolidation (light → REM → deep)
+
+- A nightly pass (`src/backend/dreaming.py`, `Dreamer`) consolidates the
+  day's short-term notes into long-term memory, adapted from OpenClaw's
+  dreaming. It runs at `dreaming.time` (default 03:00) on the autonomous
+  lane, silent by definition — thoughts/events only, never speaks.
+  - **Light**: ingests recent interaction nodes (kind `stimulus`: chat,
+    vision, autonomous ticks, and observations the idle loop jotted down
+    via `record_observation`) inside `lookback_hours` (default 72) and
+    dedupes near-duplicates into candidate clusters. Never writes
+    long-term.
+  - **REM**: one text generation over the candidates extracts recurring
+    themes/patterns. Best-effort — if the model is unavailable the pass
+    still runs and scoring falls back to node importance.
+  - **Deep**: scores each candidate with six weighted signals —
+    relevance 0.30, frequency 0.24, query (modality) diversity 0.15,
+    recency 0.15, consolidation across days 0.10, conceptual richness
+    0.06 — and promotes only when ALL gates pass (`min_score` 0.55,
+    `min_occurrences` 2, `min_unique_days` 2). Promotion writes one
+    consolidated concept node (milestone=1, category
+    `dream_consolidated`) linked to its source nodes. Rejected
+    candidates decay (strength × 0.9, floor 0.1); nothing is ever deleted.
+  - **Dream Diary**: every decision (promoted / rejected + why) is
+    appended to `data/dreams/DREAMS.md` and posted to the dashboard as
+    `dream_diary` lines in a new Dreams stream on the conversation
+    panel. Manual trigger: `dream_now` WebSocket message; toggle:
+    `dreaming` via the existing toggle path.
+- `MemoryStore.recent_nodes()` (`src/backend/memory.py`) returns nodes
+  in a time window for the pass. `scripts/run_bridge.py` gains the
+  `_dreaming_loop` scheduler (sleeps until the next configured time),
+  `dream_now` handling, and a `dreaming` toggle; `stop_workers` cancels
+  the dreaming task too.
+
 ### 🤖 Autonomous idle loop (think, speak — and act)
 
 - The loop Ant remembered already existed, but it never saw anything

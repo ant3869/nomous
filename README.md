@@ -28,6 +28,7 @@ Nomous is an offline-first WebSocket bridge that connects a TypeScript React das
 ### ✅ Complete & Working
 - Local llama.cpp LLM loading with progress events, sampling controls, and autonomous thought/vision loops
 - 🤖 Autonomous idle loop: free-running tick (default 30s) that looks at the freshest frame and decides think / speak / act — silent thoughts and tool calls stay visible in the Think stream, speech is rate-limited
+- 🌙 Dreaming: nightly memory consolidation (light → REM → deep) that promotes durable, recurring notes into long-term memory, with a Dream Diary of every decision
 - Vosk-based microphone pipeline that feeds transcripted speech into the LLM and echoes microphone activity back to the UI
 - MediaPipe-enabled camera loop with motion gating, gesture detection, and asynchronous vision prompts for the model
 - Tool execution framework with 26 tools, execution history, and dedicated dashboard widgets
