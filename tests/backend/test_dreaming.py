@@ -702,3 +702,64 @@ async def test_dreaming_toggle_after_disabled_startup(tmp_path):
     finally:
         rb.CFG = old_cfg
         await server.stop_workers()
+
+
+def test_cluster_nodes_merges_near_dupes_keeps_distinct():
+    from src.backend.dreaming import _cluster_nodes
+
+    nodes = [
+        {"id": "a", "effective_text": "Maya arrived home"},
+        {"id": "b", "effective_text": "Maya arrived home again"},
+        {"id": "c", "effective_text": "Maya arrived home late"},
+        {"id": "d", "effective_text": "The dog slept on the rug all afternoon"},
+    ]
+    clusters = _cluster_nodes(nodes)
+    assert len(clusters) == 2
+    assert sorted(len(c["nodes"]) for c in clusters) == [1, 3]
+
+
+@pytest.mark.asyncio
+async def test_light_stays_fast_and_responsive_on_1000_distinct(tmp_path):
+    """Codex P2 on PR #88: _light() ran all-pairs _similar() on the
+    event loop (~10.5s for 1,000 distinct 30-word observations), freezing
+    chat, audio, and dashboard pings. Clustering now runs in a worker
+    thread with precomputed token sets + a word index."""
+    import random
+    import string
+    import time
+
+    random.seed(7)
+    words = ["".join(random.choices(string.ascii_lowercase, k=6)) for _ in range(3000)]
+    nodes = [
+        {
+            "id": f"n{i}",
+            "description": " ".join(random.sample(words, 30)) + f" event{i}",
+            "source": "autonomous",
+            "timestamp": "2026-11-10T10:00:00",
+            "importance": 0.5,
+            "strength": 1.0,
+            "response_description": "",
+        }
+        for i in range(1000)
+    ]
+
+    class StubMemory:
+        async def recent_nodes(self, since, kinds=None):
+            return [dict(n) for n in nodes]
+
+    dreamer = _dreamer(FakeLLM(), StubMemory(), FakeBridge(), tmp_path)
+    ran = []
+
+    async def ticker():
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+            ran.append(1)
+
+    t0 = time.monotonic()
+    clusters, _ = await asyncio.gather(
+        dreamer._light(datetime.now(timezone.utc)), ticker()
+    )
+    elapsed = time.monotonic() - t0
+    assert len(clusters) == 1000
+    assert len(ran) == 5  # the loop stayed responsive throughout
+    assert elapsed < 5.0  # was ~10.5s synchronous on the loop

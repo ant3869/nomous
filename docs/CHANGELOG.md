@@ -49,7 +49,10 @@
     + scheduler are created whenever a memory store exists, with the
     enabled flag gating execution — a toggle can now enable dreaming
     after a disabled startup (previously the toggle was logged as
-    unknown and did nothing).
+    unknown and did nothing). Fifth round: clustering runs in a worker
+    thread with precomputed token sets + a word → cluster index
+    (identical merge decisions, 1,000 distinct observations 10.5s →
+    0.26s, loop never blocked).
 - `MemoryStore.recent_nodes()` (`src/backend/memory.py`) returns nodes
   in a time window for the pass. `scripts/run_bridge.py` gains the
   `_dreaming_loop` scheduler (sleeps until the next configured time),

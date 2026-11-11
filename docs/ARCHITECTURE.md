@@ -131,7 +131,10 @@ over WebSocket runs one pass immediately). Three phases, in order:
   coarse frame description, so Light uses the linked VLM observation
   instead. Normalization is Unicode-aware, so non-Latin text never
   collapses to an empty grouping key. The query paginates in 500-row
-  batches so a busy window is never silently truncated.
+  batches so a busy window is never silently truncated. Clustering
+  runs in a worker thread (`asyncio.to_thread`) with precomputed token
+  sets and a word → cluster index, so a busy window can't freeze the
+  bridge event loop (1,000 distinct observations: 10.5s → 0.26s).
 - **REM** — one text `_generate` call (tools off) over the candidates
   extracts up to 5 recurring themes. Best-effort: if the model is
   unavailable the pass continues with no themes and scoring falls back

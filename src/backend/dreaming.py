@@ -75,12 +75,16 @@ def _words(text: str) -> set:
     }
 
 
-def _similar(a: str, b: str) -> bool:
-    wa, wb = _words(a), _words(b)
+def _similar_sets(wa: set, wb: set) -> bool:
+    """Word-overlap similarity on precomputed token sets."""
     if not wa or not wb:
         return False
     overlap = len(wa & wb)
     return (overlap / max(len(wa), len(wb))) > SIMILARITY_THRESHOLD
+
+
+def _similar(a: str, b: str) -> bool:
+    return _similar_sets(_words(a), _words(b))
 
 
 # Stimulus labels that carry no content of their own: autonomous thoughts
@@ -135,6 +139,43 @@ def seconds_until_next_run(time_str: str, now: Optional[datetime] = None) -> flo
     if target <= now:
         target += timedelta(days=1)
     return (target - now).total_seconds()
+
+
+def _cluster_nodes(effective: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Group effective-text nodes into candidate clusters (pure CPU work).
+
+    Cheap exact grouping first (most repeats are near-identical), then a
+    similarity merge over distinct texts. Token sets are precomputed once
+    per representative, and a word -> cluster index skips pairs that share
+    no word — those can never be similar (overlap 0), so the merge
+    decisions are identical to the naive all-pairs scan while distinct
+    observations stay near-linear instead of quadratic.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for node in effective:
+        groups.setdefault(_normalize_text(node["effective_text"]), []).append(node)
+    clusters: List[Dict[str, Any]] = []
+    rep_words: List[set] = []
+    index: Dict[str, set] = {}
+    for group_nodes in groups.values():
+        representative = group_nodes[0]["effective_text"]
+        words = _words(representative)
+        candidates = set()
+        for w in words:
+            candidates.update(index.get(w, ()))
+        placed = False
+        for ci in sorted(candidates):
+            if _similar_sets(words, rep_words[ci]):
+                clusters[ci]["nodes"].extend(group_nodes)
+                placed = True
+                break
+        if not placed:
+            ci = len(clusters)
+            clusters.append({"representative": representative, "nodes": list(group_nodes)})
+            rep_words.append(words)
+            for w in words:
+                index.setdefault(w, set()).add(ci)
+    return clusters
 
 
 class Dreamer:
@@ -267,24 +308,12 @@ class Dreamer:
                 continue
             node["effective_text"] = text
             effective.append(node)
-        # Cheap exact grouping first (most repeats are near-identical), so
-        # the pairwise similarity merge only runs over distinct texts.
-        groups: Dict[str, List[Dict[str, Any]]] = {}
-        for node in effective:
-            groups.setdefault(_normalize_text(node["effective_text"]), []).append(node)
-        clusters: List[Dict[str, Any]] = []
-        for group_nodes in groups.values():
-            representative = group_nodes[0]["effective_text"]
-            placed = False
-            for cluster in clusters:
-                if _similar(representative, cluster["representative"]):
-                    cluster["nodes"].extend(group_nodes)
-                    placed = True
-                    break
-            if not placed:
-                clusters.append({"representative": representative, "nodes": list(group_nodes)})
+        # Clustering is CPU-bound (similarity over distinct texts) — run
+        # it in a worker thread so the bridge event loop never blocks.
+        clusters = await asyncio.to_thread(_cluster_nodes, effective)
         logger.info("Dreaming light: %d nodes -> %d candidates", len(nodes), len(clusters))
         return clusters
+
 
     # ------------------------------------------------------------------
     # REM: reflect — extract patterns/themes from recent traces
