@@ -22,7 +22,7 @@ This document provides a runtime-centric view of how Nomous stitches together th
 - GPU telemetry requires `torch`, `pynvml`, and `psutil`; missing dependencies disable metrics and break `tests/test_system.py` during import.
 
 ### 🚧 Not Implemented Yet
-- Additional gesture classes and wake-word activation remain roadmap items from the changelog.
+- Gesture actions are live: open palm pauses speech, fist toggles mute. Additional gesture classes and wake-word activation remain roadmap items from the changelog.
 
 ## Repository Layout
 ```
@@ -64,6 +64,8 @@ vision:
   frame_memory_items: 5
   frame_memory_max_tokens: 512
   vision_cooldown: 15
+  scene_digest_minutes: 10
+  embedding_match_threshold: 0.7
 
 camera:
   backend: dshow
@@ -79,10 +81,10 @@ autonomous:
   thought_cooldown: 30
 
 ui:
-  snapshot_debounce: 4
+  preview_interval_sec: 0.5
   motion_sensitivity: 30
   vision_enabled: true
-  gesture_enabled: false
+  gesture_enabled: true
   gesture_cooldown: 3
   tts_enabled: true
 

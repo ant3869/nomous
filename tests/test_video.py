@@ -109,7 +109,7 @@ def camera_config():
     return {
         "ui": {
             "vision_enabled": True,
-            "snapshot_debounce": 1,
+            "preview_interval_sec": 0.5,
             "motion_sensitivity": 10,
             "gesture_enabled": True,
             "gesture_cooldown": 3,

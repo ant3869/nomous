@@ -851,6 +851,53 @@ def cleanup_processes(processes):
         except Exception:
             logger.exception("Error while terminating process %s", getattr(proc, "pid", "unknown"))
 
+def preflight_assets(config) -> bool:
+    """Verify every local asset the bridge needs before it starts.
+
+    MediaPipe task models are vendored in git (assets/mediapipe/) and
+    checksum-checked against the manifest — a missing or corrupt one is
+    fatal, because the checkout itself is broken and the camera loop
+    would silently lose faces/gestures/embeddings. Everything else
+    (Vosk model, Piper exe/voice, GGUF model + projector) is downloaded
+    separately, so a missing one only warns here — the component itself
+    disables or fails loudly with its own message at runtime.
+    """
+    from src.backend.mediapipe_assets import verify_all_vendored
+
+    ok = True
+    results = verify_all_vendored()
+    for filename, verified in sorted(results.items()):
+        if verified:
+            print_status(f"Asset OK: MediaPipe {filename}")
+        else:
+            print_error(
+                f"Asset MISSING or corrupt: MediaPipe {filename} — "
+                "re-clone the repo (assets/mediapipe/) or delete "
+                "modules/models/mediapipe/ so it re-downloads from the pinned URL."
+            )
+            ok = False
+
+    paths = config.get("paths", {})
+    checks = [
+        ("Vosk speech model", paths.get("vosk_model_dir"), "dir"),
+        ("Piper executable", paths.get("piper_exe"), "file"),
+        ("Piper voice model", paths.get("piper_voice"), "file"),
+        ("LLM model (GGUF)", paths.get("gguf_path"), "file"),
+        ("Vision projector (mmproj)", paths.get("mmproj_path"), "file"),
+    ]
+    for label, raw_path, kind in checks:
+        if not raw_path:
+            continue
+        target = Path(str(raw_path))
+        if not target.is_absolute():
+            target = PROJECT_ROOT / target
+        exists = target.is_dir() if kind == "dir" else target.is_file()
+        if not exists:
+            print_warning(f"Asset missing: {label} ({raw_path}) — that component will be disabled.")
+
+    return ok
+
+
 def main():
     emit_start_banner()
 
@@ -926,6 +973,13 @@ def main():
     except Exception as e:
         print_error(f"Error loading configuration: {e}")
         logger.exception("Failed to load configuration")
+        return 1
+
+    # Verify local assets (vendored MediaPipe models, Vosk, Piper, GGUF)
+    # before the bridge starts, so a broken checkout fails here with a
+    # clear message instead of silently degrading at runtime.
+    if not preflight_assets(config):
+        logger.error("Startup halted during asset preflight")
         return 1
 
     ws_env_host = _loopback_fallback(ws_host)

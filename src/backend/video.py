@@ -7,12 +7,12 @@ import threading
 import time
 import asyncio
 import logging
-import urllib.request
 from pathlib import Path
 from queue import SimpleQueue, Empty
 from typing import Optional
 from .utils import to_data_url, msg_event, msg_image
 from .person_tracker import PersonTracker
+from .mediapipe_assets import MEDIAPIPE_MODELS, resolve_model  # noqa: F401  (MEDIAPIPE_MODELS re-exported)
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +43,9 @@ except (ImportError, AttributeError):
     MEDIAPIPE_AVAILABLE = False
     logger.warning("MediaPipe not available - install with: pip install mediapipe")
 
-# Task model files, auto-downloaded on first run into modules/models/mediapipe/.
-MEDIAPIPE_MODELS = {
-    "gesture_recognizer.task": "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
-    "blaze_face_short_range.tflite": "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
-}
+# Task model files live vendored in assets/mediapipe/ (manifest + checksums
+# in src/backend/mediapipe_assets.py, with a pinned-URL download fallback
+# into modules/models/mediapipe/).
 
 # GestureRecognizer category -> Nomous gesture label.
 GESTURE_LABELS = {
@@ -58,13 +56,6 @@ GESTURE_LABELS = {
     "Closed_Fist": "closed_fist",
     "ILoveYou": "rock_on",
 }
-
-
-def _download_file(url: str, target: Path) -> None:
-    """Download ``url`` to ``target`` atomically."""
-    tmp_target = target.with_suffix(target.suffix + ".tmp")
-    urllib.request.urlretrieve(url, tmp_target)
-    tmp_target.replace(target)
 
 
 class CameraLoop:
@@ -96,7 +87,7 @@ class CameraLoop:
         self.process_height = int(cam.get("process_height", 360))
         self.frame_skip = int(cam.get("frame_skip", 2))
         
-        self.debounce_sec = float(cfg["ui"]["snapshot_debounce"])
+        self.preview_interval_sec = float(cfg["ui"].get("preview_interval_sec", 0.5))
         self.motion_threshold = int(cfg["ui"]["motion_sensitivity"])
 
         self._thr = None
@@ -119,17 +110,29 @@ class CameraLoop:
         self.gesture_enabled = bool(cfg["ui"].get("gesture_enabled", True))
         self.last_gesture_time = 0
         self.gesture_cooldown = float(cfg["ui"].get("gesture_cooldown", 3))
+        # Last observed gesture ("" = hand released) and last dispatched
+        # one. Detection runs every frame so releases are observed
+        # promptly; only dispatch is paced by gesture_cooldown, so a
+        # press landing inside the cooldown still fires once it clears.
+        self._last_gesture = ""
+        self._dispatched_gesture = ""
 
         # MediaPipe Tasks detectors (gestures + faces); None when unavailable.
         # Face detection is independent of the gesture toggle: person tracking
         # needs faces even when hand gestures are off.
         self._gesture_recognizer = None
         self._face_detector = None
+        self._face_embedder = None
         if MEDIAPIPE_AVAILABLE:
             self._init_mediapipe_tasks()
+            self._init_face_embedder()
 
         # Person tracking for persistent recognition
-        self.person_tracker = PersonTracker()
+        self.person_tracker = PersonTracker(
+            embedding_match_threshold=float(
+                cfg.get("vision", {}).get("embedding_match_threshold", 0.7)
+            )
+        )
         self._last_person_count = 0
         self._last_person_update = 0
         self._person_tracking_cooldown = 5.0  # Seconds between person tracking updates
@@ -145,43 +148,98 @@ class CameraLoop:
             logger.error(f"Failed to queue camera command {name}: {e}")
 
     def _init_mediapipe_tasks(self):
-        """Download Task models on first run and build the gesture/face detectors."""
-        model_dir = Path(__file__).resolve().parents[2] / "modules" / "models" / "mediapipe"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        wanted = dict(MEDIAPIPE_MODELS)
-        if not self.gesture_enabled:
-            wanted.pop("gesture_recognizer.task", None)
-        paths = {}
-        for filename, url in wanted.items():
-            target = model_dir / filename
-            if not target.exists():
-                try:
-                    logger.info("Downloading MediaPipe model %s ...", filename)
-                    _download_file(url, target)
-                except Exception as exc:
-                    logger.warning("Could not download MediaPipe model %s: %s", filename, exc)
-                    return
-            paths[filename] = target
+        """Build the gesture/face detectors from verified model files.
+
+        Models resolve from the vendored assets/mediapipe/ copies first
+        (checksum-checked against the manifest), then the legacy download
+        dir, then a pinned-URL download. A missing model disables only its
+        own detector instead of taking the other one down with it.
+        """
+        gesture_path = None
+        if self.gesture_enabled:
+            gesture_path = resolve_model("gesture_recognizer.task")
+            if gesture_path is None:
+                logger.warning("Gesture recognizer model unavailable; gesture detection off")
+        face_path = resolve_model("blaze_face_short_range.tflite")
+        if face_path is None:
+            logger.warning("Face detector model unavailable; face detection off")
         try:
-            if self.gesture_enabled:
+            if gesture_path is not None:
                 self._gesture_recognizer = mp_vision.GestureRecognizer.create_from_options(
                     mp_vision.GestureRecognizerOptions(
-                        base_options=MpBaseOptions(model_asset_path=str(paths["gesture_recognizer.task"])),
+                        base_options=MpBaseOptions(model_asset_path=str(gesture_path)),
                         running_mode=mp_vision.RunningMode.IMAGE,
                         num_hands=2,
                     )
                 )
-            self._face_detector = mp_vision.FaceDetector.create_from_options(
-                mp_vision.FaceDetectorOptions(
-                    base_options=MpBaseOptions(model_asset_path=str(paths["blaze_face_short_range.tflite"])),
-                    running_mode=mp_vision.RunningMode.IMAGE,
+            if face_path is not None:
+                self._face_detector = mp_vision.FaceDetector.create_from_options(
+                    mp_vision.FaceDetectorOptions(
+                        base_options=MpBaseOptions(model_asset_path=str(face_path)),
+                        running_mode=mp_vision.RunningMode.IMAGE,
+                    )
                 )
-            )
             logger.info("MediaPipe Tasks detectors initialized")
         except Exception as exc:
             logger.warning("MediaPipe Tasks init failed: %s", exc)
             self._gesture_recognizer = None
             self._face_detector = None
+
+    def _init_face_embedder(self):
+        """Build the ImageEmbedder used for real person recognition.
+
+        MobileNetV3 (vendored) turns each detected face crop into a
+        1024-dim L2-normalized embedding; the person tracker matches on
+        cosine similarity instead of face size + screen position. Without
+        it, recognition falls back to the old size/position heuristic.
+        """
+        model_path = resolve_model("mobilenet_v3_small.tflite")
+        if model_path is None:
+            logger.warning("Face embedder model unavailable; person recognition falls back to size/position")
+            return
+        try:
+            self._face_embedder = mp_vision.ImageEmbedder.create_from_options(
+                mp_vision.ImageEmbedderOptions(
+                    base_options=MpBaseOptions(model_asset_path=str(model_path)),
+                    running_mode=mp_vision.RunningMode.IMAGE,
+                    l2_normalize=True,
+                    quantize=False,
+                )
+            )
+            logger.info("Face embedder initialized")
+        except Exception as exc:
+            logger.warning("Face embedder init failed: %s", exc)
+            self._face_embedder = None
+
+    def _embed_face_crop(self, frame_rgb, face_rect):
+        """Embed one detected face crop; None when the embedder is unavailable."""
+        if self._face_embedder is None or not MEDIAPIPE_AVAILABLE:
+            return None
+        try:
+            x, y, w, h = (int(v) for v in face_rect)
+            height, width = frame_rgb.shape[:2]
+            # Pad ~20% so the embedding sees the whole face, not a tight box.
+            pad_x, pad_y = int(w * 0.2), int(h * 0.2)
+            x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+            x1, y1 = min(width, x + w + pad_x), min(height, y + h + pad_y)
+            if x1 <= x0 or y1 <= y0:
+                return None
+            crop = frame_rgb[y0:y1, x0:x1]
+            resized = cv2.resize(crop, (224, 224))
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=resized)
+            result = self._face_embedder.embed(mp_image)
+            if not result.embeddings:
+                return None
+            embedding = result.embeddings[0]
+            vector = getattr(embedding, "embedding", None)
+            if vector is None:
+                vector = getattr(embedding, "float_embedding", None)
+            if vector is None:
+                return None
+            return [float(v) for v in vector]
+        except Exception as exc:
+            logger.debug("Face embedding failed: %s", exc)
+            return None
 
     def set_llm(self, llm):
         """Set LLM reference for vision analysis."""
@@ -256,7 +314,7 @@ class CameraLoop:
             self._thr.join(timeout=2)
         self._running = False
 
-        for detector in (self._gesture_recognizer, self._face_detector):
+        for detector in (self._gesture_recognizer, self._face_detector, self._face_embedder):
             if detector is not None:
                 try:
                     detector.close()
@@ -264,6 +322,7 @@ class CameraLoop:
                     pass
         self._gesture_recognizer = None
         self._face_detector = None
+        self._face_embedder = None
 
         logger.info("CameraLoop stopped")
 
@@ -421,11 +480,14 @@ class CameraLoop:
 
         if self._face_detector is not None:
             try:
-                faces = self._detect_faces(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                faces = self._detect_faces(frame_rgb)
                 face_count = len(faces)
 
                 # Convert faces to list of tuples for person tracker
                 faces_list = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+                # One embedding per face: the tracker's real identity signal.
+                face_embeddings = [self._embed_face_crop(frame_rgb, rect) for rect in faces_list]
 
                 # Update person tracker if count changed or enough time passed
                 now = time.time()
@@ -444,7 +506,8 @@ class CameraLoop:
                             self.person_tracker.process_frame(
                                 faces_list,
                                 self.process_width,
-                                self.process_height
+                                self.process_height,
+                                face_embeddings=face_embeddings
                             ),
                             self.loop
                         )
@@ -521,6 +584,114 @@ class CameraLoop:
 
         return description
 
+    def _encode_vision_frame(self, frame_small):
+        """Encode a processing-size frame for the vision model.
+
+        Downscaled to at most vision_frame_width wide, as a data URL.
+        Returns None when encoding fails.
+        """
+        vision_frame = frame_small
+        if vision_frame.shape[1] > self.vision_frame_width:
+            scale = self.vision_frame_width / vision_frame.shape[1]
+            vision_frame = cv2.resize(
+                vision_frame,
+                (self.vision_frame_width, int(vision_frame.shape[0] * scale)),
+            )
+        try:
+            return to_data_url(vision_frame)
+        except Exception as exc:
+            logger.debug("Could not encode vision frame: %s", exc)
+            return None
+
+    def _refresh_live_frame(self, frame_small) -> None:
+        """Refresh the LLM's cached frame for on-demand scene descriptions.
+
+        The analysis path only refreshes it every vision_cooldown, so
+        without this a 'what do you see?' asked right after something
+        entered the room would describe a frame up to 15s old. The
+        preview already runs every ~0.5s, so the cache rides along with
+        it. A plain attribute assignment from the camera thread; the
+        value is an immutable string.
+        """
+        llm = getattr(self, "llm", None)
+        if llm is None or not getattr(llm, "_vision_available", False):
+            return
+        image_data_url = self._encode_vision_frame(frame_small)
+        if image_data_url:
+            llm._last_frame_image_url = image_data_url
+
+    def _should_send_preview(self, now: float, last_preview_send: float, gesture: str) -> bool:
+        """Preview cadence: every preview_interval_sec, or immediately on a gesture.
+
+        Motion plays no part — in a still room the dashboard would
+        otherwise freeze on one frame for seconds at a time.
+        """
+        return bool(gesture) or (now - last_preview_send) >= self.preview_interval_sec
+
+    def _handle_detected_gesture(self, gesture: str, now: float) -> bool:
+        """Act on a detected gesture, once per press. True when dispatched.
+
+        Detection runs every frame, so releases are observed promptly:
+        an empty detection resets both trackers, and a re-formed gesture
+        counts as a fresh press even if it lands between cooldown-spaced
+        dispatches. Dispatch itself is paced by gesture_cooldown, so a
+        press landing inside the cooldown still fires once the cooldown
+        clears instead of being consumed — and a held gesture never
+        re-dispatches, so a sustained fist toggles mute once.
+        """
+        if not gesture:
+            # Hand released: a later gesture of the same kind is a new press.
+            self._last_gesture = ""
+            self._dispatched_gesture = ""
+            return False
+        self._last_gesture = gesture
+        if gesture == self._dispatched_gesture:
+            return False
+        if (now - self.last_gesture_time) < self.gesture_cooldown:
+            return False
+        self.last_gesture_time = now
+        self._dispatched_gesture = gesture
+        logger.info(f"GESTURE: {gesture}")
+        self._post_event(f"👋 Gesture: {gesture}")
+        self._dispatch_gesture(gesture)
+        return True
+
+    def _dispatch_gesture(self, gesture: str) -> None:
+        """Map a detected hand gesture to an action.
+
+        open_hand (open palm) pauses in-flight speech; closed_fist
+        toggles the mute. Other gestures are only reported, not acted
+        on. This runs in the camera thread, so the async TTS interrupt
+        is scheduled on the event loop; the mute toggle is synchronous.
+        """
+        llm = getattr(self, "llm", None)
+        tts = getattr(llm, "tts", None) if llm is not None else None
+        if tts is None:
+            return
+        if gesture == "open_hand":
+            try:
+                asyncio.run_coroutine_threadsafe(tts.interrupt(), self.loop)
+            except Exception as exc:
+                logger.debug("Gesture pause failed: %s", exc)
+                return
+            self._post_event("✋ Paused speech")
+        elif gesture == "closed_fist":
+            try:
+                muted = tts.toggle_muted()
+            except Exception as exc:
+                logger.debug("Gesture mute toggle failed: %s", exc)
+                return
+            if muted:
+                # Muting only flips the flag: speech already synthesizing
+                # or playing would keep going (the worker checks the flag
+                # before synthesis, playback does not). Cut it now so
+                # 'Muted' means silent.
+                try:
+                    asyncio.run_coroutine_threadsafe(tts.interrupt(), self.loop)
+                except Exception as exc:
+                    logger.debug("Gesture mute interrupt failed: %s", exc)
+            self._post_event("🔇 Muted" if muted else "🔊 Unmuted")
+
     def _run(self):
         """Main camera capture loop (runs in separate thread)."""
         cap = None
@@ -579,7 +750,7 @@ class CameraLoop:
             # Resize for processing
             prev_small = cv2.resize(prev, (self.process_width, self.process_height))
             
-            last_frame_send = 0.0
+            last_preview_send = 0.0
             frame_count = 0
             
             # Main capture loop
@@ -645,62 +816,60 @@ class CameraLoop:
                 
                 now = time.time()
                 
-                # Gesture detection (lightweight, runs every frame)
+                # Gesture detection runs every processed frame: release
+                # tracking must be continuous — if detection were gated
+                # by the action cooldown, a release-and-repress between
+                # detections would never be observed and the second press
+                # could not dispatch. The cooldown paces dispatch only
+                # (inside _handle_detected_gesture); only a dispatched
+                # press forces a preview / analysis, so a held gesture
+                # does not spam either.
                 gesture = ""
-                if self.gesture_enabled and (now - self.last_gesture_time) >= self.gesture_cooldown:
+                gesture_press = ""
+                if self.gesture_enabled:
                     frame_rgb = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
                     gesture = self._detect_gesture(frame_small, frame_rgb)
-                    
-                    if gesture:
-                        self.last_gesture_time = now
-                        logger.info(f"GESTURE: {gesture}")
-                        self._post_event(f"👋 Gesture: {gesture}")
-                
-                # Send frame if motion detected or debounce time elapsed
-                if motion >= self.motion_threshold or (now - last_frame_send) >= self.debounce_sec or gesture:
-                    last_frame_send = now
-                    
+                    if self._handle_detected_gesture(gesture, now):
+                        gesture_press = gesture
+
+                # Dashboard preview: steady cadence (~2 fps) regardless of
+                # motion, so the UI shows a live feed instead of a still
+                # frame in a quiet room. A gesture press forces an
+                # immediate preview. Analysis is NOT gated on the preview send.
+                if self._should_send_preview(now, last_preview_send, gesture_press):
+                    last_preview_send = now
                     try:
-                        # Send full resolution frame to UI
                         data_url = to_data_url(frame)
                         asyncio.run_coroutine_threadsafe(
-                            self.bridge.post(msg_image(data_url)), 
+                            self.bridge.post(msg_image(data_url)),
                             self.loop
                         )
-                        
-                        # Trigger vision analysis if gesture detected or cooldown passed
-                        should_analyze = (
-                            self.vision_description_enabled and 
-                            self.llm and 
-                            ((now - self.last_analysis_time) >= self.analysis_cooldown or gesture)
+                    except Exception as e:
+                        logger.error(f"Error posting preview frame: {e}")
+                    self._refresh_live_frame(frame_small)
+
+                # Vision analysis stays on its own cooldown (or a gesture press),
+                # independent of the preview cadence.
+                if (
+                    self.vision_description_enabled
+                    and self.llm
+                    and ((now - self.last_analysis_time) >= self.analysis_cooldown or gesture_press)
+                ):
+                    self.last_analysis_time = now
+                    try:
+                        description = self._describe_frame(frame_small, motion, gesture_press)
+                        logger.info(f"Vision: {description}")
+
+                        # Send the actual frame to the vision model when it can take one.
+                        image_data_url = None
+                        if getattr(self.llm, "_vision_available", False):
+                            image_data_url = self._encode_vision_frame(frame_small)
+
+                        # Schedule vision processing in LLM
+                        asyncio.run_coroutine_threadsafe(
+                            self.llm.process_vision(description, image_data_url),
+                            self.loop
                         )
-                        
-                        if should_analyze:
-                            self.last_analysis_time = now
-                            description = self._describe_frame(frame_small, motion, gesture)
-                            logger.info(f"Vision: {description}")
-
-                            # Send the actual frame to the vision model when it can take one.
-                            image_data_url = None
-                            if getattr(self.llm, "_vision_available", False):
-                                vision_frame = frame_small
-                                if vision_frame.shape[1] > self.vision_frame_width:
-                                    scale = self.vision_frame_width / vision_frame.shape[1]
-                                    vision_frame = cv2.resize(
-                                        vision_frame,
-                                        (self.vision_frame_width, int(vision_frame.shape[0] * scale)),
-                                    )
-                                try:
-                                    image_data_url = to_data_url(vision_frame)
-                                except Exception as exc:
-                                    logger.debug("Could not encode vision frame: %s", exc)
-
-                            # Schedule vision processing in LLM
-                            asyncio.run_coroutine_threadsafe(
-                                self.llm.process_vision(description, image_data_url),
-                                self.loop
-                            )
-                            
                     except Exception as e:
                         logger.error(f"Error posting frame: {e}")
                 

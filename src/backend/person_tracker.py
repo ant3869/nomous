@@ -4,12 +4,25 @@
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> Optional[float]:
+    """Cosine similarity between two embedding vectors; None on bad input."""
+    if not a or not b or len(a) != len(b):
+        return None
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return None
+    return dot / (norm_a * norm_b)
 
 
 @dataclass
@@ -27,8 +40,10 @@ class VisualSignature:
     clothing_notes: List[str] = field(default_factory=list)
     distinguishing_features: List[str] = field(default_factory=list)
     
-    # Future: actual face embeddings when available
-    face_embedding: Optional[Any] = None
+    # On-device face embedding (MediaPipe ImageEmbedder, MobileNetV3):
+    # a 1024-dim L2-normalized vector per face. This is the real identity
+    # signal — size/position below is only a fallback for faces without one.
+    face_embedding: Optional[List[float]] = None
     
     def update_face_size(self, size: float):
         """Update running average of face size."""
@@ -70,8 +85,20 @@ class VisualSignature:
                 overlap = len(my_features & other_features) / max(len(my_features), len(other_features))
                 score += overlap * 0.2
             factors += 0.2
-        
-        return score / factors if factors > 0 else 0.0
+
+        heuristic = score / factors if factors > 0 else 0.0
+        embedding = self.embedding_similarity(other)
+        if embedding is None:
+            return heuristic
+        # A real face embedding dominates the heuristic: same face, same
+        # person — size/position only nudge the result.
+        return 0.8 * embedding + 0.2 * heuristic
+
+    def embedding_similarity(self, other: "VisualSignature") -> Optional[float]:
+        """Cosine similarity between face embeddings; None when either is missing."""
+        if not self.face_embedding or not other.face_embedding:
+            return None
+        return _cosine_similarity(self.face_embedding, other.face_embedding)
 
 
 @dataclass 
@@ -120,8 +147,9 @@ class TrackedPerson:
     # Notes from the model
     model_notes: List[str] = field(default_factory=list)
     
-    def update_sighting(self, face_rect: Optional[Tuple[int, int, int, int]] = None, 
-                       position: str = "", frame_width: int = 0):
+    def update_sighting(self, face_rect: Optional[Tuple[int, int, int, int]] = None,
+                       position: str = "", frame_width: int = 0,
+                       face_embedding: Optional[List[float]] = None):
         """Update when person is seen in frame."""
         now = time.time()
         
@@ -141,7 +169,7 @@ class TrackedPerson:
             x, y, w, h = face_rect
             face_area = w * h
             self.visual_signature.update_face_size(face_area)
-            
+
             # Determine position in frame
             if frame_width > 0:
                 center_x = x + w // 2
@@ -151,6 +179,24 @@ class TrackedPerson:
                     self.visual_signature.typical_position = "right"
                 else:
                     self.visual_signature.typical_position = "center"
+
+        # Newest embedding wins: the stored vector tracks the face as
+        # lighting/angle change instead of freezing the first sighting.
+        if face_embedding:
+            stored = self.visual_signature.face_embedding
+            if stored is None:
+                self.visual_signature.face_embedding = [float(v) for v in face_embedding]
+            else:
+                sim = _cosine_similarity(face_embedding, stored)
+                if sim is not None and sim >= 0.5:
+                    # Exponential moving average: the reference tracks slow
+                    # drift (lighting, angle) but one wobbly frame cannot
+                    # re-anchor the identity — a dissimilar sighting leaves
+                    # the stored embedding untouched.
+                    blended = [0.8 * s + 0.2 * n for s, n in zip(stored, face_embedding)]
+                    norm = math.sqrt(sum(v * v for v in blended))
+                    if norm > 0:
+                        self.visual_signature.face_embedding = [v / norm for v in blended]
         
         # Update familiarity
         self.familiarity_score = min(1.0, self.familiarity_score + 0.01)
@@ -218,6 +264,31 @@ class TrackedPerson:
         
         return "\n".join(summaries)
     
+    def get_last_seen_recall(self) -> str:
+        """One-line recall of the most recent conversation with this person.
+
+        "" when there is nothing to recall — a stranger gets no fake
+        memory. The vision prompt injects this line, so when a known
+        face walks back in the model can pick up where they left off.
+        """
+        if not self.conversations:
+            return ""
+        last = self.conversations[-1]
+        time_ago = time.time() - last.timestamp
+        if time_ago < 60:
+            when = "just now"
+        elif time_ago < 3600:
+            when = f"{int(time_ago / 60)} min ago"
+        else:
+            when = f"{int(time_ago / 3600)} hours ago"
+        name = self.get_display_name()
+        if last.topics:
+            return f"Last time you saw {name} ({when}): talked about {', '.join(last.topics)}."
+        user_msg = (last.user_message or "").strip()
+        if user_msg:
+            return f"Last time you saw {name} ({when}): they said \"{user_msg[:80]}\"."
+        return f"Last time you saw {name} ({when})."
+
     def should_ask_name(self) -> bool:
         """Determine if we should ask this person their name."""
         if self.name:
@@ -248,6 +319,12 @@ class TrackedPerson:
             "behaviors": self.behaviors_observed,
             "model_notes": self.model_notes,
             "asked_for_name": self.asked_for_name,
+            # Rounded to 4 decimals to keep the stored row small; the
+            # vector is L2-normalized, so this loses no matching power.
+            "face_embedding": (
+                [round(float(v), 4) for v in self.visual_signature.face_embedding]
+                if self.visual_signature.face_embedding else None
+            ),
         }
     
     @classmethod
@@ -272,7 +349,10 @@ class TrackedPerson:
         # Restore visual signature
         person.visual_signature.hair_description = data.get("physical_description", "")
         person.visual_signature.distinguishing_features = data.get("distinguishing_features", [])
-        
+        embedding = data.get("face_embedding")
+        if embedding:
+            person.visual_signature.face_embedding = [float(v) for v in embedding]
+
         return person
 
 
@@ -287,23 +367,33 @@ class PersonTracker:
     - Enable the model to build relationships over time
     """
     
-    def __init__(self, memory_store=None):
+    def __init__(self, memory_store=None, embedding_match_threshold: float = 0.7):
         self.memory = memory_store
         self.active_persons: Dict[str, TrackedPerson] = {}
         self.person_counter = 0
         self._lock = asyncio.Lock()
-        
+
         # Current frame tracking
         self._current_faces: List[Tuple[int, int, int, int]] = []  # (x, y, w, h)
         self._frame_width = 0
         self._frame_height = 0
-        
+
         # Conversation binding
         self._current_speaker: Optional[str] = None  # person_id of who we think is talking
-        
+
         # Thresholds
         self.absence_threshold = 15.0  # Seconds before presence decays
         self.match_threshold = 0.5  # Minimum similarity to match existing person
+        # Minimum cosine similarity between face embeddings to call two
+        # faces the same person. MobileNetV3 embeddings are generic image
+        # vectors (not face-specific), so this starts at 0.7 — tune it on
+        # real faces if it over- or under-matches. Below it, the match
+        # falls back to the size/position heuristic.
+        self.embedding_match_threshold = float(embedding_match_threshold)
+        # Below this cosine, the embedding actively vetoes a heuristic
+        # match: the faces are clearly different people even if they sit
+        # in the same spot at the same size.
+        self.embedding_veto_threshold = 0.4
         
         # State for announcements
         self._last_status = ""
@@ -342,26 +432,29 @@ class PersonTracker:
         except Exception as e:
             logger.error(f"Failed to load persons from memory: {e}")
     
-    async def process_frame(self, faces: List[Tuple[int, int, int, int]], 
-                           frame_width: int, frame_height: int) -> Dict[str, Any]:
+    async def process_frame(self, faces: List[Tuple[int, int, int, int]],
+                           frame_width: int, frame_height: int,
+                           face_embeddings: Optional[List[Optional[List[float]]]] = None) -> Dict[str, Any]:
         """
         Process detected faces from a video frame.
-        
+
         Args:
             faces: List of (x, y, w, h) face bounding boxes
             frame_width: Width of the frame
             frame_height: Height of the frame
-            
+            face_embeddings: Optional parallel list of face embedding vectors
+                (one per face, None when a face has no embedding)
+
         Returns:
             Dict with tracking results and any announcements
         """
         now = time.time()
-        
+
         async with self._lock:
             self._current_faces = faces
             self._frame_width = frame_width
             self._frame_height = frame_height
-            
+
             result = {
                 "person_count": len(faces),
                 "new_arrivals": [],
@@ -371,26 +464,29 @@ class PersonTracker:
                 "should_announce": False,
                 "suggested_action": None,  # e.g., "ask_name"
             }
-            
+
             # Match faces to existing tracked persons
             matched_persons: List[str] = []
-            unmatched_faces: List[Tuple[int, int, int, int]] = []
-            
-            for face in faces:
-                best_match = self._match_face_to_person(face, frame_width)
+            unmatched_faces: List[Tuple[Tuple[int, int, int, int], Optional[List[float]]]] = []
+
+            for index, face in enumerate(faces):
+                embedding = None
+                if face_embeddings and index < len(face_embeddings):
+                    embedding = face_embeddings[index]
+                best_match = self._match_face_to_person(face, frame_width, embedding)
                 if best_match:
-                    best_match.update_sighting(face, frame_width=frame_width)
+                    best_match.update_sighting(face, frame_width=frame_width, face_embedding=embedding)
                     matched_persons.append(best_match.person_id)
                 else:
-                    unmatched_faces.append(face)
-            
+                    unmatched_faces.append((face, embedding))
+
             # Create new persons for unmatched faces
-            for face in unmatched_faces:
+            for face, embedding in unmatched_faces:
                 self.person_counter += 1
                 person_id = f"person_{self.person_counter}"
-                
+
                 new_person = TrackedPerson(person_id=person_id)
-                new_person.update_sighting(face, frame_width=frame_width)
+                new_person.update_sighting(face, frame_width=frame_width, face_embedding=embedding)
                 
                 self.active_persons[person_id] = new_person
                 matched_persons.append(person_id)
@@ -433,12 +529,13 @@ class PersonTracker:
             
             return result
     
-    def _match_face_to_person(self, face: Tuple[int, int, int, int], 
-                              frame_width: int) -> Optional[TrackedPerson]:
+    def _match_face_to_person(self, face: Tuple[int, int, int, int],
+                              frame_width: int,
+                              embedding: Optional[List[float]] = None) -> Optional[TrackedPerson]:
         """Try to match a face detection to an existing tracked person."""
         x, y, w, h = face
         face_area = w * h
-        
+
         # Determine position
         center_x = x + w // 2
         if center_x < frame_width * 0.33:
@@ -447,7 +544,42 @@ class PersonTracker:
             position = "right"
         else:
             position = "center"
-        
+
+        # Embedding-first: a face embedding is a far stronger identity
+        # signal than size/position. When the incoming face has one, the
+        # best cosine match above the threshold wins outright. A candidate
+        # whose embedding is clearly different (below the veto bar) is
+        # vetoed individually — with several people tracked, one
+        # ambiguous similarity must not shield a clearly-different face
+        # from the veto, and the heuristic must not hand it to a vetoed
+        # identity. In the ambiguous middle band the heuristic still
+        # decides, so a wobbly embedding (bad light, sharp angle) does
+        # not split one person in two.
+        # The embedding loop considers absent identities too: a known
+        # person who left and came back must re-identify by face, not
+        # spawn a new anonymous person (and lose their name, history,
+        # and recall). The presence restriction stays on the geometric
+        # fallback below — position/size of someone who left says
+        # nothing about who is here now.
+        vetoed = set()
+        if embedding:
+            best_person = None
+            best_sim = 0.0
+            for person in self.active_persons.values():
+                stored = person.visual_signature.face_embedding
+                if not stored:
+                    continue
+                sim = _cosine_similarity(embedding, stored)
+                if sim is None:
+                    continue
+                if sim < self.embedding_veto_threshold:
+                    vetoed.add(person.person_id)
+                elif sim > best_sim:
+                    best_sim = sim
+                    best_person = person
+            if best_person is not None and best_sim >= self.embedding_match_threshold:
+                return best_person
+
         # Create temporary signature for comparison
         temp_sig = VisualSignature(
             typical_position=position,
@@ -461,7 +593,9 @@ class PersonTracker:
         for person in self.active_persons.values():
             if not person.is_present and person.presence_confidence < 0.5:
                 continue
-            
+            if person.person_id in vetoed:
+                continue
+
             score = person.visual_signature.similarity_score(temp_sig)
             
             # Boost score if position matches and was recently seen
@@ -710,6 +844,7 @@ class PersonTracker:
                         "display_name": person.get_display_name(),
                         "familiarity": round(person.familiarity_score, 2),
                         "should_ask_name": person.should_ask_name(),
+                        "last_seen_recall": person.get_last_seen_recall(),
                     })
             return present
     
