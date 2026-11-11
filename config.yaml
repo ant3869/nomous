@@ -14,6 +14,22 @@ autonomous:
   speak_enabled: true
   # Minimum seconds between spoken idle lines, so the model can't get chatty.
   min_speak_interval_seconds: 300
+dreaming:
+  # Nightly memory consolidation (light -> REM -> deep). Silent by
+  # definition: never speaks, runs on the autonomous lane.
+  enabled: true
+  # Local time of the nightly run (HH:MM, 24h).
+  time: "03:00"
+  # How far back the pass looks for short-term material. Must span more
+  # than min_unique_days or nothing can ever pass the multi-day gate.
+  lookback_hours: 72
+  # Deep-phase gates: ALL must pass for promotion.
+  min_score: 0.55
+  min_occurrences: 2
+  min_unique_days: 2
+  # Rejected memories decay by this factor (never deleted).
+  decay_factor: 0.9
+  diary_path: ./data/dreams/DREAMS.md
 camera:
   backend: dshow
   height: 720

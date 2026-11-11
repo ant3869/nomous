@@ -83,6 +83,16 @@ autonomous:
   speak_enabled: true
   min_speak_interval_seconds: 300
 
+dreaming:
+  enabled: true
+  time: "03:00"
+  lookback_hours: 72
+  min_score: 0.55
+  min_occurrences: 2
+  min_unique_days: 2
+  decay_factor: 0.9
+  diary_path: ./data/dreams/DREAMS.md
+
 ui:
   preview_interval_sec: 0.5
   motion_sensitivity: 30

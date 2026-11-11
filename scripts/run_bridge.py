@@ -22,6 +22,7 @@ from src.backend.utils import Bridge, msg_status, msg_event
 from src.backend.protocol import msg_entities, msg_timeline, msg_search_results
 from src.backend.video import CameraLoop
 from src.backend.audio import AudioSTT
+from src.backend.dreaming import Dreamer, seconds_until_next_run
 from src.backend.llm import LocalLLM
 from src.backend.memory import MemoryStore
 from src.backend.tts import PiperTTS
@@ -54,6 +55,8 @@ class Server:
         self.tts: Optional[PiperTTS] = None
         self.cam: Optional[CameraLoop] = None
         self._autonomous_task: Optional[asyncio.Task] = None
+        self._dreaming_task: Optional[asyncio.Task] = None
+        self.dreamer = None
         self.memory: Optional[MemoryStore] = None
         self.system_monitor: Optional[SystemMonitor] = None
         self.analytics: Optional[ConversationAnalytics] = None
@@ -102,6 +105,9 @@ class Server:
             handled = True
         elif what == "autonomous" and self.llm:
             self.llm.autonomous_mode = value
+            handled = True
+        elif what == "dreaming" and self.dreamer:
+            self.dreamer.enabled = value
             handled = True
 
         if handled:
@@ -271,6 +277,11 @@ class Server:
             # Start autonomous thinking loop
             self._autonomous_task = asyncio.create_task(self._autonomous_loop())
             logger.info("Autonomous thinking loop started")
+
+            # Start nightly dreaming (memory consolidation) whenever a
+            # memory store exists — _start_dreaming gates execution on
+            # the enabled flag instead of skipping setup.
+            self._start_dreaming()
             
         except Exception as e:
             logger.error(f"Error starting workers: {e}", exc_info=True)
@@ -299,6 +310,47 @@ class Server:
                 logger.error(f"Error in autonomous loop: {e}")
                 await asyncio.sleep(10)
 
+    def _start_dreaming(self) -> None:
+        """Create the dreamer + scheduler whenever a memory store exists.
+
+        The enabled flag gates execution (the loop and run_once both
+        check it), so a later WebSocket toggle can enable dreaming
+        after a disabled startup — the dreamer must exist for the
+        toggle to work."""
+        if self.memory is None:
+            logger.info("Dreaming disabled: no memory store")
+            return
+        self.dreamer = Dreamer(self.llm, self.memory, self.bridge, CFG)
+        self._dreaming_task = asyncio.create_task(self._dreaming_loop())
+        logger.info(
+            "Dreaming nightly pass scheduled for %s (enabled=%s)",
+            self.dreamer.time,
+            self.dreamer.enabled,
+        )
+
+    async def _dreaming_loop(self):
+        """Nightly memory-consolidation pass (dreaming).
+
+        Sleeps until the next configured dreaming.time (default 03:00),
+        runs one light -> REM -> deep pass, then sleeps until the next
+        day. Silent by definition: the pass never speaks.
+        """
+        if self.dreamer is None:
+            return
+        logger.info("Dreaming loop running (next run at %s)", self.dreamer.time)
+        while True:
+            try:
+                delay = seconds_until_next_run(self.dreamer.time)
+                await asyncio.sleep(delay)
+                if self.dreamer.enabled:
+                    await self.dreamer.run_once()
+            except asyncio.CancelledError:
+                logger.info("Dreaming loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in dreaming loop: {e}")
+                await asyncio.sleep(10)
+
     async def stop_workers(self):
         """Stop all worker components gracefully."""
         logger.info("Stopping workers...")
@@ -308,6 +360,14 @@ class Server:
             self._autonomous_task.cancel()
             try:
                 await self._autonomous_task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop dreaming loop
+        if self._dreaming_task:
+            self._dreaming_task.cancel()
+            try:
+                await self._dreaming_task
             except asyncio.CancelledError:
                 pass
 
@@ -470,6 +530,14 @@ class Server:
                         value = bool(msg.get("value"))
                         logger.info(f"Toggle {what} = {value}")
                         await self.handle_toggle(what, value)
+
+                    elif msg_type == "dream_now":
+                        # Manual dreaming trigger (verify without waiting for 3 AM).
+                        if self.dreamer:
+                            logger.info("Manual dreaming run requested")
+                            asyncio.create_task(self.dreamer.run_once())
+                        else:
+                            logger.warning("dream_now ignored: no dreamer")
 
                     elif msg_type == "param":
                         key = msg.get("key")

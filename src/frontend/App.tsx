@@ -9,7 +9,7 @@ import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Input } from "./components/ui/input";
-import { Activity, AlertTriangle, AudioWaveform, Brain, Camera, Cog, Cpu, MessageSquare, Play, Radio, RefreshCw, Square, Mic, MicOff, Speaker, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench, Network, CirclePlus, Trash2 } from "lucide-react";
+import { Activity, AlertTriangle, AudioWaveform, Brain, Camera, Cog, Cpu, MessageSquare, Moon, Play, Radio, RefreshCw, Square, Mic, MicOff, Speaker, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench, Network, CirclePlus, Trash2 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode, MemoryNodeKind, Entity, EntityType, TimelineEvent, SemanticSearchResult } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
@@ -146,7 +146,7 @@ interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
-  speechLines: string[]; systemLines: string[]; sttLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
+  speechLines: string[]; systemLines: string[]; dreamLines: string[]; sttLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
   settings: ControlSettings; loadingOverlay: LoadingOverlay | null; modelCatalog: ModelCatalogEntry[]; modelCatalogError: string | null;
   promptReloadRequired: boolean; generationProgress: { active: boolean; text: string; tokens: number } | null;
 }
@@ -572,6 +572,7 @@ function createInitialState(): DashboardState {
     thoughtLines: [],
     speechLines: [],
     systemLines: [],
+    dreamLines: [],
     sttLines: [],
     chatMessages: [],
     toolActivity: [],
@@ -995,6 +996,20 @@ function useNomousBridge() {
 
             return { ...p, thoughtLines: nextLines, generationProgress };
           });
+          break;
+        }
+        case "dream_diary": {
+          // Nightly consolidation decisions (DREAMS.md is the audit trail
+          // on disk; this is the live view). One line per decision.
+          const rawLine = typeof msg.text === "string" ? msg.text : "";
+          if (!rawLine) {
+            break;
+          }
+          const stamp = `[${new Date().toLocaleTimeString()}]`;
+          setState(p => ({
+            ...p,
+            dreamLines: [`${stamp} ${rawLine}`, ...p.dreamLines.slice(0, MAX_CHAT_HISTORY - 1)]
+          }));
           break;
         }
         case "stt": {
@@ -2238,15 +2253,16 @@ function ManualMemoryControls({ onCreate, onDelete }: ManualMemoryControlsProps)
   );
 }
 
-type StreamView = "thoughts" | "speech" | "signals";
+type StreamView = "thoughts" | "speech" | "signals" | "dreams";
 
 interface ConversationStreamPanelProps {
   thoughtLines: string[];
   speechLines: string[];
   systemLines: string[];
+  dreamLines: string[];
 }
 
-function ConversationStreamPanel({ thoughtLines, speechLines, systemLines }: ConversationStreamPanelProps) {
+function ConversationStreamPanel({ thoughtLines, speechLines, systemLines, dreamLines }: ConversationStreamPanelProps) {
   const [activeView, setActiveView] = useState<StreamView>("thoughts");
 
   const streams = [
@@ -2281,6 +2297,17 @@ function ConversationStreamPanel({ thoughtLines, speechLines, systemLines }: Con
       empty: "No system activity captured yet.",
       accent: "text-sky-300",
       shortLabel: "Signals",
+      height: "h-60",
+    },
+    {
+      id: "dreams" as const,
+      title: "Dream Diary",
+      description: "Nightly consolidation decisions — what was promoted, what was rejected and why.",
+      icon: Moon,
+      lines: dreamLines,
+      empty: "No dreams yet — the nightly pass runs at 3 AM.",
+      accent: "text-indigo-300",
+      shortLabel: "Dreams",
       height: "h-60",
     },
   ];
@@ -4402,6 +4429,7 @@ export default function App(){
                       thoughtLines={state.thoughtLines}
                       speechLines={state.speechLines}
                       systemLines={state.systemLines}
+                      dreamLines={state.dreamLines}
                     />
                     <ConversationQuickSettings
                       settings={state.settings}

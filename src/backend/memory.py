@@ -770,6 +770,87 @@ class MemoryStore:
                     msg_event(f"behavior {status}: {label}")
                 )
 
+    async def recent_nodes(
+        self,
+        since_iso: str,
+        kinds: Sequence[str] = ("stimulus", "concept"),
+        limit: int = 20000,
+    ) -> List[Dict[str, Any]]:
+        """Nodes created at/after `since_iso` (naive UTC ISO strings compare
+        lexicographically), paginated in 500-row batches so a long window is
+        never silently truncated at the first batch. Each row also carries
+        `response_description`: the linked interaction response, so callers
+        can resolve placeholder stimuli (e.g. autonomous thoughts, whose
+        content lives in the response node). Used by the dreaming pass."""
+        if not self.enabled or self._conn is None:
+            return []
+        kinds = tuple(kinds) or ("stimulus", "concept")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._recent_nodes_sync, since_iso, kinds, max(1, int(limit or 20000))
+            )
+
+    def _recent_nodes_sync(
+        self, since_iso: str, kinds: Sequence[str], limit: int
+    ) -> List[Dict[str, Any]]:
+        assert self._conn is not None
+        placeholders = ",".join("?" for _ in kinds)
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        batch = 500
+        while len(rows) < limit:
+            take = min(batch, limit - len(rows))
+            with closing(self._conn.cursor()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT s.id, s.label, s.kind, s.strength, s.description,
+                           s.tags, s.source, s.timestamp, s.importance,
+                           s.last_accessed, r.description AS response_description
+                    FROM memory_nodes s
+                    LEFT JOIN memory_edges e
+                           ON e.from_id = s.id AND e.relationship = 'interaction'
+                    LEFT JOIN memory_nodes r
+                           ON r.id = e.to_id AND r.kind = 'concept'
+                    WHERE s.kind IN ({placeholders}) AND s.timestamp >= ?
+                    ORDER BY s.timestamp ASC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (*kinds, since_iso, take, offset),
+                )
+                fetched = [dict(row) for row in cur.fetchall()]
+            rows.extend(fetched)
+            offset += len(fetched)
+            if len(fetched) < take:
+                break
+        if len(rows) >= limit:
+            logger.warning(
+                "recent_nodes hit the %d-node cap; window material may be truncated",
+                limit,
+            )
+        return rows
+
+    async def consolidated_source_ids(self, source_ids: Sequence[str]) -> set:
+        """Subset of `source_ids` already covered by a `consolidates` edge
+        (i.e. already promoted into long-term memory by a past dream run)."""
+        ids = [str(i) for i in source_ids if i]
+        if not self.enabled or self._conn is None or not ids:
+            return set()
+        async with self._lock:
+            return await asyncio.to_thread(self._consolidated_source_ids_sync, ids)
+
+    def _consolidated_source_ids_sync(self, source_ids: Sequence[str]) -> set:
+        assert self._conn is not None
+        placeholders = ",".join("?" for _ in source_ids)
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                f"""
+                SELECT DISTINCT to_id FROM memory_edges
+                WHERE relationship = 'consolidates' AND to_id IN ({placeholders})
+                """,
+                tuple(source_ids),
+            )
+            return {str(row[0]) for row in cur.fetchall()}
+
     async def create_node(self, payload: Dict[str, Any]) -> Optional[str]:
         if not self.enabled or self._conn is None:
             return None
@@ -786,6 +867,31 @@ class MemoryStore:
             updated = await asyncio.to_thread(self._update_node_sync, node_id, changes)
         if updated:
             await self.publish_graph()
+        return updated
+
+    async def update_node_strengths(self, strengths: Dict[str, float]) -> int:
+        """Bulk strength update in one transaction, one graph publish.
+
+        Used by dreaming decay: per-node update_node() would reload and
+        broadcast the whole graph once per node (hundreds of full-graph
+        messages per nightly pass)."""
+        if not self.enabled or self._conn is None or not strengths:
+            return 0
+        async with self._lock:
+            updated = await asyncio.to_thread(self._update_node_strengths_sync, strengths)
+        if updated:
+            await self.publish_graph()
+        return updated
+
+    def _update_node_strengths_sync(self, strengths: Dict[str, float]) -> int:
+        updated = 0
+        for node_id, strength in strengths.items():
+            try:
+                value = max(0.1, min(5.0, float(strength)))
+            except (TypeError, ValueError):
+                continue
+            if self._update_node_sync(node_id, {"strength": value}):
+                updated += 1
         return updated
 
     async def delete_node(self, node_id: str) -> bool:
@@ -814,6 +920,36 @@ class MemoryStore:
             )
         if created:
             await self.publish_graph()
+        return created
+
+    async def create_edges(self, edges: Sequence[Dict[str, Any]]) -> int:
+        """Bulk edge creation in one transaction, one graph publish.
+
+        Used by dreaming promotion: per-source create_edge() would reload
+        and broadcast the whole graph once per edge."""
+        if not self.enabled or self._conn is None or not edges:
+            return 0
+        async with self._lock:
+            created = await asyncio.to_thread(self._create_edges_sync, list(edges))
+        if created:
+            await self.publish_graph()
+        return created
+
+    def _create_edges_sync(self, edges: Sequence[Dict[str, Any]]) -> int:
+        created = 0
+        for edge in edges:
+            from_id = edge.get("from_id")
+            to_id = edge.get("to_id")
+            if not from_id or not to_id:
+                continue
+            try:
+                weight = float(edge.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            if self._create_edge_sync(
+                from_id, to_id, weight, edge.get("relationship"), edge.get("context")
+            ):
+                created += 1
         return created
 
     async def delete_edge(self, edge_id: str) -> bool:

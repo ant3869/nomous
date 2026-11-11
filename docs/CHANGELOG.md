@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+### 🌙 Dreaming: nightly memory consolidation (light → REM → deep)
+
+- A nightly pass (`src/backend/dreaming.py`, `Dreamer`) consolidates the
+  day's short-term notes into long-term memory, adapted from OpenClaw's
+  dreaming. It runs at `dreaming.time` (default 03:00) on the autonomous
+  lane, silent by definition — thoughts/events only, never speaks.
+  - **Light**: ingests recent interaction nodes (kind `stimulus`: chat,
+    vision, autonomous ticks, and observations the idle loop jotted down
+    via `record_observation`) inside `lookback_hours` (default 72) and
+    dedupes near-duplicates into candidate clusters. Never writes
+    long-term.
+  - **REM**: one text generation over the candidates extracts recurring
+    themes/patterns. Best-effort — if the model is unavailable the pass
+    still runs and scoring falls back to node importance.
+  - **Deep**: scores each candidate with six weighted signals —
+    relevance 0.30, frequency 0.24, query (modality) diversity 0.15,
+    recency 0.15, consolidation across days 0.10, conceptual richness
+    0.06 — and promotes only when ALL gates pass (`min_score` 0.55,
+    `min_occurrences` 2, `min_unique_days` 2). Promotion writes one
+    consolidated concept node (milestone=1, category
+    `dream_consolidated`) linked to its source nodes. Rejected
+    candidates decay (strength × 0.9, floor 0.1); nothing is ever deleted.
+  - **Dream Diary**: every decision (promoted / rejected + why) is
+    appended to `data/dreams/DREAMS.md` and posted to the dashboard as
+    `dream_diary` lines in a new Dreams stream on the conversation
+    panel. Manual trigger: `dream_now` WebSocket message; toggle:
+    `dreaming` via the existing toggle path.
+  - Review fixes (Codex, PR #88): Light resolves placeholder stimuli —
+    autonomous thoughts store their content in the linked response node
+    (`internal_reflection` / `scene_digest`), so candidates use the real
+    text, never the placeholder, and boilerplate observation replies are
+    excluded. `recent_nodes` paginates in 500-row batches (the old LIMIT
+    500 silently dropped the newest material in a busy window). A second
+    run skips already-consolidated sources instead of minting a duplicate
+    milestone node. Promotion metadata is passed as a dict — a JSON
+    string was stored as NULL. Second round: Deep batches graph writes
+    (one bulk edges + one bulk strengths call per pass, one graph
+    publish each — a 500-rejection run was 500 full-graph broadcasts);
+    a dream run skips when the chat lane is busy, as the autonomous
+    loop does, so REM never holds the shared model lock behind a live
+    reply. Third round: normalization is Unicode-aware (CJK text no
+    longer collapses to an empty grouping key); vision candidates use
+    the linked VLM observation (the response) instead of the coarse
+    frame description stored as the stimulus. Fourth round: the dreamer
+    + scheduler are created whenever a memory store exists, with the
+    enabled flag gating execution — a toggle can now enable dreaming
+    after a disabled startup (previously the toggle was logged as
+    unknown and did nothing). Fifth round: clustering runs in a worker
+    thread with precomputed token sets + a word → cluster index
+    (identical merge decisions, 1,000 distinct observations 10.5s →
+    0.26s, loop never blocked).
+- `MemoryStore.recent_nodes()` (`src/backend/memory.py`) returns nodes
+  in a time window for the pass. `scripts/run_bridge.py` gains the
+  `_dreaming_loop` scheduler (sleeps until the next configured time),
+  `dream_now` handling, and a `dreaming` toggle; `stop_workers` cancels
+  the dreaming task too.
+
 ### 🤖 Autonomous idle loop (think, speak — and act)
 
 - The loop Ant remembered already existed, but it never saw anything
