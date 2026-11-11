@@ -15,9 +15,13 @@ nvidia-ml-py==13.615.71
 # (pip install torch --index-url https://download.pytorch.org/whl/cu128)
 
 # audio / vad / asr
+# sounddevice needs a system PortAudio on Linux (apt install libportaudio2);
+# the Windows wheel bundles it. webrtcvad 2.0.10 imports pkg_resources at
+# import time, which setuptools >= 81 removed — pin below it.
 sounddevice==0.5.6
 soundfile==0.14.0
 webrtcvad==2.0.10
+setuptools<81  # webrtcvad needs pkg_resources; removed in setuptools 81+
 vosk==0.3.45
 
 # llm: base CPU build (text-only fallback). scripts/start.py upgrades it to

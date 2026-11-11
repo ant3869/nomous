@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### 🎧 Hearing: ambient audio as a second sense
+
+- The host mic is now a sense on its own, alongside vision — not chat
+  STT (that stays: browser mic -> WebSocket -> Vosk, user-initiated).
+  `AmbientHearing` (`src/backend/hearing.py`) captures continuously
+  with sounddevice, segments with webrtcvad (`HearingSegmenter`, pure
+  logic, injectable VAD), transcribes finished segments with its own
+  Vosk recognizer (reusing AudioSTT's loaded Model when available),
+  and feeds the idle loop through the `_last_audio_evidence` seam.
+  Loud non-speech bursts (door slam, dropped object) are noise events.
+- Same think/speak/act rules as vision: a heard thing fills the shared
+  audio-evidence slot (60 s TTL) and prompts an immediate idle tick
+  (`autonomous_thought(force=True)`, rate-limited to one per 10 s) so
+  hearing can trigger a look; the tick's prompt already tells the model
+  to use the frame to see what made the noise. Vision -> listen works
+  the other way too: a new sighting boosts VAD sensitivity by one step
+  for `listen_boost_seconds` (default 30 s) so the matching sound is
+  more likely to be caught.
+- Privacy: opt-in (`hearing.enabled` defaults to false), dashboard
+  toggle (Devices tab, Conversation Controls, and the Speech Input
+  Monitor) plus a mic-live indicator with a pulsing dot while capture
+  is running. Raw audio is never written to disk; transcripts are
+  transient, and audio-derived idle-tick lines are only persisted to
+  memory when `hearing.retain_transcripts` is true.
+- Dependency note: webrtcvad 2.0.10 imports `pkg_resources` at import
+  time, which setuptools >= 81 removed — `setuptools<81` is now pinned
+  in requirements.txt (verified: the import fails without it, works
+  with it). sounddevice needs a system PortAudio on Linux
+  (`apt install libportaudio2`); the Windows wheel bundles it. A missing
+  mic stack fails soft — hearing stays off, startup continues.
+
 ### 🌙 Dreaming: nightly memory consolidation (light → REM → deep)
 
 - A nightly pass (`src/backend/dreaming.py`, `Dreamer`) consolidates the

@@ -81,6 +81,32 @@ DEFAULT: Dict[str, Any] = {
         "chunk_ms": 250,
         "device": "default",
     },
+    "hearing": {
+        # Ambient hearing — the host mic as a sense on its own, alongside
+        # vision (NOT chat STT; that's audio.* + the dashboard mic toggle).
+        # Opt-in: off until the user enables it (dashboard toggle or here).
+        "enabled": False,
+        "device": "default",
+        "sample_rate": 16000,
+        # webrtcvad aggressiveness 0-3 (higher = stricter, fewer false hits).
+        # Vision boosts sensitivity by one step for a while after it sees
+        # something new (listen_boost_seconds).
+        "vad_aggressiveness": 2,
+        # Silence that ends a speech segment; segments cap at max_segment_s.
+        "segment_silence_ms": 500,
+        "max_segment_s": 10,
+        # Ignore transcripts shorter than this (VAD false hits, single words).
+        "min_transcript_chars": 3,
+        # RMS (0-1) of a loud non-speech burst (door slam, dropped object).
+        "noise_rms_threshold": 0.35,
+        # Persist audio-derived idle-tick lines to memory. Raw audio is
+        # never written to disk either way; transcripts are transient.
+        "retain_transcripts": True,
+        # Seconds a heard thing stays fresh for the idle tick.
+        "evidence_ttl_s": 60,
+        # How long vision boosts hearing sensitivity after a new sighting.
+        "listen_boost_seconds": 30,
+    },
     "camera": {"backend": "dshow", "index": 0, "width": 1280, "height": 720},
     "ws": {"host": "127.0.0.1", "port": 8765},
     "memory": {"enable": True, "db_path": "modules/memory/rag.sqlite"},

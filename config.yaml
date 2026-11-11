@@ -3,6 +3,31 @@ audio:
   device: default
   sample_rate: 16000
   vad_aggressiveness: 2
+hearing:
+  # Ambient hearing — the host mic as a sense on its own, alongside vision
+  # (NOT chat STT; that's audio.* + the dashboard mic toggle). Opt-in:
+  # off until enabled here or from the dashboard toggle.
+  enabled: false
+  device: default
+  sample_rate: 16000
+  # webrtcvad aggressiveness 0-3 (higher = stricter). Vision boosts
+  # sensitivity by one step for listen_boost_seconds after it sees
+  # something new, so the matching sound is more likely to be caught.
+  vad_aggressiveness: 2
+  # Silence that ends a speech segment; segments cap at max_segment_s.
+  segment_silence_ms: 500
+  max_segment_s: 10
+  # Ignore transcripts shorter than this (VAD false hits, single words).
+  min_transcript_chars: 3
+  # RMS (0-1) of a loud non-speech burst (door slam, dropped object).
+  noise_rms_threshold: 0.35
+  # Persist audio-derived idle-tick lines to memory. Raw audio is never
+  # written to disk either way; transcripts are transient.
+  retain_transcripts: true
+  # Seconds a heard thing stays fresh for the idle tick.
+  evidence_ttl_s: 60
+  # How long vision boosts hearing sensitivity after a new sighting.
+  listen_boost_seconds: 30
 autonomous:
   enabled: true
   thought_cooldown: 30

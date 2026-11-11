@@ -9,7 +9,7 @@ import { Switch } from "./components/ui/switch";
 import { Progress } from "./components/ui/progress";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Input } from "./components/ui/input";
-import { Activity, AlertTriangle, AudioWaveform, Brain, Camera, Cog, Cpu, MessageSquare, Moon, Play, Radio, RefreshCw, Square, Mic, MicOff, Speaker, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench, Network, CirclePlus, Trash2 } from "lucide-react";
+import { Activity, AlertTriangle, AudioWaveform, Brain, Camera, Cog, Cpu, Ear, MessageSquare, Moon, Play, Radio, RefreshCw, Square, Mic, MicOff, Speaker, Wifi, WifiOff, Volume2, Flag, Database, Clock, Sparkles, Gauge, Send, Wrench, Network, CirclePlus, Trash2 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip as RTooltip } from "recharts";
 import type { MemoryEdge, MemoryNode, MemoryNodeKind, Entity, EntityType, TimelineEvent, SemanticSearchResult } from "./types/memory";
 import type { SystemMetricsPayload } from "./types/system";
@@ -115,6 +115,7 @@ interface ControlSettings {
   ttsEnabled: boolean;
   speakerEnabled: boolean;
   sttEnabled: boolean;
+  hearingEnabled: boolean;
   ttsVoice: string;
   micSensitivity: number;
   masterVolume: number;
@@ -146,7 +147,7 @@ interface DashboardState {
   status: NomousStatus; statusDetail?: string; tokenWindow: TokenPoint[]; behavior: BehaviorStats;
   memory: { nodes: MemoryNode[]; edges: MemoryEdge[] }; lastEvent?: string; audioEnabled: boolean; visionEnabled: boolean;
   connected: boolean; url: string; micOn: boolean; vu: number; preview?: string; consoleLines: string[]; thoughtLines: string[];
-  speechLines: string[]; systemLines: string[]; dreamLines: string[]; sttLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
+  speechLines: string[]; systemLines: string[]; dreamLines: string[]; sttLines: string[]; hearingState: "off" | "listening" | "error"; hearingLines: string[]; chatMessages: ChatMessage[]; toolActivity: ToolResult[]; systemMetrics: SystemMetricsPayload | null;
   settings: ControlSettings; loadingOverlay: LoadingOverlay | null; modelCatalog: ModelCatalogEntry[]; modelCatalogError: string | null;
   promptReloadRequired: boolean; generationProgress: { active: boolean; text: string; tokens: number } | null;
 }
@@ -345,6 +346,7 @@ const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   ttsEnabled: true,
   speakerEnabled: true,
   sttEnabled: true,
+  hearingEnabled: false,
   ttsVoice: "en_US-libritts-high.onnx",
   micSensitivity: 60,
   masterVolume: 70,
@@ -459,6 +461,7 @@ function mergeSettings(base: ControlSettings, patch: Partial<ControlSettings>): 
   if ("ttsEnabled" in patch) next.ttsEnabled = coerceBoolean(patch.ttsEnabled, next.ttsEnabled);
   if ("speakerEnabled" in patch) next.speakerEnabled = coerceBoolean(patch.speakerEnabled, next.speakerEnabled);
   if ("sttEnabled" in patch) next.sttEnabled = coerceBoolean(patch.sttEnabled, next.sttEnabled);
+  if ("hearingEnabled" in patch) next.hearingEnabled = coerceBoolean(patch.hearingEnabled, next.hearingEnabled);
   if ("ttsVoice" in patch && patch.ttsVoice !== undefined) {
     const voice = coerceString(patch.ttsVoice, next.ttsVoice, false);
     next.ttsVoice = normaliseVoiceFilename(voice);
@@ -574,6 +577,8 @@ function createInitialState(): DashboardState {
     systemLines: [],
     dreamLines: [],
     sttLines: [],
+    hearingState: "off",
+    hearingLines: [],
     chatMessages: [],
     toolActivity: [],
     systemMetrics: null,
@@ -1168,6 +1173,22 @@ function useNomousBridge() {
             lastEvent: payload,
             promptReloadRequired: clearsPromptWarning ? false : p.promptReloadRequired,
             systemLines: payload ? [`${stamp} EVENT → ${payload}`, ...p.systemLines.slice(0, MAX_CHAT_HISTORY)] : p.systemLines,
+          }));
+          break;
+        }
+        case "hearing": {
+          // Ambient hearing (host mic as a sense): state drives the
+          // mic-live indicator; heard lines feed the hearing log.
+          const hearingState = msg.state === "listening" ? "listening" : msg.state === "error" ? "error" : "off";
+          const heardText = typeof msg.text === "string" ? msg.text : "";
+          const kind = typeof msg.kind === "string" ? msg.kind : "speech";
+          const stamp = `[${new Date().toLocaleTimeString()}]`;
+          setState(p => ({
+            ...p,
+            hearingState,
+            hearingLines: heardText
+              ? [`${stamp} 🎧 Heard (${kind}): "${heardText}"`, ...p.hearingLines.slice(0, 49)]
+              : p.hearingLines,
           }));
           break;
         }
@@ -2369,12 +2390,16 @@ interface SttMonitorCardProps {
   micStatusLabel: string;
   micSensitivity: number;
   sttEnabled: boolean;
+  hearingState: "off" | "listening" | "error";
+  hearingLines: string[];
+  hearingEnabled: boolean;
+  onHearingToggle: (value: boolean) => void;
   vu: number;
   setMic: (on: boolean) => void;
   updateSettings: (patch: Partial<ControlSettings>) => void;
 }
 
-function SttMonitorCard({ lines, micOn, micStatus, micStatusLabel, micSensitivity, sttEnabled, vu, setMic, updateSettings }: SttMonitorCardProps) {
+function SttMonitorCard({ lines, micOn, micStatus, micStatusLabel, micSensitivity, sttEnabled, hearingState, hearingLines, hearingEnabled, onHearingToggle, vu, setMic, updateSettings }: SttMonitorCardProps) {
   const toggleMic = () => {
     const next = !micOn;
     updateSettings({ microphoneEnabled: next });
@@ -2460,6 +2485,52 @@ function SttMonitorCard({ lines, micOn, micStatus, micStatusLabel, micSensitivit
             )}
           </div>
         </div>
+
+        <div className="rounded-xl border border-zinc-800/60 bg-black/60">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/60 px-4 py-2">
+            <div className="flex items-center gap-2 text-xs">
+              <Ear className="h-4 w-4" />
+              <span className="font-semibold text-zinc-200">Ambient Hearing</span>
+              {hearingState === "listening" ? (
+                <span className="inline-flex items-center gap-1.5 text-emerald-300">
+                  <span className="relative flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+                  </span>
+                  Mic live
+                </span>
+              ) : hearingState === "error" ? (
+                <span className="text-red-300">Mic error — check the console</span>
+              ) : (
+                <span className="text-zinc-500">Off — mic not listening</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => onHearingToggle(!hearingEnabled)}
+              className={`inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs transition ${
+                hearingEnabled
+                  ? "bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700/80"
+                  : "bg-emerald-600/90 text-white hover:bg-emerald-500/90"
+              }`}
+            >
+              {hearingEnabled ? "Stop Hearing" : "Enable Hearing"}
+            </button>
+          </div>
+          {!hearingEnabled ? (
+            <div className="px-4 py-3 text-xs leading-relaxed text-zinc-500">
+              Ambient hearing is off — the host mic is not listening. Turn it on and Nomous hears the room as a second sense: a noise can make it look, and something it sees can make it listen harder. Raw audio is never written to disk.
+            </div>
+          ) : hearingLines.length > 0 ? (
+            <div className="max-h-28 overflow-y-auto p-4 font-mono text-xs leading-relaxed text-zinc-100/95 whitespace-pre-wrap">
+              {hearingLines.slice(0, 5).map((line, index) => (
+                <div key={index} className="mb-1 last:mb-0 text-zinc-200">{line}</div>
+              ))}
+            </div>
+          ) : (
+            <div className="px-4 py-3 text-center text-xs text-zinc-500">Listening… nothing heard yet.</div>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -2482,6 +2553,11 @@ function ConversationQuickSettings({ settings, micOn, setMic, updateSettings, pu
   const handleSttChange = (value: boolean) => {
     updateSettings({ sttEnabled: value });
     push({ type: "toggle", what: "stt", value });
+  };
+
+  const handleHearingChange = (value: boolean) => {
+    updateSettings({ hearingEnabled: value });
+    push({ type: "toggle", what: "hearing", value });
   };
 
   const handleTtsChange = (value: boolean) => {
@@ -2518,6 +2594,13 @@ function ConversationQuickSettings({ settings, micOn, setMic, updateSettings, pu
             helper="Transcribe live voice input before routing to the model."
             checked={settings.sttEnabled}
             onCheckedChange={handleSttChange}
+          />
+          <QuickToggleRow
+            icon={Ear}
+            label="Ambient hearing"
+            helper="Host mic as a second sense — hear the room, not just chat."
+            checked={settings.hearingEnabled}
+            onCheckedChange={handleHearingChange}
           />
           <QuickToggleRow
             icon={Volume2}
@@ -3563,6 +3646,15 @@ function ControlCenter({ open, onClose, state, connect, disconnect, setMic, push
                             handleToggle("sttEnabled", value, () => push({ type: "toggle", what: "stt", value }));
                           }}/>
                         </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <div>
+                            <div className="font-medium text-zinc-200 flex items-center gap-2"><Ear className="w-4 h-4"/>Ambient Hearing</div>
+                            <p className="text-xs text-zinc-400">Host mic as a second sense — hear the room alongside vision. Off by default; raw audio is never stored.</p>
+                          </div>
+                          <Switch checked={state.settings.hearingEnabled} onCheckedChange={(value)=>{
+                            handleToggle("hearingEnabled", value, () => push({ type: "toggle", what: "hearing", value }));
+                          }}/>
+                        </div>
                       </div>
                     </CardContent>
                   </Card>
@@ -4418,6 +4510,12 @@ export default function App(){
                       micStatusLabel={micStatusLabel}
                       micSensitivity={micSensitivity}
                       sttEnabled={state.settings.sttEnabled}
+                      hearingState={state.hearingState}
+                      hearingLines={state.hearingLines}
+                      hearingEnabled={state.settings.hearingEnabled}
+                      onHearingToggle={(value) => {
+                        handleToggle("hearingEnabled", value, () => push({ type: "toggle", what: "hearing", value }));
+                      }}
                       vu={state.vu}
                       setMic={setMic}
                       updateSettings={updateSettings}

@@ -22,6 +22,7 @@ from src.backend.utils import Bridge, msg_status, msg_event
 from src.backend.protocol import msg_entities, msg_timeline, msg_search_results
 from src.backend.video import CameraLoop
 from src.backend.audio import AudioSTT
+from src.backend.hearing import AmbientHearing
 from src.backend.dreaming import Dreamer, seconds_until_next_run
 from src.backend.llm import LocalLLM
 from src.backend.memory import MemoryStore
@@ -52,6 +53,7 @@ class Server:
         self.clients: set[WebSocketServerProtocol] = set()
         self.llm: Optional[LocalLLM] = None
         self.stt: Optional[AudioSTT] = None
+        self.hearing: Optional[AmbientHearing] = None
         self.tts: Optional[PiperTTS] = None
         self.cam: Optional[CameraLoop] = None
         self._autonomous_task: Optional[asyncio.Task] = None
@@ -108,6 +110,9 @@ class Server:
             handled = True
         elif what == "dreaming" and self.dreamer:
             self.dreamer.enabled = value
+            handled = True
+        elif what == "hearing" and self.hearing:
+            await self.hearing.set_enabled(value)
             handled = True
 
         if handled:
@@ -244,6 +249,26 @@ class Server:
             # Wire up cross-references for autonomous behavior
             self.stt.set_llm(self.llm)  # STT can trigger LLM
             logger.info("STT -> LLM connection established")
+
+            # Ambient hearing — the host mic as a sense on its own,
+            # alongside vision. Reuses STT's loaded Vosk model when one
+            # exists so the acoustic model loads once; starts only when
+            # hearing.enabled is on (opt-in). A failed mic stack must
+            # never take startup down with it.
+            try:
+                self.hearing = AmbientHearing(
+                    CFG, self.bridge, vosk_model=getattr(self.stt, "model", None)
+                )
+                self.hearing.set_llm(self.llm)
+                self.llm.set_hearing(self.hearing)
+                if self.hearing.enabled:
+                    started = await self.hearing.start()
+                    logger.info("Ambient hearing %s", "started" if started else "not started (see log)")
+                else:
+                    logger.info("Ambient hearing disabled in config (toggle to enable)")
+            except Exception as exc:
+                logger.error("Ambient hearing setup failed: %s", exc)
+                self.hearing = None
             
             # Pass event loop to camera for thread-safe async calls
             self.cam = CameraLoop(CFG, self.bridge, loop)
@@ -393,6 +418,13 @@ class Server:
                 logger.info("STT stopped")
         except Exception as e:
             logger.error(f"Error stopping STT: {e}")
+
+        try:
+            if self.hearing:
+                await self.hearing.stop()
+                logger.info("Hearing stopped")
+        except Exception as e:
+            logger.error(f"Error stopping hearing: {e}")
         
         try:
             if self.llm:

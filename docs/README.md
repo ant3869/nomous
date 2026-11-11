@@ -6,6 +6,7 @@ This document provides a runtime-centric view of how Nomous stitches together th
 - **WebSocket bridge** orchestrates messages between the UI and backend subsystems.
 - **Local LLM (`llama.cpp`)** streams tokens, surfaces the model's real reasoning as thought events (speech is a separate, think-stripped channel), and can reload models at runtime.
 - **Speech input** converts PCM16 microphone data into transcripts using Vosk and automatically triggers LLM turns.
+- **Ambient hearing** captures the host mic continuously with VAD segmentation and Vosk transcription, feeding the idle loop as a second sense alongside vision — a noise can trigger a look, a new sighting can trigger listening harder. Opt-in, off by default; raw audio is never written to disk.
 - **Piper TTS** synthesises audio and triggers local playback (cross-platform via sounddevice), with toggles exposed through WebSocket parameters.
 - **Camera & vision loop** streams preview frames, detects motion/gestures, and sends real frames to the Qwen vision model for analysis.
 - **Memory store** persists interactions to SQLite and rebroadcasts the graph to the dashboard for analytics.
